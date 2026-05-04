@@ -1,0 +1,12 @@
+description = "Turn a premise into script.md + storyboard.json."
+
+prompt = """
+Args: {{args}}   (expected: <project_id> "<premise>")
+
+Follow the video-director skill in QWEN.md / .claude/skills/video-director/SKILL.md:
+1. Read projects/<id>/cast.json (run /cast-init if missing).
+2. Draft script.md, confirm with user.
+3. Compile storyboard.json.
+4. Run `videogen storyboard validate --project <id>` and `... show ...`.
+5. Wait for user go-ahead.
+"""

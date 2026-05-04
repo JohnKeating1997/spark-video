@@ -1,0 +1,26 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# 生成产物
+projects/
+cast/*.uploaded.json
+*.mp4
+*.png
+*.jpg
+*.jpeg
+*.mp3
+*.wav
+
+# 但保留 cast 示例
+!cast/.gitkeep
+!cast/README.md
+
+.DS_Store
+.idea/
+.vscode/

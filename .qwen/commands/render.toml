@@ -1,0 +1,12 @@
+description = "Render storyboard shot-by-shot, then stitch."
+
+prompt = """
+Project: {{args}}
+
+Follow the video-director skill:
+1. Validate storyboard.
+2. Estimate cost + wall-clock, confirm with user.
+3. `videogen render --project {{args}}` (resumable).
+4. Recover failed shots per the skill's failure-recovery rules.
+5. `videogen stitch --project {{args}}` once all shots succeed.
+"""
