@@ -16,13 +16,13 @@ You only:
 1. Design the **cast** (verify `./cast/` is right).
 2. Write the **script** (`script.md`) for human review.
 3. Compile the script into **`storyboard.json`** that conforms to the schema.
-4. Hand off to `videogen render`, watch state, intervene when shots fail.
+4. Hand off to `./bin/videogen render`, watch state, intervene when shots fail.
 
 Per project, all artifacts live under `./projects/<project_id>/`:
 
 ```
 projects/<id>/
-├── cast.json           ← `videogen cast init` writes this
+├── cast.json           ← `./bin/videogen cast init` writes this
 ├── script.md           ← you write
 ├── storyboard.json     ← you write
 ├── shots_state.json    ← CLI updates per shot
@@ -36,7 +36,7 @@ projects/<id>/
 Always start by running:
 
 ```bash
-videogen doctor
+./bin/videogen doctor
 ```
 
 Confirm `DASHSCOPE_API_KEY` is set and `ffmpeg` is installed before proceeding.
@@ -47,7 +47,7 @@ The user has put `<name>.jpg` + `<name>.mp3` pairs under `./cast/`.
 Run:
 
 ```bash
-videogen cast init --project <id>
+./bin/videogen cast init --project <id>
 ```
 
 Then read `projects/<id>/cast.json` and confirm with the user before continuing.
@@ -134,8 +134,8 @@ Write `projects/<id>/storyboard.json` matching `src/videogen/storyboard.py`.
 Then run:
 
 ```bash
-videogen storyboard validate --project <id>
-videogen storyboard show --project <id>
+./bin/videogen storyboard validate --project <id>
+./bin/videogen storyboard show --project <id>
 ```
 
 Show the table to the user and **wait for go-ahead** before rendering.
@@ -143,7 +143,7 @@ Show the table to the user and **wait for go-ahead** before rendering.
 ## Step 4 — Render
 
 ```bash
-videogen render --project <id>
+./bin/videogen render --project <id>
 ```
 
 This runs sequentially because each shot depends on the previous one's
@@ -158,16 +158,16 @@ skips successful clips.
 When a shot returns `FAILED`:
 1. Read the error message in `shots_state.json`.
 2. Common fixes:
-   - **Content-policy block**: rewrite the shot's prompt, soften violence/IP terms, keep the same `id`, run `videogen render --project <id> --shot <id> --force`.
-   - **Reference image rejection**: shrink/recompress the cast image, re-run `videogen cast init` to re-upload.
+   - **Content-policy block**: rewrite the shot's prompt, soften violence/IP terms, keep the same `id`, run `./bin/videogen render --project <id> --shot <id> --force`.
+   - **Reference image rejection**: shrink/recompress the cast image, re-run `./bin/videogen cast init` to re-upload.
    - **Continuity drift** (character looks different): switch model from i2v → r2v, add the character to `characters: [...]`.
 3. If a shot fails 3× in a row, **degrade**: r2v → i2v with explicit `first_frame` only, or t2v if no continuity is needed.
 
 ## Step 5 — Stitch
 
 ```bash
-videogen stitch --project <id>          # hard cuts (fast, no re-encode)
-videogen stitch --project <id> --crossfade 0.5   # 0.5s crossfade between shots
+./bin/videogen stitch --project <id>          # hard cuts (fast, no re-encode)
+./bin/videogen stitch --project <id> --crossfade 0.5   # 0.5s crossfade between shots
 ```
 
 Final video at `projects/<id>/final/<id>.mp4`.

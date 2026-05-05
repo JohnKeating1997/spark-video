@@ -3,8 +3,8 @@ description = "Scan ./cast/, upload portraits + voices, write cast.json."
 prompt = """
 Project: {{args}}
 
-1. Run `videogen doctor`.
-2. Run `videogen cast init --project {{args}}`.
+1. Run `./bin/videogen doctor`.
+2. Run `./bin/videogen cast init --project {{args}}`.
 3. Read `projects/{{args}}/cast.json` and present the cast as a table.
 4. Confirm with the user before continuing.
 

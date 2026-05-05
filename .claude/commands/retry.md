@@ -10,4 +10,4 @@ Project: $1, Shot: $2
 3. Apply one of the fixes from the `video-director` skill (prompt rewrite,
    model degrade, content-policy softening, etc.).
 4. Update `storyboard.json` if needed.
-5. Run `videogen render --project $1 --shot $2 --force`.
+5. Run `./bin/videogen render --project $1 --shot $2 --force`.

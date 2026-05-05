@@ -19,6 +19,12 @@ videos with consistent characters using **Wan 2.7** models on Alibaba DashScope.
 5. State of every project lives in `projects/<id>/`. Treat it as the source of
    truth — read it before answering "what's the status?" questions.
 
+## How to invoke the CLI from an agent shell
+
+Always call **`./bin/videogen`** (the shim — works regardless of whether the
+Python venv is activated). Never call bare `videogen` from agent-spawned shells
+unless you have first verified it's on PATH.
+
 ## Slash commands
 
 - `/cast-init <id>` — initialize cast from `./cast/`.
@@ -29,15 +35,15 @@ videos with consistent characters using **Wan 2.7** models on Alibaba DashScope.
 ## CLI quick reference
 
 ```bash
-videogen doctor                                  # env check
-videogen cast init  --project <id>
-videogen cast ls    --project <id>
-videogen storyboard validate --project <id>
-videogen storyboard show     --project <id>
-videogen render --project <id> [--shot <id>] [--force]
-videogen stitch --project <id> [--crossfade 0.5]
-videogen task query <task_id>
-videogen task wait  <task_id>
+./bin/videogen doctor                                  # env check
+./bin/videogen cast init  --project <id>
+./bin/videogen cast ls    --project <id>
+./bin/videogen storyboard validate --project <id>
+./bin/videogen storyboard show     --project <id>
+./bin/videogen render --project <id> [--shot <id>] [--force]
+./bin/videogen stitch --project <id> [--crossfade 0.5]
+./bin/videogen task query <task_id>
+./bin/videogen task wait  <task_id>
 ```
 
 ## Schema

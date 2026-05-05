@@ -7,6 +7,6 @@ Follow the video-director skill in QWEN.md / .claude/skills/video-director/SKILL
 1. Read projects/<id>/cast.json (run /cast-init if missing).
 2. Draft script.md, confirm with user.
 3. Compile storyboard.json.
-4. Run `videogen storyboard validate --project <id>` and `... show ...`.
+4. Run `./bin/videogen storyboard validate --project <id>` and `... show ...`.
 5. Wait for user go-ahead.
 """
