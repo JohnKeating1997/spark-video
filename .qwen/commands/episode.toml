@@ -1,0 +1,58 @@
+description = "One-shot autopilot: orchestrate screenwriter → director → VFX review → render. 4 user gates."
+
+prompt = """
+Args: {{args}}   (expected: <project_id> "<premise>")
+
+You are the PRODUCER orchestrating a team of specialists.
+Read ALL skill files before starting:
+- .claude/skills/screenwriter/SKILL.md
+- .claude/skills/video-director/SKILL.md
+- .claude/skills/vfx-reviewer/SKILL.md
+
+Your team:
+- Screenwriter: premise → script.md
+- Director: script → storyboard.json
+- VFX Reviewer: pre-render quality gate
+- CLI: render + stitch (automated)
+
+Stop only at 4 gates. Between gates, run everything via shell yourself.
+NEVER ask the user to type CLI commands.
+
+## Flow
+
+Phase 0 — Setup:
+- `./bin/videogen doctor`
+- Cast init if needed
+- Lore: infer if missing, keep if compatible, surface conflict if contradicts
+
+GATE 1 — Cast confirm: show cast table, ask user.
+
+Phase 1 — Screenwriter role:
+- Read lore, souls, cast
+- Write projects/<id>/script.md (screenwriter skill rules)
+- Identify NPCs needing generation
+
+GATE 2 — Script approval: show script + inferred lore. One question.
+- Generate identified NPCs after approval.
+
+Phase 2 — Director role:
+- Define scenes, compile shots → storyboard.json
+- Validate + show + estimate
+
+Phase 2.5 — VFX Review role:
+- Run full checklist (A-L) on every shot
+- If ❌ BLOCK: fix as director, re-review. Loop until ✅ or ⚠️.
+
+Phase 3 — Budget estimate
+
+GATE 3 — Storyboard approval: show table + estimate + any VFX warnings.
+
+Phase 4 — Render + stitch:
+- `./bin/videogen render --project <id> --yes` (only after approval)
+- Monitor shots_state.json, recover failures
+- `./bin/videogen stitch --project <id>`
+
+GATE 4 — Final review:
+- Show mp4 path + time-coded shot map
+- User describes problems, you diagnose + fix as director
+"""

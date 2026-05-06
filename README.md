@@ -130,6 +130,23 @@ last_frame_of_previous_shot.png` (extracted by ffmpeg), so successive shots
 visually flow. r2v even lets you stack reference_image + first_frame so you
 keep both character identity and scene continuity.
 
+**Default each shot to the model maximum (15s).** A 3-min video is ~12 shots
+not 22 — fewer cuts, fewer identity drifts, fewer API calls. The schema
+auto-clamps duration to the model ceiling.
+
+## Budget gate
+
+Before every full render the agent runs:
+
+```bash
+videogen storyboard estimate --project <id>
+```
+
+This prints shots, total duration, wall-clock estimate, and verdict. If
+total > `VIDEOGEN_LONG_CONFIRM_S` (default 180s = 3 min) the CLI exits 2 and
+the agent must explicitly confirm with the user before passing `--yes` to
+`render`. Tweak the threshold in `.env`.
+
 ## Debugging
 
 See [`DEBUGGING.md`](./DEBUGGING.md).

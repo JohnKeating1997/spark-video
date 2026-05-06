@@ -6,21 +6,49 @@ __pycache__/
 *.egg-info/
 build/
 dist/
-
-# 生成产物
-projects/
-cast/*.uploaded.json
-*.mp4
-*.png
-*.jpg
-*.jpeg
-*.mp3
-*.wav
-
-# 但保留 cast 示例
-!cast/.gitkeep
-!cast/README.md
-
 .DS_Store
 .idea/
 .vscode/
+
+# === Generated artefacts ======================================================
+# Whole projects/ tree (state, clips, frames, project-level cast assets) — never commit.
+# Project-level cast lives at projects/<id>/cast/ and is treated like global
+# ./cast/ : the .md soul cards are *also* ignored by default; opt-in with `git add -f`.
+projects/
+
+# === Cast assets ==============================================================
+# Anything users drop into cast/ (portraits, voice samples) stays local.
+# We still want to keep README + .gitkeep so the directory exists in git.
+cast/*
+!cast/.gitkeep
+!cast/README.md
+
+# === Generic media safety net =================================================
+# Scoped to cast/ and projects/ only — won't accidentally hide docs/*.png etc.
+cast/**/*.mp4
+cast/**/*.mov
+cast/**/*.png
+cast/**/*.jpg
+cast/**/*.jpeg
+cast/**/*.webp
+cast/**/*.bmp
+cast/**/*.gif
+cast/**/*.mp3
+cast/**/*.wav
+cast/**/*.aac
+cast/**/*.flac
+cast/**/*.m4a
+
+projects/**/*.mp4
+projects/**/*.mov
+projects/**/*.png
+projects/**/*.jpg
+projects/**/*.jpeg
+projects/**/*.webp
+projects/**/*.bmp
+projects/**/*.gif
+projects/**/*.mp3
+projects/**/*.wav
+projects/**/*.aac
+projects/**/*.flac
+projects/**/*.m4a

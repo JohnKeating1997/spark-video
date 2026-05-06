@@ -17,6 +17,7 @@ class Settings:
     resolution: str
     ratio: str
     clip_duration: int
+    long_confirm_s: int
     max_concurrency: int
     poll_interval: int
     projects_dir: Path
@@ -36,7 +37,8 @@ class Settings:
             base_url=base,
             resolution=os.getenv("VIDEOGEN_DEFAULT_RESOLUTION", "720P"),
             ratio=os.getenv("VIDEOGEN_DEFAULT_RATIO", "16:9"),
-            clip_duration=int(os.getenv("VIDEOGEN_DEFAULT_CLIP_DURATION", "8")),
+            clip_duration=int(os.getenv("VIDEOGEN_DEFAULT_CLIP_DURATION", "15")),
+            long_confirm_s=int(os.getenv("VIDEOGEN_LONG_CONFIRM_S", "180")),
             max_concurrency=int(os.getenv("VIDEOGEN_MAX_CONCURRENCY", "4")),
             poll_interval=int(os.getenv("VIDEOGEN_POLL_INTERVAL", "15")),
             projects_dir=Path(os.getenv("VIDEOGEN_PROJECTS_DIR", "./projects")).resolve(),

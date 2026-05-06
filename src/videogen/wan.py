@@ -29,6 +29,7 @@ def _headers(extra: dict | None = None) -> dict:
         "Authorization": f"Bearer {SETTINGS.require_api_key()}",
         "Content-Type": "application/json",
         "X-DashScope-Async": "enable",
+        "X-DashScope-OssResourceResolve": "enable",  # Required for oss:// URLs in media
     }
     if extra:
         h.update(extra)

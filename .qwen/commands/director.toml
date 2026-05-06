@@ -1,0 +1,25 @@
+description = "Director: compile script.md → storyboard.json with scenes + shots."
+
+prompt = """
+Args: {{args}}   (expected: <project_id>)
+
+You are the DIRECTOR. Read the video-director skill at
+.claude/skills/video-director/SKILL.md and follow it precisely.
+
+Steps:
+1. Verify projects/<id>/script.md exists.
+2. Read cast.json, lore (note mood_anchor), and soul cards.
+3. Scan <!-- CAST CHECK --> in script.md. Generate missing NPCs:
+   `./bin/videogen cast generate-npc --project <id> --name "<NPC>" --desc "<desc>" --mood "<anchor>"`
+   Then re-run `./bin/videogen cast init --project <id>`.
+4. Define scenes[] (location+time+situation, detailed descriptions).
+5. Compile shots[] applying 续接黄金五条, mood_anchor on every prompt,
+   dialog embedded in r2v shot prompts, protagonist stays in frame.
+6. Write projects/<id>/storyboard.json.
+7. Validate: `./bin/videogen storyboard validate --project <id>`
+8. Show: `./bin/videogen storyboard show --project <id>`
+9. Estimate: `./bin/videogen storyboard estimate --project <id>`
+   Surface numbers. Exit code 2 = over budget, flag it.
+
+You do NOT write the script or review the storyboard yourself.
+"""

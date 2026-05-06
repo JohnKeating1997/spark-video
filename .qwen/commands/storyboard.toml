@@ -1,12 +1,11 @@
-description = "Turn a premise into script.md + storyboard.json."
+description = "[Alias → /director] Compile script.md into storyboard.json."
 
 prompt = """
-Args: {{args}}   (expected: <project_id> "<premise>")
+Args: {{args}}   (expected: <project_id>)
 
-Follow the video-director skill in QWEN.md / .claude/skills/video-director/SKILL.md:
-1. Read projects/<id>/cast.json (run /cast-init if missing).
-2. Draft script.md, confirm with user.
-3. Compile storyboard.json.
-4. Run `./bin/videogen storyboard validate --project <id>` and `... show ...`.
-5. Wait for user go-ahead.
+This command is now an alias. Follow the /director workflow instead.
+
+Read the video-director skill at .claude/skills/video-director/SKILL.md
+and compile projects/<id>/script.md into storyboard.json with scene planning,
+shot compilation, validation, and estimation.
 """

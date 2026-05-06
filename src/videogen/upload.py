@@ -16,33 +16,46 @@ from .config import SETTINGS
 
 Purpose = Literal["video-generation"]
 
+# DashScope's "getPolicy" requires a model name to scope the upload certificate.
+# Any model in the same task group works; the resulting oss://dashscope-instant
+# URL is reusable across Wan models. We default to the r2v model which is the
+# primary entry point used by the cast pipeline.
+_DEFAULT_MODEL = "wan2.7-r2v"
 
-def upload(local_path: str | Path, *, purpose: Purpose = "video-generation") -> str:
+
+def upload(
+    local_path: str | Path,
+    *,
+    purpose: Purpose = "video-generation",  # noqa: ARG001 — kept for API compat
+    model: str = _DEFAULT_MODEL,
+) -> str:
     """Returns an oss:// URL usable as media `url` in Wan requests."""
     p = Path(local_path).expanduser().resolve()
     if not p.exists():
         raise FileNotFoundError(p)
 
-    dashscope.api_key = SETTINGS.require_api_key()
+    api_key = SETTINGS.require_api_key()
+    dashscope.api_key = api_key
     dashscope.base_http_api_url = SETTINGS.base_url
 
-    # The DashScope SDK exposes a file-upload helper used internally for
-    # async media inputs. Using the underlying session keeps it minimal.
-    from dashscope.common.api_key import get_default_api_key  # noqa: F401  (ensures init)
-    from dashscope.api_entities.dashscope_response import DashScopeAPIResponse  # noqa: F401
-
-    # NOTE: The exact upload helper may differ by SDK minor version. Adjust here
-    # if dashscope changes its API. See
-    # https://help.aliyun.com/zh/model-studio/get-temporary-file-url for canonical flow.
     try:
-        from dashscope.utils.oss_utils import _upload_to_oss  # type: ignore
+        from dashscope.utils.oss_utils import OssUtils
     except ImportError as e:  # pragma: no cover
         raise RuntimeError(
             "Could not locate dashscope OSS upload helper. "
-            "Upgrade dashscope (>=1.25.16) or upload the file to your own public URL."
+            "Upgrade dashscope (`pip install -U dashscope`) or upload the file "
+            "to your own public URL."
         ) from e
 
-    oss_url = _upload_to_oss(str(p), SETTINGS.require_api_key())
-    if not oss_url or not oss_url.startswith("oss://"):
-        raise RuntimeError(f"Unexpected upload result: {oss_url!r}")
+    result = OssUtils.upload(model=model, file_path=str(p), api_key=api_key)
+
+    # Different dashscope versions return either a bare oss:// URL string or a
+    # (url, policy_dict) tuple. Normalise to the URL.
+    if isinstance(result, tuple) and result:
+        oss_url = result[0]
+    else:
+        oss_url = result
+
+    if not isinstance(oss_url, str) or not oss_url.startswith("oss://"):
+        raise RuntimeError(f"Unexpected upload result: {result!r}")
     return oss_url
