@@ -50,43 +50,60 @@ cp .env.example .env  # fill in DASHSCOPE_API_KEY
 videogen doctor
 ```
 
-### 2. Drop your cast into `./cast/`
+### 2. Build a project
+
+A **project** is one show (e.g. `wulin`). It owns a single `lore.md` and a
+shared cast pool. Each **episode** (`episode-001`, `episode-002`, …) is a
+single ~3-min film inside that show.
+
+Drop your cast into per-character folders:
 
 ```
-cast/
-├── 佟掌柜.jpg
-├── 佟掌柜.mp3
-├── 钱夫人.jpg
-├── 钱夫人.mp3
-├── 莫小贝.jpg
-└── 莫小贝.mp3
+projects/wulin/
+├── lore.md                            # project-level world bible
+└── cast/                              # project mains (shared across episodes)
+    ├── 佟掌柜/
+    │   ├── cast.md                    # soul card (front-matter + body)
+    │   ├── 佟掌柜.jpg                 # any portrait filename works
+    │   └── 佟掌柜.mp3                 # any voice filename works
+    ├── 钱夫人/
+    │   ├── cast.md
+    │   ├── 定妆照.webp
+    │   └── voice.mp3
+    └── 莫小贝/
+        ├── cast.md
+        └── 莫小贝.png
 ```
 
-Pair stem `<name>.{jpg,png}` with `<name>.{mp3,wav}`. Image-only is OK (the
-character can appear but won't speak).
+Anything inside one folder belongs to that character — no name-prefix
+matching needed. If a character has multiple portraits, the CLI builds a
+multi-pane reference grid **only from images in that one folder**.
+Character grids never blend portraits across different folders.
+
+Episode-specific NPCs live under `projects/wulin/episode-001/cast/`.
 
 ### 3. Drive from Claude Code or Qwen Code
 
 ```text
-> /cast-init wulin
-> /storyboard wulin "明朝架空背景的搞笑武侠情景喜剧, 3 分钟. 佟掌柜和钱夫人结怨已深, 莫小贝要参加衡山派接任仪式..."
-> /render wulin
+> /cast-init wulin 001
+> /episode wulin 001 "明朝架空背景的搞笑武侠情景喜剧, 3 分钟. 佟掌柜和钱夫人结怨已深, 莫小贝要参加衡山派接任仪式..."
 ```
 
-The director skill writes `projects/wulin/{script.md, storyboard.json}`,
-shows you the storyboard table for sign-off, then renders + stitches into
-`projects/wulin/final/wulin.mp4`.
+The director skill writes
+`projects/wulin/episode-001/{script.md, storyboard.json}`, shows you the
+storyboard table for sign-off, then renders + stitches into
+`projects/wulin/episode-001/final/wulin-episode-001.mp4`.
 
 ### 4. Re-roll a shot
 
 ```text
-> /retry wulin S02-004
+> /retry wulin 001 S02-004
 ```
 
 Or by hand:
 
 ```bash
-videogen render --project wulin --shot S02-004 --force
+videogen render --project wulin --episode 001 --shot S02-004 --force
 ```
 
 ## Project layout
@@ -111,8 +128,19 @@ videoGen/
 │   ├── storyboard.py          # Pydantic schema (single source of truth)
 │   ├── render.py              # the render pipeline
 │   └── state.py               # per-project JSON
-├── cast/                      # users put portraits + voices here
-├── projects/<id>/             # everything generated lives here
+├── projects/<project>/        # one folder per show
+│   ├── lore.md                # project-level world bible
+│   ├── cast/<name>/           # project mains (shared across episodes)
+│   │   ├── cast.md
+│   │   ├── *.png              # portraits
+│   │   └── *.mp3              # voice samples
+│   └── <episode>/             # one folder per episode (episode-001, ...)
+│       ├── script.md
+│       ├── storyboard.json
+│       ├── cast.json          # built per episode
+│       ├── cast/<name>/       # episode-only NPCs (same folder layout)
+│       ├── cast_built/        # ASCII-renamed singletons + composite grids
+│       ├── clips/  frames/  final/  logs/
 └── Makefile
 ```
 
@@ -139,7 +167,7 @@ auto-clamps duration to the model ceiling.
 Before every full render the agent runs:
 
 ```bash
-videogen storyboard estimate --project <id>
+videogen storyboard estimate --project <id> --episode <ep>
 ```
 
 This prints shots, total duration, wall-clock estimate, and verdict. If

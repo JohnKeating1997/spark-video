@@ -12,18 +12,21 @@ selection, or rendering — that's the director's job.
 
 ## Your input
 
-Before writing, you MUST read all of:
+You operate on **one episode at a time** (`projects/<id>/<episode>/`). Before
+writing, you MUST read all of:
 
 1. **User premise** — the raw idea / 桥段 description.
-2. **Lore** (`projects/<id>/lore.md`) — the world bible: era, genre, tone,
-   forbidden terms, visual style. Run `./bin/videogen lore show --project <id>`.
+2. **Lore** (`projects/<id>/lore.md`) — the project-level world bible: era,
+   genre, tone, forbidden terms, visual style. Shared across all episodes of
+   the same show. Run `./bin/videogen lore show --project <id>`.
 3. **Soul cards** — every character's personality, catchphrases, mannerisms,
-   relationships. Run `./bin/videogen cast soul show --project <id>`.
-4. **Cast list** — who's available. Read `projects/<id>/cast.json`.
+   relationships. Run `./bin/videogen cast soul show --project <id> --episode <ep>`.
+4. **Cast list** — who's available for this episode (project mains + any
+   episode-specific NPCs). Read `projects/<id>/<episode>/cast.json`.
 
 ## Your output
 
-Write `projects/<id>/script.md`. Nothing else.
+Write `projects/<id>/<episode>/script.md`. Nothing else.
 
 ## Script format
 

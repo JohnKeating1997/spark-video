@@ -1,34 +1,35 @@
-"""Cast (角色) management.
+"""Cast (角色) management — folder-per-character.
 
-Two-tier discovery (layered):
+Filesystem convention (one folder per character):
 
-  1. **Project-level** ``projects/<id>/cast/`` — overrides matching names
-  2. **Global**       ``./cast/``               — fallback / shared pool
+    projects/<id>/cast/<name>/             ← project-level (shared across episodes)
+        cast.md                            ← soul card (front-matter + body)
+        <anything>.{jpg,png,webp}          ← portraits (>=1 required)
+        <anything>.{mp3,wav}               ← voice samples (optional)
 
-Filename convention (matched by stem before the FIRST dot):
+    projects/<id>/<episode>/cast/<name>/   ← episode-level (NPCs unique to this episode)
+        cast.md
+        <portrait>.png
 
-    cast/钱夫人.webp                ← portrait, default view
-    cast/钱夫人.正面.webp           ← portrait, tagged view
-    cast/钱夫人.侧面.webp
-    cast/钱夫人.mp3                 ← voice sample, default
-    cast/钱夫人.愤怒.mp3            ← voice sample, tagged
-    cast/钱夫人.md                  ← soul card
+The folder *name* is the character's display name. Anything inside the folder
+belongs to that character — no name-prefix matching needed.
 
-If a character has more than one portrait, the CLI builds a grid composite
-(``<id>.grid.png``) and feeds that to Wan as ``reference_image`` — Wan
-explicitly supports multi-pane reference images.
+If a character has more than one portrait inside its own folder, the CLI builds
+a grid composite (``<id>.grid.png``) and feeds that to Wan as ``reference_image``
+— Wan supports multi-pane reference images. Grids are NEVER built across
+different characters.
 
-If more than one voice sample exists, they're concatenated (and trimmed to
-≤10s, the r2v ``reference_voice`` limit) into ``<id>.mix.mp3``.
+Two-tier discovery (per episode build):
 
-Each character has an **ASCII id** used for OSS paths (so OSS URLs never
-contain Chinese — that breaks several CDN / proxy paths and is awkward for
-debugging). Display name (e.g. "钱夫人") is preserved everywhere the agent
-sees it; only the upload filename is sanitized.
+  1. **Episode tier**  ``projects/<id>/<episode>/cast/`` — adds + overrides
+  2. **Project tier**  ``projects/<id>/cast/``           — shared baseline
+
+If the same character appears in both tiers, episode files are *prepended*
+(so they are picked first as reference_image), and the episode soul card
+overrides the project one.
 
 Composites and ASCII-renamed singletons are written to
-``projects/<id>/cast_built/`` (per project, never mutating the user's
-input dirs).
+``projects/<id>/<episode>/cast_built/`` per episode (never mutating user input).
 """
 from __future__ import annotations
 
@@ -50,13 +51,14 @@ console = Console()
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 AUDIO_EXTS = {".mp3", ".wav"}
+SOUL_FILENAME = "cast.md"
 VOICE_MAX_S = 10.0  # r2v reference_voice upper bound
 
 
 @dataclass
 class Character:
     name: str
-    id: str = ""  # ASCII slug used for OSS paths; populated in init_project
+    id: str = ""  # ASCII slug used for OSS paths; populated in init_episode
     images_local: list[str] = field(default_factory=list)
     audios_local: list[str] = field(default_factory=list)
     soul_local: str | None = None
@@ -67,14 +69,14 @@ class Character:
     soul: dict[str, Any] | None = None
     composite_image: bool = False
     composite_audio: bool = False
-    source: str = "global"  # "global" | "project"
+    source: str = "project"  # "project" | "episode"
 
 
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
 
-_SKIP_NAMES = {"readme.md", "readme", ".gitkeep", ".ds_store"}
+_SKIP_BASENAMES = {"readme.md", "readme", ".gitkeep", ".ds_store", "thumbs.db"}
 
 _ID_OK = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
@@ -90,8 +92,7 @@ def derive_id(name: str, *, soul_id: str | None = None) -> str:
     Priority:
       1. soul_id (validated against [a-z0-9_-]+)
       2. name itself if already ASCII-safe
-      3. lowercased ASCII transliteration of name where possible
-      4. cast_<6-char-hash> (deterministic by name)
+      3. cast_<6-char-hash> (deterministic by name)
     """
     if soul_id:
         sid = soul_id.strip().lower()
@@ -100,91 +101,106 @@ def derive_id(name: str, *, soul_id: str | None = None) -> str:
         console.print(f"[yellow]soul id {soul_id!r} ignored: must match [a-z0-9_-]+[/]")
     if _is_ascii_safe(name):
         return name.lower()
-    # Fallback: stable hash. Display name stays in UI/prompt; this only
-    # affects local cache filename + OSS upload path.
     h = hashlib.sha256(name.encode("utf-8")).hexdigest()[:6]
     return f"cast_{h}"
 
 
-def _stem_of(path: Path) -> str:
-    """Stem before the FIRST dot.  '钱夫人.愤怒.mp3' → '钱夫人'."""
-    name = path.name
-    head = name.split(".", 1)[0]
-    return head if head else path.stem
+def _scan_character_folder(char_dir: Path) -> tuple[list[Path], list[Path], Path | None]:
+    """Walk one character folder; return (images, audios, soul_path).
 
-
-def _scan_dir(d: Path, source: str) -> dict[str, dict[str, Any]]:
-    """Collect images / audios / soul keyed by character stem."""
-    out: dict[str, dict[str, Any]] = {}
-    if not d.exists():
-        return out
-    for p in sorted(d.iterdir()):
+    Files inside subdirectories are ignored — keep the layout flat.
+    """
+    images: list[Path] = []
+    audios: list[Path] = []
+    soul: Path | None = None
+    for p in sorted(char_dir.iterdir()):
         if p.is_dir():
             continue
-        if p.name.lower() in _SKIP_NAMES:
+        if p.name.lower() in _SKIP_BASENAMES:
             continue
         ext = p.suffix.lower()
-        stem = _stem_of(p)
-        if not stem:
-            continue
-        bucket = out.setdefault(stem, {"images": [], "audios": [], "soul": None, "source": source})
         if ext in IMAGE_EXTS:
-            bucket["images"].append(p)
+            images.append(p)
         elif ext in AUDIO_EXTS:
-            bucket["audios"].append(p)
-        elif ext == ".md":
-            # only honor a clean '<name>.md', not '<name>.<tag>.md'
-            if p.name == f"{stem}.md":
-                bucket["soul"] = p
+            audios.append(p)
+        elif p.name == SOUL_FILENAME:
+            soul = p
+    return images, audios, soul
+
+
+def _scan_cast_root(root: Path, source: str) -> dict[str, dict[str, Any]]:
+    """Return ``{character_name: {images, audios, soul, source}}`` for one tier.
+
+    The character display name is the immediate subfolder name.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    if not root.exists() or not root.is_dir():
+        return out
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        if child.name.startswith(".") or child.name.lower() in _SKIP_BASENAMES:
+            continue
+        images, audios, soul = _scan_character_folder(child)
+        if not images and not soul:
+            console.print(
+                f"[yellow]skip {source}/{child.name}: no portrait and no {SOUL_FILENAME}[/]"
+            )
+            continue
+        out[child.name] = {
+            "images": images,
+            "audios": audios,
+            "soul": soul,
+            "source": source,
+        }
     return out
 
 
-def _merge(global_buckets: dict, project_buckets: dict) -> dict[str, dict[str, Any]]:
-    """Layered merge:
-       - Project tier characters not in global → added as 'project'.
-       - Project tier characters that also exist globally → MERGED:
-         project images/audios *prepended* (so they're chosen first), and any
-         project soul card overrides the global one. The merged char is
-         tagged source='project' to surface the override.
-       - Global-only characters → kept as 'global'.
+def _merge(project_buckets: dict, episode_buckets: dict) -> dict[str, dict[str, Any]]:
+    """Layered merge — episode overrides project, but never blends portraits
+    across characters (grid building stays per-folder upstream).
+
+    For a character present in both tiers:
+      * episode images/audios are *prepended* (referenced first by Wan).
+      * episode soul card overrides project soul card if present.
+      * source flips to ``episode``.
     """
     merged: dict[str, dict[str, Any]] = {}
-    for stem, b in global_buckets.items():
-        merged[stem] = {
+    for name, b in project_buckets.items():
+        merged[name] = {
             "images": list(b["images"]),
             "audios": list(b["audios"]),
             "soul": b["soul"],
-            "source": "global",
+            "source": "project",
         }
-    for stem, pb in project_buckets.items():
-        if stem in merged:
-            gb = merged[stem]
-            gb["images"] = list(pb["images"]) + gb["images"]
-            gb["audios"] = list(pb["audios"]) + gb["audios"]
-            if pb["soul"]:
-                gb["soul"] = pb["soul"]
-            gb["source"] = "project"  # project tier touched it
+    for name, eb in episode_buckets.items():
+        if name in merged:
+            pb = merged[name]
+            pb["images"] = list(eb["images"]) + pb["images"]
+            pb["audios"] = list(eb["audios"]) + pb["audios"]
+            if eb["soul"]:
+                pb["soul"] = eb["soul"]
+            pb["source"] = "episode"
         else:
-            merged[stem] = {
-                "images": list(pb["images"]),
-                "audios": list(pb["audios"]),
-                "soul": pb["soul"],
-                "source": "project",
+            merged[name] = {
+                "images": list(eb["images"]),
+                "audios": list(eb["audios"]),
+                "soul": eb["soul"],
+                "source": "episode",
             }
     return merged
 
 
 # ---------------------------------------------------------------------------
-# Composites
+# Composites (built per character — never mixing characters)
 # ---------------------------------------------------------------------------
 
 def _build_grid(images: list[Path], out: Path, *, max_side: int = 1280) -> Path:
-    """Compose N (>=2) portraits into a grid PNG. 2, 4, 9 panes supported best."""
+    """Compose N (>=2) portraits *of the same character* into a grid PNG."""
     if len(images) < 2:
-        raise ValueError("_build_grid expects 2+ images; single images should be copied directly.")
+        raise ValueError("_build_grid expects 2+ images of the same character.")
     out.parent.mkdir(parents=True, exist_ok=True)
     n = len(images)
-    # pick grid dims
     if n == 2:
         cols, rows = 2, 1
     elif n <= 4:
@@ -223,18 +239,13 @@ def _audio_duration_s(path: Path) -> float:
 
 
 def _build_voice_mix(audios: list[Path], out: Path, *, max_s: float = VOICE_MAX_S) -> Path:
-    """Concatenate 2+ audios via ffmpeg, then trim head to <= max_s.
-
-    We deliberately keep it simple — Wan only wants a *timbre* sample, not a
-    coherent dialog. If the concat overflows max_s we just cut.
-    """
+    """Concatenate 2+ audios *of the same character* via ffmpeg, trim to max_s."""
     if len(audios) < 2:
-        raise ValueError("_build_voice_mix expects 2+ audios; single audio should be copied directly.")
+        raise ValueError("_build_voice_mix expects 2+ audios of the same character.")
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg not on PATH; install with `brew install ffmpeg`.")
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    # First, concat losslessly via demuxer (best when same codec/sr).
     listfile = out.with_suffix(".concat.txt")
     listfile.write_text(
         "\n".join(f"file '{a.resolve()}'" for a in audios), encoding="utf-8"
@@ -247,7 +258,6 @@ def _build_voice_mix(audios: list[Path], out: Path, *, max_s: float = VOICE_MAX_
     ]
     subprocess.run(cmd, check=True, capture_output=True)
 
-    # Then cap at max_s.
     cmd2 = [
         "ffmpeg", "-y", "-i", str(concat_mp3),
         "-t", f"{max_s}", "-c:a", "libmp3lame", "-b:a", "192k",
@@ -264,24 +274,26 @@ def _build_voice_mix(audios: list[Path], out: Path, *, max_s: float = VOICE_MAX_
 # Public API
 # ---------------------------------------------------------------------------
 
-def discover(*, project_id: str | None = None, global_dir: Path | str = "./cast") -> list[Character]:
-    """Layered discovery — project tier overrides global tier."""
-    g_dir = Path(global_dir).resolve()
-    g_buckets = _scan_dir(g_dir, "global")
+def project_cast_dir(project_id: str) -> Path:
+    return state.project_dir(project_id) / "cast"
 
-    p_buckets: dict = {}
-    if project_id:
-        p_dir = SETTINGS.projects_dir / project_id / "cast"
-        p_buckets = _scan_dir(p_dir, "project")
 
-    merged = _merge(g_buckets, p_buckets)
+def episode_cast_dir(project_id: str, episode_id: str) -> Path:
+    return state.episode_dir(project_id, episode_id) / "cast"
+
+
+def discover(project_id: str, episode_id: str) -> list[Character]:
+    """Layered discovery — episode tier overrides project tier."""
+    proj_buckets = _scan_cast_root(project_cast_dir(project_id), "project")
+    ep_buckets = _scan_cast_root(episode_cast_dir(project_id, episode_id), "episode")
+    merged = _merge(proj_buckets, ep_buckets)
 
     chars: list[Character] = []
-    for stem, b in sorted(merged.items()):
+    for name, b in sorted(merged.items()):
         images: list[Path] = b.get("images", []) or []
         audios: list[Path] = b.get("audios", []) or []
         if not images:
-            console.print(f"[yellow]skip {stem}: no portrait[/]")
+            console.print(f"[yellow]skip {name}: no portrait[/]")
             continue
 
         soul_path: Path | None = b.get("soul")
@@ -290,27 +302,23 @@ def discover(*, project_id: str | None = None, global_dir: Path | str = "./cast"
             try:
                 soul_dict = soul_mod.parse(soul_path).to_dict()
             except Exception as e:
-                console.print(f"[red]soul parse failed for {stem}: {e}[/]")
+                console.print(f"[red]soul parse failed for {name}: {e}[/]")
 
         chars.append(
             Character(
-                name=stem,
+                name=name,
                 images_local=[str(p) for p in images],
                 audios_local=[str(p) for p in audios],
                 soul_local=str(soul_path) if soul_path else None,
                 soul=soul_dict,
-                source=b.get("source", "global"),
+                source=b.get("source", "project"),
             )
         )
     return chars
 
 
 def _ensure_ascii_basename(src: Path, build_dir: Path, *, cid: str) -> Path:
-    """If src has a non-ASCII basename, copy it to build_dir/<cid>.<ext>.
-
-    Otherwise return src as-is. Skips re-copy if a fresh-enough cached copy
-    already exists.
-    """
+    """Copy non-ASCII basename src to build_dir/<cid>.<ext>; otherwise pass through."""
     if _is_ascii_safe(src.stem) and _is_ascii_safe(src.suffix.lstrip(".")):
         return src
     dst = build_dir / f"{cid}{src.suffix.lower()}"
@@ -321,17 +329,29 @@ def _ensure_ascii_basename(src: Path, build_dir: Path, *, cid: str) -> Path:
     return dst
 
 
-def init_project(
+def init_episode(
     project_id: str,
-    cast_dir: Path | str = "./cast",
+    episode_id: str,
     *,
     do_upload: bool = True,
 ) -> dict:
-    chars = discover(project_id=project_id, global_dir=cast_dir)
-    if not chars:
-        raise RuntimeError(f"no characters found in {cast_dir} or projects/{project_id}/cast")
+    """Build cast.json for one episode.
 
-    build_dir = state.project_dir(project_id) / "cast_built"
+    Scans ``projects/<id>/cast/`` (shared) and
+    ``projects/<id>/<episode>/cast/`` (episode-only), merges by character name,
+    builds grids/voice mixes within each character folder, uploads to OSS,
+    writes ``projects/<id>/<episode>/cast.json``.
+    """
+    chars = discover(project_id, episode_id)
+    if not chars:
+        proj = project_cast_dir(project_id)
+        ep = episode_cast_dir(project_id, episode_id)
+        raise RuntimeError(
+            f"no characters found in {proj} or {ep}. "
+            f"Drop a character folder (with cast.md + a portrait) into either."
+        )
+
+    build_dir = state.episode_dir(project_id, episode_id) / "cast_built"
     build_dir.mkdir(parents=True, exist_ok=True)
 
     seen_ids: dict[str, str] = {}
@@ -340,12 +360,11 @@ def init_project(
         soul_id = (c.soul or {}).get("front", {}).get("id") if c.soul else None
         c.id = derive_id(c.name, soul_id=soul_id)
         if c.id in seen_ids and seen_ids[c.id] != c.name:
-            # collision (e.g. two distinct characters whose names hash-collide).
             extra = hashlib.sha256(c.name.encode("utf-8")).hexdigest()[6:10]
             c.id = f"{c.id}_{extra}"
         seen_ids[c.id] = c.name
 
-        # ---------- portraits → 1 file ------------------------------------
+        # ---------- portraits → 1 file (only same-character images merged) -
         if len(c.images_local) == 1:
             src = Path(c.images_local[0])
             c.image_local = str(_ensure_ascii_basename(src, build_dir, cid=c.id))
@@ -361,7 +380,6 @@ def init_project(
             c.audio_local = None
         elif len(c.audios_local) == 1:
             src = Path(c.audios_local[0])
-            # Trim single audio to ≤10s if needed (r2v limit)
             dur = _audio_duration_s(src)
             if dur > VOICE_MAX_S:
                 trimmed = build_dir / f"{c.id}.trimmed.mp3"
@@ -392,26 +410,27 @@ def init_project(
 
     payload = {
         "project_id": project_id,
-        "global_cast_dir": str(Path(cast_dir).resolve()),
-        "project_cast_dir": str((SETTINGS.projects_dir / project_id / "cast").resolve()),
+        "episode_id": state.normalize_episode_id(episode_id),
+        "project_cast_dir": str(project_cast_dir(project_id).resolve()),
+        "episode_cast_dir": str(episode_cast_dir(project_id, episode_id).resolve()),
         "characters": [asdict(c) for c in chars],
     }
-    state.write_json(project_id, "cast.json", payload)
+    state.write_json(project_id, "cast.json", payload, episode_id=episode_id)
     state.merge_state(project_id, {
         "cast_count": len(chars),
         "cast_uploaded": do_upload,
         "cast_with_soul": sum(1 for c in chars if c.soul),
-        "cast_overrides_global": sum(1 for c in chars if c.source == "project"),
-    })
+        "cast_episode_only": sum(1 for c in chars if c.source == "episode"),
+    }, episode_id=episode_id)
     return payload
 
 
-def load(project_id: str) -> dict:
-    data = state.read_json(project_id, "cast.json")
+def load(project_id: str, episode_id: str) -> dict:
+    data = state.read_json(project_id, "cast.json", episode_id=episode_id)
     if not data:
         raise FileNotFoundError(
-            f"cast.json missing for project '{project_id}'. "
-            f"Run:\n    videogen cast init --project {project_id}\n"
-            "(point --dir at your cast folder if it's not ./cast)"
+            f"cast.json missing for {project_id}/{state.normalize_episode_id(episode_id)}. "
+            f"Run:\n    ./bin/videogen cast init --project {project_id} "
+            f"--episode {episode_id}"
         )
     return data

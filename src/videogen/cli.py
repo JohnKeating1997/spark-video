@@ -2,6 +2,21 @@
 
 Designed to be driven by Claude Code / Qwen Code via Skill + Slash Commands.
 Every command produces JSON-friendly output for agent consumption.
+
+Filesystem model:
+
+  projects/<project_id>/                  ← project tier (lore + shared cast)
+      lore.md
+      cast/<character_name>/{cast.md,*.png,*.mp3}
+      <episode>/                           ← episode tier (one folder per episode)
+          script.md
+          storyboard.json
+          cast.json                        ← built per episode
+          cast/<name>/{cast.md,*.png}      ← episode-only NPCs
+          cast_built/  clips/  frames/  final/  logs/
+
+`--project / -p` selects the project. `--episode / -e` selects the episode
+(accepts ``001`` or ``episode-001``). Lore commands stay project-level.
 """
 from __future__ import annotations
 
@@ -23,7 +38,7 @@ from . import (
     wan,
 )
 from .config import SETTINGS
-from .storyboard import Scene, Shot, Storyboard
+from .storyboard import Storyboard
 
 app = typer.Typer(
     add_completion=False,
@@ -39,25 +54,30 @@ def _bail(msg: str, code: int = 1) -> None:
     console.print(f"[red]✗[/] {msg}")
     raise typer.Exit(code=code)
 
+
 # ---------- cast --------------------------------------------------------------
-cast_app = typer.Typer(help="Manage characters in ./cast")
+cast_app = typer.Typer(help="Manage characters (folder-per-character)")
 app.add_typer(cast_app, name="cast")
 
 
 @cast_app.command("init")
 def cast_init(
     project_id: str = typer.Option(..., "--project", "-p"),
-    cast_dir: Path = typer.Option(Path("./cast"), "--dir"),
+    episode_id: str = typer.Option(..., "--episode", "-e", help="episode id, e.g. 001 or episode-001"),
     no_upload: bool = typer.Option(False, "--no-upload", help="skip OSS upload (dry run)"),
 ):
-    """Scan cast/ directories (project + global), build composites, upload, write cast.json.
+    """Scan project + episode cast folders, build composites, upload, write cast.json.
 
-    Looks in two places (project tier overrides global tier):
-      • projects/<id>/cast/   ← project-specific characters
-      • ./cast/  (or --dir)   ← global pool
+    Two tiers (episode overrides project):
+      • projects/<id>/cast/<name>/             ← shared across episodes
+      • projects/<id>/<episode>/cast/<name>/   ← episode-only NPCs
+
+    Each character lives in its own folder. Composites (multi-pane grids,
+    multi-take voice mixes) are only ever built within a single character's
+    folder — never across characters.
     """
-    payload = cast_mod.init_project(project_id, cast_dir, do_upload=not no_upload)
-    table = Table(title=f"Cast for {project_id}")
+    payload = cast_mod.init_episode(project_id, episode_id, do_upload=not no_upload)
+    table = Table(title=f"Cast for {project_id}/{payload['episode_id']}")
     table.add_column("Name")
     table.add_column("Id")
     table.add_column("Source")
@@ -73,11 +93,11 @@ def cast_init(
             voice_cell = Path(c["audio_local"]).name + (f" (×{n_aud}→mix)" if c.get("composite_audio") else "")
         else:
             voice_cell = "—"
-        src = c.get("source", "global")
+        src = c.get("source", "project")
         table.add_row(
             c["name"],
             c.get("id", "?"),
-            f"[bold magenta]{src}[/]" if src == "project" else src,
+            f"[bold magenta]{src}[/]" if src == "episode" else src,
             img_cell,
             voice_cell,
             "✓" if c.get("soul") else "—",
@@ -89,13 +109,17 @@ def cast_init(
         console.print(
             f"[yellow]Tip:[/] {len(missing_soul)} character(s) without a soul card "
             f"({', '.join(missing_soul)}). Run "
-            f"`./bin/videogen cast soul template --name <NAME>` to scaffold one."
+            f"`./bin/videogen cast soul template --name <NAME> --project {project_id}` "
+            f"to scaffold one."
         )
 
 
 @cast_app.command("ls")
-def cast_ls(project_id: str = typer.Option(..., "--project", "-p")):
-    data = cast_mod.load(project_id)
+def cast_ls(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+):
+    data = cast_mod.load(project_id, episode_id)
     typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
 
 
@@ -107,11 +131,12 @@ cast_app.add_typer(soul_app, name="soul")
 @soul_app.command("show")
 def soul_show(
     project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
     name: str | None = typer.Option(None, "--name", help="single character; omit for all"),
     fmt: str = typer.Option("text", "--format", help="text | json"),
 ):
     """Print character souls in a format the director Skill can paste into prompts."""
-    data = cast_mod.load(project_id)
+    data = cast_mod.load(project_id, episode_id)
     chars = [c for c in data["characters"] if (name is None or c["name"] == name)]
     if not chars:
         console.print(f"[red]no character matched[/]"); raise typer.Exit(1)
@@ -136,29 +161,35 @@ def soul_show(
 
 @soul_app.command("template")
 def soul_template(
-    name: str = typer.Option(..., "--name", help="character stem, e.g. 钱夫人"),
-    project_id: str | None = typer.Option(
-        None, "--project", "-p",
-        help="if set, write to projects/<id>/cast/<name>.md (project-level)",
-    ),
-    cast_dir: Path | None = typer.Option(
-        None, "--dir",
-        help="explicit cast dir; default = ./cast (global) or projects/<id>/cast (when --project given)",
+    name: str = typer.Option(..., "--name", help="character display name, e.g. 钱夫人"),
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str | None = typer.Option(
+        None, "--episode", "-e",
+        help="if set, scaffold under projects/<id>/<episode>/cast/<name>/cast.md (episode-only NPC)",
     ),
     overwrite: bool = typer.Option(False, "--force"),
 ):
-    """Scaffold a soul-card template (project-level if --project given, else global)."""
-    if cast_dir is None:
-        if project_id:
-            cast_dir = SETTINGS.projects_dir / project_id / "cast"
-        else:
-            cast_dir = Path("./cast")
-    cast_dir.mkdir(parents=True, exist_ok=True)
-    out = cast_dir / f"{name}.md"
+    """Scaffold ``<cast_dir>/<name>/cast.md`` with a fillable template.
+
+    Writes to the episode cast tier when ``--episode`` is given, otherwise
+    to the project (shared) cast tier.
+    """
+    if episode_id:
+        cast_root = cast_mod.episode_cast_dir(project_id, episode_id)
+    else:
+        cast_root = cast_mod.project_cast_dir(project_id)
+    char_dir = cast_root / name
+    char_dir.mkdir(parents=True, exist_ok=True)
+    out = char_dir / cast_mod.SOUL_FILENAME
     if out.exists() and not overwrite:
         console.print(f"[red]{out} exists; use --force to overwrite[/]"); raise typer.Exit(1)
     out.write_text(_SOUL_TEMPLATE.format(name=name), encoding="utf-8")
-    console.print(f"[green]✓ wrote {out}[/]\nedit it, then re-run `./bin/videogen cast init`.")
+    console.print(f"[green]✓ wrote {out}[/]")
+    console.print(
+        f"  drop a portrait into {char_dir}/, then re-run "
+        f"`./bin/videogen cast init --project {project_id} "
+        f"--episode {episode_id or '<EPISODE>'}`."
+    )
 
 
 _SOUL_TEMPLATE = """\
@@ -207,6 +238,11 @@ dont: []
 @cast_app.command("generate-npc")
 def cast_generate_npc(
     project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str | None = typer.Option(
+        None, "--episode", "-e",
+        help="save into the episode's cast/ folder (NPC unique to this episode). "
+             "Omit to save into the project's shared cast/.",
+    ),
     name: str = typer.Option(..., "--name", help="NPC display name, e.g. 少林方丈"),
     description: str = typer.Option(
         ..., "--desc",
@@ -214,20 +250,29 @@ def cast_generate_npc(
     ),
     mood_anchor: str = typer.Option("", "--mood", help="project mood_anchor for style consistency"),
 ):
-    """Generate a portrait for an NPC using text-to-image, save to project cast/.
+    """Generate a portrait for an NPC and save into a per-character cast folder.
 
     Use this when the storyboard references characters who have dialog or are
     individually named but don't yet have a cast entry (portrait). Without a
     reference_image, the video model will generate inconsistent appearances.
     """
     out = npc_mod.generate_portrait(
-        name, description, project_id=project_id, mood_anchor=mood_anchor,
+        name, description,
+        project_id=project_id,
+        episode_id=episode_id,
+        mood_anchor=mood_anchor,
     )
     console.print(f"[green]✓ NPC portrait → {out}[/]")
-    console.print(
-        f"[dim]Run `./bin/videogen cast init --project {project_id}` to include "
-        f"this NPC in cast.json.[/]"
-    )
+    if episode_id:
+        console.print(
+            f"[dim]Run `./bin/videogen cast init --project {project_id} "
+            f"--episode {episode_id}` to include this NPC in cast.json.[/]"
+        )
+    else:
+        console.print(
+            f"[dim]Run `./bin/videogen cast init --project {project_id} "
+            f"--episode <EPISODE>` to pick this NPC up.[/]"
+        )
 
 
 # ---------- lore --------------------------------------------------------------
@@ -284,24 +329,57 @@ def lore_validate(project_id: str = typer.Option(..., "--project", "-p")):
     console.print(f"[green]✓ lore.md parses cleanly[/]")
 
 
+# ---------- episode -----------------------------------------------------------
+episode_app = typer.Typer(help="Manage episode folders within a project")
+app.add_typer(episode_app, name="episode")
+
+
+@episode_app.command("ls")
+def episode_ls(project_id: str = typer.Option(..., "--project", "-p")):
+    """List existing episode folders for a project."""
+    eps = state.list_episodes(project_id)
+    if not eps:
+        console.print(f"[yellow](no episodes in projects/{project_id})[/]")
+        raise typer.Exit(code=2)
+    for ep in eps:
+        console.print(f"  • {ep}")
+
+
+@episode_app.command("init")
+def episode_init(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+):
+    """Create projects/<id>/<episode>/ scaffold (clips/frames/final/logs/cast/)."""
+    edir = state.episode_dir(project_id, episode_id)
+    (edir / "cast").mkdir(exist_ok=True)
+    console.print(f"[green]✓ episode dir → {edir}[/]")
+
+
 # ---------- storyboard --------------------------------------------------------
 sb_app = typer.Typer(help="Storyboard validation/inspection")
 app.add_typer(sb_app, name="storyboard")
 
 
 @sb_app.command("validate")
-def sb_validate(project_id: str = typer.Option(..., "--project", "-p")):
-    """Validate ./projects/<id>/storyboard.json against the schema."""
-    raw = state.read_json(project_id, "storyboard.json")
+def sb_validate(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+):
+    """Validate ./projects/<id>/<episode>/storyboard.json against the schema."""
+    raw = state.read_json(project_id, "storyboard.json", episode_id=episode_id)
     if not raw:
-        raise typer.Exit(code=1)
+        _bail(
+            f"storyboard.json missing for {project_id}/"
+            f"{state.normalize_episode_id(episode_id)}"
+        )
     sb = Storyboard.model_validate(raw)
     console.print(
         f"[green]✓ {len(sb.shots)} shots, total ~{sb.total_duration()}s "
         f"(target {sb.target_duration_s}s)[/]"
     )
     try:
-        cast_data = cast_mod.load(project_id)
+        cast_data = cast_mod.load(project_id, episode_id)
     except FileNotFoundError as e:
         _bail(str(e))
     known = {c["name"] for c in cast_data["characters"]}
@@ -330,11 +408,12 @@ def sb_validate(project_id: str = typer.Option(..., "--project", "-p")):
 @sb_app.command("estimate")
 def sb_estimate(
     project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
     json_out: bool = typer.Option(False, "--json", help="emit machine-readable JSON for the agent"),
 ):
     """Print duration / shot count / wall-clock estimate. Emits exit code 2 if total
     exceeds VIDEOGEN_LONG_CONFIRM_S so the agent knows to ask the user."""
-    raw = state.read_json(project_id, "storyboard.json")
+    raw = state.read_json(project_id, "storyboard.json", episode_id=episode_id)
     if not raw:
         console.print("[red]storyboard.json missing[/]")
         raise typer.Exit(code=1)
@@ -352,6 +431,7 @@ def sb_estimate(
 
     payload = {
         "project_id": project_id,
+        "episode_id": state.normalize_episode_id(episode_id),
         "shots": n_shots,
         "total_duration_s": total_s,
         "target_duration_s": sb.target_duration_s,
@@ -372,6 +452,7 @@ def sb_estimate(
     else:
         table = Table(title=f"Estimate · {sb.title}")
         table.add_column("metric"); table.add_column("value")
+        table.add_row("episode", payload["episode_id"])
         table.add_row("shots", str(n_shots))
         table.add_row("total duration", f"{total_s}s ({total_s/60:.1f} min)")
         table.add_row("target", f"{sb.target_duration_s}s")
@@ -391,8 +472,11 @@ def sb_estimate(
 
 
 @sb_app.command("show")
-def sb_show(project_id: str = typer.Option(..., "--project", "-p")):
-    raw = state.read_json(project_id, "storyboard.json")
+def sb_show(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+):
+    raw = state.read_json(project_id, "storyboard.json", episode_id=episode_id)
     if not raw:
         raise typer.Exit(code=1)
     sb = Storyboard.model_validate(raw)
@@ -406,7 +490,6 @@ def sb_show(project_id: str = typer.Option(..., "--project", "-p")):
             f"`./bin/videogen lore template --project {project_id}` to add one."
         )
 
-    # Show scene definitions if present
     if sb.scenes:
         scene_table = Table(title="Scenes")
         scene_table.add_column("ID")
@@ -452,12 +535,13 @@ def sb_show(project_id: str = typer.Option(..., "--project", "-p")):
 @app.command("render")
 def render_cmd(
     project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
     shot_id: str | None = typer.Option(None, "--shot", help="render only this shot"),
     force: bool = typer.Option(False, "--force", help="ignore cache, re-render"),
     yes: bool = typer.Option(False, "--yes", "-y", help="skip the over-budget confirmation gate"),
 ):
     """Render shots into MP4 clips."""
-    raw = state.read_json(project_id, "storyboard.json")
+    raw = state.read_json(project_id, "storyboard.json", episode_id=episode_id)
     if not raw:
         console.print("[red]storyboard.json missing — run /storyboard or write it manually first.[/]")
         raise typer.Exit(code=1)
@@ -483,6 +567,7 @@ def render_cmd(
             target_duration_s=sb.target_duration_s,
             resolution=sb.resolution,
             ratio=sb.ratio,
+            scenes=sb.scenes,
             shots=[s for s in sb.shots if s.id == shot_id],
         )
         if not sb.shots:
@@ -490,7 +575,7 @@ def render_cmd(
             raise typer.Exit(code=1)
 
     try:
-        out = render_mod.render_all(project_id, sb, only_missing=not force)
+        out = render_mod.render_all(project_id, episode_id, sb, only_missing=not force)
     except FileNotFoundError as e:
         _bail(str(e))
     typer.echo(json.dumps(out, ensure_ascii=False, indent=2))
@@ -500,20 +585,22 @@ def render_cmd(
 @app.command("stitch")
 def stitch_cmd(
     project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
     crossfade: float = typer.Option(0.0, "--crossfade", help="crossfade seconds (0 = hard cut)"),
 ):
-    """Concat all rendered clips into final/<project>.mp4"""
-    raw = state.read_json(project_id, "storyboard.json")
+    """Concat all rendered clips into final/<project>-<episode>.mp4"""
+    raw = state.read_json(project_id, "storyboard.json", episode_id=episode_id)
     sb = Storyboard.model_validate(raw)
-    pdir = state.project_dir(project_id)
+    edir = state.episode_dir(project_id, episode_id)
+    ep_norm = state.normalize_episode_id(episode_id)
     clips: list[Path] = []
     for s in sb.shots:
-        p = pdir / "clips" / f"{s.id}.mp4"
+        p = edir / "clips" / f"{s.id}.mp4"
         if not p.exists():
             console.print(f"[yellow]missing {s.id}.mp4 — run `videogen render` first[/]")
             raise typer.Exit(code=1)
         clips.append(p)
-    out = pdir / "final" / f"{project_id}.mp4"
+    out = edir / "final" / f"{project_id}-{ep_norm}.mp4"
     ff.concat(clips, out, crossfade_s=crossfade)
     console.print(f"[green]✓ final video → {out}[/]")
 

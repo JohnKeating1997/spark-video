@@ -18,61 +18,77 @@ You translate narrative intent into technical execution.
 
 Before directing, read all of:
 
-1. `projects/<id>/script.md` — the screenplay (written by the screenwriter).
-2. `projects/<id>/cast.json` — all characters + their OSS URLs.
-3. `projects/<id>/lore.md` — world bible, especially `mood_anchor`,
-   `visual_style`, `palette`, `forbidden`.
-4. Soul cards — `./bin/videogen cast soul show --project <id>`.
+1. `projects/<id>/<episode>/script.md` — the screenplay (written by the screenwriter).
+2. `projects/<id>/<episode>/cast.json` — all characters + their OSS URLs (built per episode).
+3. `projects/<id>/lore.md` — world bible (project-level, shared across episodes).
+   Pay special attention to `mood_anchor`, `visual_style`, `palette`, `forbidden`.
+4. Soul cards — `./bin/videogen cast soul show --project <id> --episode <ep>`.
 
 ## Your output
 
-Write `projects/<id>/storyboard.json`, then validate it:
+Write `projects/<id>/<episode>/storyboard.json`, then validate it:
 
 ```bash
-./bin/videogen storyboard validate --project <id>
-./bin/videogen storyboard show --project <id>
+./bin/videogen storyboard validate --project <id> --episode <ep>
+./bin/videogen storyboard show     --project <id> --episode <ep>
 ```
 
 ## Mental model
 
 The CLI is your crew. You don't make API calls — the CLI does.
-Per project, all artifacts live under `./projects/<project_id>/`.
+Each **project** is one show; each **episode** (`episode-001`, `episode-002`,
+…) is a single ~3-min film inside that show that gets rendered and stitched
+on its own. Lore + the shared cast (mains) live at the project tier; the
+storyboard, script, clips, frames, and any episode-only NPCs live at the
+episode tier.
 
 ## Cast — understanding the character pipeline
 
-Cast files come from two layers:
+Cast files come from two tiers:
 
-1. `projects/<id>/cast/` — project-specific characters (overrides global)
-2. `./cast/` — global pool (shared OCs)
+1. `projects/<id>/<episode>/cast/<name>/` — episode-only NPCs (overrides)
+2. `projects/<id>/cast/<name>/`           — project-level mains (shared baseline)
 
-Each character has: portrait (required), optional voice sample, optional
-soul card. After `cast init`, `cast.json` contains OSS URLs and character
-IDs. Characters are referenced in shot prompts by their display `name`
-(e.g. `钱夫人`) + 图1/图2 syntax for r2v.
+Each character occupies its own folder, containing:
+
+- **`cast.md`** — soul card (front-matter + body).
+- One or more portrait images (`*.png|jpg|webp`).
+- Optional voice samples (`*.mp3|wav`).
+
+Multi-pane reference grids are built **only from images inside one folder**
+(i.e. one character's own takes) — the CLI never blends portraits across
+characters. After `cast init`, `cast.json` contains OSS URLs and character
+IDs. Characters are referenced in shot prompts by their display name
+(folder name, e.g. `钱夫人`) + 图1/图2 syntax for r2v.
 
 **Never invent character names not in `cast.json`.**
 
 ### NPC generation
 
 Before storyboarding, scan `script.md` for characters not in `cast.json`.
-For any NPC with dialog or individual description:
+For any NPC with dialog or individual description, save them at the **episode
+tier** (so they don't pollute other episodes):
 
 ```bash
-./bin/videogen cast generate-npc --project <id> \
+./bin/videogen cast generate-npc --project <id> --episode <ep> \
   --name "<NPC名>" \
   --desc "<外貌: 年龄、发型、服饰、体态、特征>" \
   --mood "<lore.mood_anchor>"
-./bin/videogen cast soul template --project <id> --name "<NPC名>"
+./bin/videogen cast soul template --project <id> --episode <ep> --name "<NPC名>"
 ```
 
-Then re-run `./bin/videogen cast init --project <id>`.
+Then re-run `./bin/videogen cast init --project <id> --episode <ep>`.
+
+If the NPC will recur across episodes, omit `--episode` so they go into
+`projects/<id>/cast/` instead (project-level mains).
 
 **--desc 写法**: 年龄段 + 发型 + 服饰(最重要!) + 体态 + 关键特征，
 与 lore 的 era/visual_style 一致。
 
 ## Lore — applying the world bible
 
-Read `./bin/videogen lore show --project <id>`.
+Read `./bin/videogen lore show --project <id>`. (Lore is project-scoped — one
+`lore.md` shared across all episodes.)
 
 The single most important field: **`mood_anchor`** — a short style sentence
 that MUST be appended to **every shot prompt** verbatim. This is the #1

@@ -19,6 +19,7 @@ from rich.console import Console
 
 from . import state, upload as up
 from .config import SETTINGS
+from .cast import episode_cast_dir, project_cast_dir
 
 console = Console()
 
@@ -46,16 +47,26 @@ def generate_portrait(
     description: str,
     *,
     project_id: str,
+    episode_id: str | None = None,
     size: str = "1280*1280",
     negative_prompt: str = "低分辨率, 错误, 最差质量, 残缺, 多余的手指, 现代服装, 西装",
     mood_anchor: str = "",
 ) -> Path:
-    """Generate a portrait for an NPC and save to project cast dir.
+    """Generate a portrait for an NPC and save to a per-character cast folder.
+
+    The portrait is written to:
+      • ``projects/<id>/<episode>/cast/<name>/<name>.png`` if ``episode_id`` is
+        given (recommended for episode-only NPCs).
+      • ``projects/<id>/cast/<name>/<name>.png`` otherwise (shared NPC).
+
+    The folder is created if missing — so a subsequent ``cast init`` picks
+    the new character up automatically.
 
     Args:
         name: Character display name (e.g. '少林方丈')
         description: Detailed appearance description for t2i prompt
         project_id: Target project
+        episode_id: Target episode (optional — omit for project-level NPC)
         size: Image size (default square 1280x1280 for cast portrait)
         negative_prompt: What to avoid
         mood_anchor: Project mood anchor to append for style consistency
@@ -68,9 +79,12 @@ def generate_portrait(
     console.print(f"[cyan]generating portrait for {name}…[/]")
     image_url = _call_t2i(prompt, negative_prompt=negative_prompt, size=size)
 
-    cast_dir = SETTINGS.projects_dir / project_id / "cast"
-    cast_dir.mkdir(parents=True, exist_ok=True)
-    out_path = cast_dir / f"{name}.png"
+    if episode_id:
+        char_dir = episode_cast_dir(project_id, episode_id) / name
+    else:
+        char_dir = project_cast_dir(project_id) / name
+    char_dir.mkdir(parents=True, exist_ok=True)
+    out_path = char_dir / f"{name}.png"
 
     _download_image(image_url, out_path)
     console.print(f"[green]✓ portrait saved → {out_path}[/]")
@@ -205,6 +219,7 @@ def generate_npcs_for_project(
     project_id: str,
     npcs: list[dict[str, str]],
     *,
+    episode_id: str | None = None,
     mood_anchor: str = "",
 ) -> list[Path]:
     """Batch generate portraits for multiple NPCs.
@@ -213,6 +228,7 @@ def generate_npcs_for_project(
         project_id: Target project
         npcs: List of dicts with 'name' and 'description' keys.
               description should detail appearance: age, clothing, accessories, etc.
+        episode_id: Save into the episode's cast folder when given.
         mood_anchor: From lore.md, for style consistency.
 
     Returns:
@@ -223,7 +239,10 @@ def generate_npcs_for_project(
         name = npc["name"]
         desc = npc["description"]
         p = generate_portrait(
-            name, desc, project_id=project_id, mood_anchor=mood_anchor
+            name, desc,
+            project_id=project_id,
+            episode_id=episode_id,
+            mood_anchor=mood_anchor,
         )
         paths.append(p)
     return paths

@@ -1,10 +1,11 @@
 ---
 description: One-shot autopilot — orchestrate screenwriter → director → VFX reviewer → render pipeline. User only approves at 4 gates.
-argument-hint: <project_id> "<premise>"
+argument-hint: <project_id> <episode_id> "<premise>"
 ---
 
 Project: $1
-Premise: $2
+Episode: $2
+Premise: $3
 
 You are the **PRODUCER** — you orchestrate a team of specialists to turn the
 user's premise into a finished mp4. You do NOT write the script, storyboard,
@@ -15,9 +16,9 @@ or review yourself. You coordinate.
 | Role | Skill | What they do |
 |------|-------|-------------|
 | 编剧 (Screenwriter) | `screenwriter` | Premise → `script.md` |
-| 导演 (Director) | `video-director` | Script → `storyboard.json` (scenes + shots) |
+| 导演 (Director)     | `video-director` | Script → `storyboard.json` (scenes + shots) |
 | 视效审核 (VFX Reviewer) | `vfx-reviewer` | Pre-render quality gate on storyboard |
-| CLI (Crew) | `videogen` commands | Render + stitch (automated) |
+| CLI (Crew)          | `videogen` commands | Render + stitch (automated) |
 
 **You stop at exactly 4 gates. Between gates, drive everything via shell.**
 
@@ -26,22 +27,30 @@ or review yourself. You coordinate.
 ## Phase 0 — Environment (no user input)
 
 1. `./bin/videogen doctor` — bail loudly if it fails.
-2. If `projects/$1/cast.json` is missing → `./bin/videogen cast init --project $1`.
-3. Lore handling — 3-case rule:
+2. `./bin/videogen episode init --project $1 --episode $2` — make sure the
+   episode folder exists (idempotent).
+3. If `projects/$1/$2/cast.json` is missing → `./bin/videogen cast init --project $1 --episode $2`.
+4. Lore handling — 3-case rule (lore lives at the **project** tier and is
+   shared across all episodes):
    - **Missing/empty** → infer values from premise (genre, era, visual_style,
      palette, mood_anchor, forbidden). Run
      `./bin/videogen lore template --project $1 --title "<inferred>"`,
      fill the file, then `./bin/videogen lore validate --project $1`.
      Show inferred lore at GATE 2.
-   - **Exists and compatible** → DO NOT modify. This is a new episode.
+   - **Exists and compatible** → DO NOT modify. New episode picks it up.
    - **Exists and contradicts** → surface the conflict, let user pick.
 
 ---
 
 ## GATE 1 · Cast confirm
 
-Show `projects/$1/cast.json` as a table. Call out any premise characters
+Show `projects/$1/$2/cast.json` as a table. Call out any premise characters
 not in cast. Ask: keep going, add files, or adjust premise?
+
+If the user wants to add a recurring main character, drop a folder into
+`projects/$1/cast/<name>/` (with `cast.md` + portrait). For an
+episode-only NPC, use `projects/$1/$2/cast/<name>/`. Then re-run
+`./bin/videogen cast init --project $1 --episode $2`.
 
 ---
 
@@ -50,7 +59,7 @@ not in cast. Ask: keep going, add files, or adjust premise?
 Read the `screenwriter` skill, then:
 
 1. Read lore, soul cards, cast.json.
-2. Write `projects/$1/script.md` following the screenwriter skill.
+2. Write `projects/$1/$2/script.md` following the screenwriter skill.
 3. Extract the CAST CHECK block — identify NPCs needing generation.
 
 ---
@@ -60,13 +69,15 @@ Read the `screenwriter` skill, then:
 Show the script + inferred lore (if new). Ask: tone OK? dialog OK? pacing OK?
 One question, one gate.
 
-If NPCs were identified, generate them now:
+If NPCs were identified, generate them now (default to the **episode** tier
+unless the user says they recur):
 
 ```bash
-./bin/videogen cast generate-npc --project $1 --name "<NPC>" --desc "<desc>" --mood "<anchor>"
-./bin/videogen cast soul template --project $1 --name "<NPC>"
+./bin/videogen cast generate-npc --project $1 --episode $2 \
+  --name "<NPC>" --desc "<desc>" --mood "<anchor>"
+./bin/videogen cast soul template --project $1 --episode $2 --name "<NPC>"
 # ... repeat for each NPC ...
-./bin/videogen cast init --project $1
+./bin/videogen cast init --project $1 --episode $2
 ```
 
 ---
@@ -76,8 +87,8 @@ If NPCs were identified, generate them now:
 Read the `video-director` skill, then:
 
 1. Read the approved script, cast, lore, souls.
-2. Define scenes, then compile shots into `projects/$1/storyboard.json`.
-3. Validate: `./bin/videogen storyboard validate --project $1`.
+2. Define scenes, then compile shots into `projects/$1/$2/storyboard.json`.
+3. Validate: `./bin/videogen storyboard validate --project $1 --episode $2`.
 
 ---
 
@@ -100,8 +111,8 @@ Fix warnings if straightforward. Log remaining warnings for the user.
 ## Phase 3 — Budget estimate (no user input)
 
 ```bash
-./bin/videogen storyboard estimate --project $1
-./bin/videogen storyboard show --project $1
+./bin/videogen storyboard estimate --project $1 --episode $2
+./bin/videogen storyboard show     --project $1 --episode $2
 ```
 
 ---
@@ -119,11 +130,11 @@ Ask: render now?
 ## Phase 4 — Render + Stitch (CLI automation)
 
 ```bash
-./bin/videogen render --project $1 --yes
+./bin/videogen render --project $1 --episode $2 --yes
 ```
 
-This blocks 30–90 min. Every 3–5 shots, peek `projects/$1/shots_state.json`
-and post a 1-line status update.
+This blocks 30–90 min. Every 3–5 shots, peek
+`projects/$1/$2/shots_state.json` and post a 1-line status update.
 
 On FAILED shots — apply director skill's failure recovery:
 rewrite prompt / degrade model / soften content / retry.
@@ -132,14 +143,14 @@ Don't stop unless 3 strategies fail on the same shot.
 After all succeed:
 
 ```bash
-./bin/videogen stitch --project $1
+./bin/videogen stitch --project $1 --episode $2
 ```
 
 ---
 
 ## GATE 4 · Final review
 
-Show `projects/$1/final/$1.mp4` path + time-coded shot map:
+Show `projects/$1/$2/final/$1-$2.mp4` path + time-coded shot map:
 
 ```
 0:00-0:15  S01-001  空镜·会场

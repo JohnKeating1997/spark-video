@@ -55,12 +55,13 @@ def _shot_state_key(shot_id: str) -> str:
 
 def render_shot(
     project_id: str,
+    episode_id: str,
     shot: Shot,
     *,
     prev_last_frame_url: str | None,
     storyboard: Storyboard,
 ) -> dict:
-    cast_data = cast_mod.load(project_id)
+    cast_data = cast_mod.load(project_id, episode_id)
     model, media = _media_for_shot(shot, cast_data, prev_last_frame_url)
 
     input_obj: dict[str, Any] = {"prompt": shot.prompt}
@@ -83,7 +84,7 @@ def render_shot(
     resp = wan.submit(model, input=input_obj, parameters=parameters)
     task_id = resp["output"]["task_id"]
 
-    state.merge_state(project_id, {f"task:{shot.id}": task_id})
+    state.merge_state(project_id, {f"task:{shot.id}": task_id}, episode_id=episode_id)
 
     result = wan.wait(task_id)
     status = result.get("output", {}).get("task_status")
@@ -93,11 +94,11 @@ def render_shot(
         return {"shot_id": shot.id, "status": status, "error": msg, "task_id": task_id}
 
     video_url = result["output"]["video_url"]
-    pdir = state.project_dir(project_id)
-    clip_path = pdir / "clips" / f"{shot.id}.mp4"
+    edir = state.episode_dir(project_id, episode_id)
+    clip_path = edir / "clips" / f"{shot.id}.mp4"
     ff.download(video_url, clip_path)
 
-    last_frame = pdir / "frames" / f"{shot.id}_last.png"
+    last_frame = edir / "frames" / f"{shot.id}_last.png"
     ff.extract_last_frame(clip_path, last_frame)
 
     out = {
@@ -112,18 +113,26 @@ def render_shot(
     return out
 
 
-def render_all(project_id: str, storyboard: Storyboard, *, only_missing: bool = True) -> dict:
+def render_all(
+    project_id: str,
+    episode_id: str,
+    storyboard: Storyboard,
+    *,
+    only_missing: bool = True,
+) -> dict:
     """Render all shots sequentially (last_frame chain demands this).
 
     `only_missing=True` skips shots whose clip already exists — enables resume.
     """
-    pdir = state.project_dir(project_id)
-    shots_state = state.read_json(project_id, "shots_state.json", default={}) or {}
+    edir = state.episode_dir(project_id, episode_id)
+    shots_state = state.read_json(
+        project_id, "shots_state.json", episode_id=episode_id, default={}
+    ) or {}
 
     prev_last_frame_url: str | None = None
     for shot in storyboard.shots:
-        clip_path = pdir / "clips" / f"{shot.id}.mp4"
-        last_frame = pdir / "frames" / f"{shot.id}_last.png"
+        clip_path = edir / "clips" / f"{shot.id}.mp4"
+        last_frame = edir / "frames" / f"{shot.id}_last.png"
 
         if only_missing and clip_path.exists() and last_frame.exists():
             console.print(f"[dim]· skip {shot.id} (cached)[/]")
@@ -132,27 +141,24 @@ def render_all(project_id: str, storyboard: Storyboard, *, only_missing: bool = 
                 "clip_path": str(clip_path),
                 "last_frame_path": str(last_frame),
             }
-            # still need a usable URL for the next iteration — upload the cached frame
             prev_last_frame_url = _ensure_frame_url(shots_state[shot.id])
             continue
 
-        # Upload prev last frame if we have one but no URL yet
         prev_url = prev_last_frame_url
         if prev_url is None and shot.use_prev_last_frame_as_first:
-            # First shot of the run; that's fine — fall back to no first_frame.
             pass
 
         out = render_shot(
-            project_id, shot, prev_last_frame_url=prev_url, storyboard=storyboard
+            project_id, episode_id, shot,
+            prev_last_frame_url=prev_url, storyboard=storyboard,
         )
         shots_state[shot.id] = out
-        state.write_json(project_id, "shots_state.json", shots_state)
+        state.write_json(project_id, "shots_state.json", shots_state, episode_id=episode_id)
 
         if out["status"] != "SUCCEEDED":
             console.print(f"[red]aborting at {shot.id}[/]")
             break
 
-        # Upload last frame so next iteration can pass it via URL
         prev_last_frame_url = _ensure_frame_url(out)
 
     return shots_state

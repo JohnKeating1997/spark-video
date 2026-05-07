@@ -1,12 +1,18 @@
-description = "Scan ./cast/, upload portraits + voices, write cast.json."
+description = "Scan project + episode cast folders, upload portraits + voices, write cast.json."
 
 prompt = """
-Project: {{args}}
+Args: {{args}}   (expected: <project_id> <episode_id>)
 
-1. Run `./bin/videogen doctor`.
-2. Run `./bin/videogen cast init --project {{args}}`.
-3. Read `projects/{{args}}/cast.json` and present the cast as a table.
-4. Confirm with the user before continuing.
+1. `./bin/videogen doctor`.
+2. `./bin/videogen episode init --project <p> --episode <e>` (idempotent).
+3. `./bin/videogen cast init    --project <p> --episode <e>`.
+   This scans:
+     • projects/<p>/cast/<name>/         (project mains, shared)
+     • projects/<p>/<e>/cast/<name>/     (episode-only NPCs)
+   Composites are built per-character (never blending different characters).
+4. Read `projects/<p>/<e>/cast.json` and present the cast as a table.
+5. Confirm with the user before continuing.
 
-Follow the directing rules in CLAUDE.md / QWEN.md / .claude/skills/video-director/SKILL.md.
+Follow the directing rules in CLAUDE.md / QWEN.md /
+.claude/skills/video-director/SKILL.md.
 """

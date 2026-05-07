@@ -14,21 +14,21 @@ fixes them.
 
 ## Your input
 
-Read all of these before reviewing:
+Reviews are scoped to a single episode. Read all of these before reviewing:
 
-1. `projects/<id>/storyboard.json` — the storyboard to review.
-2. `projects/<id>/script.md` — the screenplay (to verify dialog coverage).
-3. `projects/<id>/cast.json` — all available characters + their OSS URLs.
-4. `projects/<id>/lore.md` — world bible, especially `mood_anchor`,
-   `visual_style`, `forbidden`.
-5. Soul cards — `./bin/videogen cast soul show --project <id>`.
+1. `projects/<id>/<episode>/storyboard.json` — the storyboard to review.
+2. `projects/<id>/<episode>/script.md` — the screenplay (to verify dialog coverage).
+3. `projects/<id>/<episode>/cast.json` — characters available for this episode.
+4. `projects/<id>/lore.md` — project-level world bible (shared across episodes).
+   Especially `mood_anchor`, `visual_style`, `forbidden`.
+5. Soul cards — `./bin/videogen cast soul show --project <id> --episode <ep>`.
 
 ## Your output
 
 Print a structured review report to the user. Format:
 
 ```
-## VFX Review Report — <project_id>
+## VFX Review Report — <project_id>/<episode_id>
 
 ### Summary
 - Total shots: N
@@ -166,14 +166,14 @@ Rule 6 from the director's playbook — cross-shot recall:
 ## How to run
 
 ```bash
-# Read all necessary context
-./bin/videogen storyboard show --project <id>
-./bin/videogen lore show --project <id>
-./bin/videogen cast soul show --project <id>
+./bin/videogen storyboard show --project <id> --episode <ep>
+./bin/videogen lore show       --project <id>
+./bin/videogen cast soul show  --project <id> --episode <ep>
 ```
 
-Then read `projects/<id>/storyboard.json` and `projects/<id>/script.md`
-directly, and apply the checklist above systematically.
+Then read `projects/<id>/<episode>/storyboard.json` and
+`projects/<id>/<episode>/script.md` directly, and apply the checklist above
+systematically.
 
 ## DON'Ts
 
