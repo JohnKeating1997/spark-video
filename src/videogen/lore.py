@@ -21,6 +21,34 @@ from .soul import _split_frontmatter  # reuse the same parser
 LORE_FILENAME = "lore.md"
 
 
+class ImagerySystem(BaseModel):
+    """Visual motif system (山音"意象体系").
+
+    The director should land each motif in the storyboard at least N times
+    (short film: N>=2). Highlight elements are the *parts* of frame the
+    camera should isolate (props, body parts, costume details).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    motifs: list[str] = Field(default_factory=list)
+    highlight_elements: list[str] = Field(default_factory=list)
+
+
+class DualPacing(BaseModel):
+    """Dual-track pacing (山音"双轨节奏").
+
+    *external* describes plot tightness (起承转合 + 快慢中).
+    *internal* describes the protagonist's emotional curve.
+    Mismatch between the two is a hallmark of mature storytelling.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    external: str | None = None
+    internal: str | None = None
+
+
 class LoreFront(BaseModel):
     """Validated YAML front-matter for a lore card."""
 
@@ -40,6 +68,22 @@ class LoreFront(BaseModel):
     # The single style sentence the director Skill should append to EVERY
     # shot prompt for cohesion. Keep it short (<60 chars).
     mood_anchor: str | None = None
+
+    # ── 山音融合：导演定调系统 ──────────────────────────────
+    # One-sentence dramatic action: the *engine* of the story.
+    # Example: "钱夫人为找回面子, 反复挑衅郭芙蓉, 终被一拳放倒"
+    dramatic_action: str | None = None
+
+    # Visual motif system; richer than mood_anchor.
+    imagery_system: ImagerySystem | None = None
+
+    # Director-style reference fusion.
+    # Example: "宁浩式群像喜剧节奏 + 张艺谋色彩饱和度"
+    director_reference: str | None = None
+
+    # External plot pacing + internal emotional pacing (two tracks).
+    dual_pacing: DualPacing | None = None
+    # ──────────────────────────────────────────────────────
 
     # World rules — fed into negative_prompt-ish guidance and content checks.
     forbidden: list[str] = Field(default_factory=list)
@@ -105,6 +149,24 @@ def render_for_prompt(lore: Lore) -> str:
 
     if f.mood_anchor:
         parts.append(f"- 风格锚词 (每段 prompt 末尾必带): \"{f.mood_anchor}\"")
+    if f.dramatic_action:
+        parts.append(f"- 核心戏剧动作: {f.dramatic_action}")
+    if f.director_reference:
+        parts.append(f"- 导演定调: {f.director_reference}")
+    if f.dual_pacing and (f.dual_pacing.external or f.dual_pacing.internal):
+        ext = f.dual_pacing.external or "—"
+        intn = f.dual_pacing.internal or "—"
+        parts.append(f"- 双轨节奏: 外部「{ext}」/ 内部「{intn}」")
+    if f.imagery_system:
+        if f.imagery_system.motifs:
+            parts.append(
+                "- 视觉母题 (storyboard 中至少落地 2 次): "
+                + "; ".join(f.imagery_system.motifs)
+            )
+        if f.imagery_system.highlight_elements:
+            parts.append(
+                "- 强化视觉元素: " + "; ".join(f.imagery_system.highlight_elements)
+            )
     if f.visual_style:
         parts.append(f"- 视觉风格: {f.visual_style}")
     if f.camera_language:
@@ -153,6 +215,38 @@ palette: []        # color names or hex, e.g. [warm-amber, faded-red, ink-black]
 # Example: "明朝架空, 喜剧光线, 暖色调, 略夸张的肢体语言"
 mood_anchor:
 
+# --- 山音融合：导演定调系统（可选，留空向后兼容）------------------
+# 一句话核心戏剧动作 —— 故事的引擎。
+# Example: "钱夫人为找回面子, 反复挑衅郭芙蓉, 终被一拳放倒"
+dramatic_action:
+
+# 视觉母题系统 —— 比 mood_anchor 更具故事性的"符号"。
+# 导演会让母题在 storyboard 中至少落地 2 次（短片）。
+# imagery_system:
+#   motifs:                 # 贯穿全片的视觉意象
+#     - "搓动的围裙"
+#     - "翻飞的红盖头"
+#   highlight_elements:     # 需要镜头特别强化的元素
+#     - "发饰特写"
+#     - "权杖象征"
+imagery_system:
+  motifs: []
+  highlight_elements: []
+
+# 导演风格融合 —— 用 1-2 位真实导演的方法论锚定调性。
+# Example: "宁浩式群像喜剧节奏 + 张艺谋色彩饱和度"
+director_reference:
+
+# 双轨节奏 —— 外部情节松紧 + 内部情感曲线。
+# 错位是高级叙事手法（外部慢但内部紧 / 外部紧但内部空）。
+# dual_pacing:
+#   external: "起-缓 / 承-紧 / 转-爆 / 合-顿"
+#   internal: "面子-愠怒-爆发-错愕"
+dual_pacing:
+  external:
+  internal:
+# --- /山音融合 -------------------------------------------------
+
 # --- world rules ---
 forbidden: []      # e.g. [真实历史人物姓名, IP 直接同名, 血腥镜头]
 allowed: []        # e.g. [夸张武打, 第四面墙吐槽]
@@ -184,4 +278,9 @@ default_ratio: "16:9"
 
 - 严禁:
 - 我喜欢:
+
+## 视觉母题说明 (可选)
+
+(简单说明每个 motif 在故事里承载的含义。例如 "搓动的围裙" 承载
+钱夫人的紧张与虚荣 —— 每次出现都强化她想维持体面但已经心虚的状态。)
 """

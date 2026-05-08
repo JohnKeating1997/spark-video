@@ -41,6 +41,25 @@ class Shot(BaseModel):
     prompt: str = Field(description="Wan prompt — describe action, camera, mood")
     negative_prompt: str | None = None
 
+    # ── 山音融合 ──────────────────────────────────────────
+    # Why this shot exists in the story. Specific to visual means
+    # (e.g. "用低角度仰拍 + 缓慢推近放大钱夫人的优越感"), not vague labels
+    # (e.g. "展现冲突"). The CLI doesn't render this — it's metadata for
+    # the director's own discipline + VFX reviewer's quality gate.
+    narrative_purpose: str | None = Field(
+        default=None,
+        description=(
+            "山音融合：每个 shot 必填。具体到视听手段, 不写'展现冲突'等空话。"
+        ),
+    )
+    # Optional shot-group affiliation (山音"镜头组"概念)。同组镜头共同
+    # 完成一个叙事单元 (蒙太奇组 / 递进组 / 因果组 / 对比组)。
+    shot_group_id: str | None = Field(default=None, description="e.g. 'G01'")
+    shot_group_role: Literal[
+        "建立", "递进", "反应", "对比", "收尾"
+    ] | None = None
+    # ──────────────────────────────────────────────────────
+
     # Character references — names must match cast.json
     characters: list[str] = Field(default_factory=list, description="cast names featured")
 
@@ -138,6 +157,35 @@ class Storyboard(BaseModel):
     def lint(self) -> list[str]:
         """Soft continuity / pacing checks. Never blocks render."""
         warnings: list[str] = []
+
+        # 山音融合: every shot should have a non-trivial narrative_purpose.
+        # Soft warning only — never blocks render. VFX reviewer enforces.
+        _vague = {
+            "", "展现冲突", "推进剧情", "推进故事", "建立场景",
+            "渲染气氛", "表现情绪", "tbd", "TBD", "todo", "TODO",
+        }
+        missing_purpose: list[str] = []
+        vague_purpose: list[str] = []
+        for s in self.shots:
+            if not s.narrative_purpose or not s.narrative_purpose.strip():
+                missing_purpose.append(s.id)
+            elif s.narrative_purpose.strip() in _vague or len(s.narrative_purpose.strip()) < 8:
+                vague_purpose.append(s.id)
+        if missing_purpose:
+            warnings.append(
+                f"narrative_purpose missing on {len(missing_purpose)} shot(s): "
+                f"{', '.join(missing_purpose[:5])}"
+                f"{'...' if len(missing_purpose) > 5 else ''}. "
+                f"山音铁律：每个 shot 必填具体叙事目的。"
+            )
+        if vague_purpose:
+            warnings.append(
+                f"narrative_purpose too vague on {len(vague_purpose)} shot(s): "
+                f"{', '.join(vague_purpose[:5])}"
+                f"{'...' if len(vague_purpose) > 5 else ''}. "
+                f"要具体到视听手段, 例如 '用低角度仰拍 + 缓慢推近放大钱夫人的优越感'。"
+            )
+
         # First shot cannot chain.
         if self.shots and self.shots[0].use_prev_last_frame_as_first:
             warnings.append(

@@ -11,22 +11,45 @@ on top of **Wan 2.7** (Alibaba DashScope).
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Claude Code / Qwen Code  (LLM director)                     │
-│  ├── Skill: video-director  →  rules, prompt patterns        │
-│  └── Slash commands  →  /cast-init  /storyboard  /render     │
+│  Claude Code / Qwen Code  (LLM orchestration)                │
+│  Producer (.claude/commands/episode.md)                      │
+│   ├── Screenwriter (wraps 山音 编剧大师)  →  scenes/scene-NN.md│
+│   ├── Director     (wraps 山音 导演大师)  →  scenes/scene-NN.json│
+│   ├── VFX Reviewer (opt-in, --vfx)        →  pre-render gate  │
+│   └── Video Reviewer                       →  per-clip 0-10 score│
 └──────────────┬──────────────────────────────────────────────┘
                │ shell calls, JSON in / JSON out
                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  videogen CLI  (Python · deterministic engine)               │
+│  videogen CLI  (Python · parallel engine)                    │
+│  scene   →  per-scene scaffold / ready / compile             │
 │  cast    →  scan ./cast, OSS upload, cast.json               │
 │  wan     →  submit + poll t2v / i2v / r2v / videoedit        │
+│  render  →  chain-DAG slicing, ThreadPoolExecutor parallel,  │
+│             versioned attempts, qwen3-vl-plus review,        │
+│             qwen-text auto-rewrite, escalation               │
 │  ffmpeg  →  last-frame extraction, concat, crossfade         │
-│  state   →  per-project JSON, resumable                      │
+│  state   →  per-episode JSON, attempts[] + winner_version    │
 └──────────────┬──────────────────────────────────────────────┘
                ▼
-       Wan API (DashScope) + ffmpeg + OSS
+       Wan API + qwen-vl + qwen-text (DashScope) + ffmpeg + OSS
 ```
+
+### Three places it runs in parallel
+
+1. **Editor ↔ Director, by scene** — producer fans out so the director
+   storyboards scene N while the editor is still drafting scene N+1.
+   Coordinated via per-scene files + a `scene-NN.ready` sentinel.
+2. **Render, by chain group** — `videogen render` slices shots into
+   chain groups (gating on `use_prev_last_frame_as_first`) and renders
+   groups concurrently up to `VIDEOGEN_MAX_CONCURRENCY`. Within a chain
+   group, still sequential because each shot's first_frame = the
+   previous shot's last_frame.
+3. **Per-clip review + retry** — every clip is scored by qwen3-vl-plus
+   immediately after render. Below threshold → CLI auto-rewrites the
+   prompt via qwen-text and re-renders (`S01-001-ver2.mp4`,
+   `-ver3.mp4`, …). After `VIDEOGEN_MAX_RETRY` rounds, picks best-of-N
+   and flags the shot for director rewrite (producer escalation).
 
 ## Why CLI + Skill, not MCP?
 
@@ -48,6 +71,9 @@ brew install ffmpeg python@3.11
 python -m pip install -e .
 cp .env.example .env  # fill in DASHSCOPE_API_KEY
 videogen doctor
+
+# One-time: pull the wrapped 山音 skills (screenwriter + director)
+bash scripts/install-shanyin-skills.sh
 ```
 
 ### 2. Build a project
@@ -100,11 +126,29 @@ storyboard table for sign-off, then renders + stitches into
 > /retry wulin 001 S02-004
 ```
 
-Or by hand:
+Or by hand (full re-render including review loop):
 
 ```bash
-videogen render --project wulin --episode 001 --shot S02-004 --force
+videogen render --project wulin --episode 001 --shot S02-004 \
+                --force --reset-attempts
 ```
+
+Just re-score an existing clip without re-rendering:
+
+```bash
+videogen review --project wulin --episode 001 --shot S02-004 [--ver 2]
+```
+
+### 5. Inspect the parallel render plan
+
+```bash
+videogen render-graph --project wulin --episode 001
+```
+
+Shows how the storyboard slices into chain groups. Each group runs in
+parallel up to `VIDEOGEN_MAX_CONCURRENCY`. If you see one giant chain,
+push back to the director — the first shot of every scene should set
+`use_prev_last_frame_as_first: false`.
 
 ## Project layout
 
@@ -113,34 +157,44 @@ videoGen/
 ├── pyproject.toml             # Python deps
 ├── .env.example
 ├── AGENTS.md / CLAUDE.md / QWEN.md
-├── api-references/wan/        # Wan 2.7 API docs (provided)
+├── api-references/dashscope/  # Wan 2.7 + qwen API docs
+├── scripts/
+│   └── install-shanyin-skills.sh   # one-time: pull wrapped 山音 skills
 ├── .claude/
-│   ├── skills/video-director/ SKILL.md     # the director's brain
-│   └── commands/              # /cast-init /storyboard /render /retry
+│   ├── skills/
+│   │   ├── screenwriter/      # wraps references/shanyin-screenwriting
+│   │   ├── video-director/    # wraps references/shanyin-director
+│   │   ├── vfx-reviewer/      # opt-in pre-render gate
+│   │   └── video-reviewer/    # post-render qwen-vl scoring
+│   └── commands/              # /episode /scene-write /scene-direct /render /review /retry
 ├── .qwen/commands/            # mirror for Qwen Code (TOML)
 ├── src/videogen/
 │   ├── cli.py                 # Typer entry — `videogen`
 │   ├── config.py              # env + region routing
 │   ├── cast.py                # ./cast → cast.json
 │   ├── upload.py              # local file → oss:// URL
-│   ├── wan.py                 # submit + wait
+│   ├── wan.py                 # Wan submit + wait
+│   ├── review.py              # qwen3-vl-plus per-clip scoring
+│   ├── rewrite.py             # qwen-text auto prompt rewrite
+│   ├── scene.py               # per-scene scaffold / ready / compile
 │   ├── ffmpeg.py              # frame extraction + concat
 │   ├── storyboard.py          # Pydantic schema (single source of truth)
-│   ├── render.py              # the render pipeline
-│   └── state.py               # per-project JSON
+│   ├── render.py              # chain-DAG parallel render + review loop
+│   └── state.py               # per-episode JSON
 ├── projects/<project>/        # one folder per show
 │   ├── lore.md                # project-level world bible
 │   ├── cast/<name>/           # project mains (shared across episodes)
-│   │   ├── cast.md
-│   │   ├── *.png              # portraits
-│   │   └── *.mp3              # voice samples
 │   └── <episode>/             # one folder per episode (episode-001, ...)
-│       ├── script.md
-│       ├── storyboard.json
-│       ├── cast.json          # built per episode
-│       ├── cast/<name>/       # episode-only NPCs (same folder layout)
-│       ├── cast_built/        # ASCII-renamed singletons + composite grids
-│       ├── clips/  frames/  final/  logs/
+│       ├── scenes/scene-NN.{md,ready,json}   # editor↔director per-scene pipeline
+│       ├── script.md / storyboard.json       # merged from scenes/*
+│       ├── cast.json + cast/<npc>/           # per-episode cast
+│       ├── clips/<id>-verN.mp4               # versioned attempts
+│       ├── clips/<id>.mp4                    # winner copy (used by stitch)
+│       ├── frames/<id>-verN_last.png
+│       ├── reviews/<id>-verN.json            # {score, breakdown, critique}
+│       ├── shots_state.json                  # attempts[] + winner_version
+│       ├── needs_director_rewrite.json       # only when render exits 3
+│       └── final/  logs/
 └── Makefile
 ```
 
@@ -185,3 +239,15 @@ Wan 2.7 is billed by output seconds × resolution. A 3-min 720p video with
 ~22 shots typically costs around the same as 3 minutes of single-shot 720p
 generation. Re-rolls double the bill, so use `candidates: 1` for fillers and
 `2-4` only for hero shots.
+
+The per-clip review (qwen3-vl-plus) and auto-rewriter (qwen-plus) add
+modest token cost per shot. Disable for cheap iteration:
+
+```bash
+videogen render --project <p> --episode <e> --no-review
+# or
+videogen render --project <p> --episode <e> --no-auto-rewrite
+```
+
+Or set `VIDEOGEN_REVIEW_MODEL=` (empty) / `VIDEOGEN_REWRITE_MODEL=` in
+`.env` to disable globally.

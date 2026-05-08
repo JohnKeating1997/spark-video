@@ -1,168 +1,263 @@
 ---
-description: One-shot autopilot — orchestrate screenwriter → director → VFX reviewer → render pipeline. User only approves at 4 gates.
-argument-hint: <project_id> <episode_id> "<premise>"
+description: One-shot autopilot — orchestrate screenwriter ↔ director (per-scene parallel) → render (chain-DAG parallel + per-clip review) → stitch. VFX review is opt-in. User confirms at 4 gates.
+argument-hint: <project_id> <episode_id> "<premise>" [--vfx]
 ---
 
 Project: $1
 Episode: $2
 Premise: $3
+Optional flags: $4
 
-You are the **PRODUCER** — you orchestrate a team of specialists to turn the
-user's premise into a finished mp4. You do NOT write the script, storyboard,
-or review yourself. You coordinate.
+You are the **PRODUCER**. You orchestrate a multi-agent team. You do NOT
+write narrative, storyboard, or review — you coordinate. You stop at
+exactly **4 gates**. Between gates, drive everything via shell + Task
+subagents.
 
 **Your team:**
 
-| Role | Skill | What they do |
-|------|-------|-------------|
-| 编剧 (Screenwriter) | `screenwriter` | Premise → `script.md` |
-| 导演 (Director)     | `video-director` | Script → `storyboard.json` (scenes + shots) |
-| 视效审核 (VFX Reviewer) | `vfx-reviewer` | Pre-render quality gate on storyboard |
-| CLI (Crew)          | `videogen` commands | Render + stitch (automated) |
-
-**You stop at exactly 4 gates. Between gates, drive everything via shell.**
-
----
-
-## Phase 0 — Environment (no user input)
-
-1. `./bin/videogen doctor` — bail loudly if it fails.
-2. `./bin/videogen episode init --project $1 --episode $2` — make sure the
-   episode folder exists (idempotent).
-3. If `projects/$1/$2/cast.json` is missing → `./bin/videogen cast init --project $1 --episode $2`.
-4. Lore handling — 3-case rule (lore lives at the **project** tier and is
-   shared across all episodes):
-   - **Missing/empty** → infer values from premise (genre, era, visual_style,
-     palette, mood_anchor, forbidden). Run
-     `./bin/videogen lore template --project $1 --title "<inferred>"`,
-     fill the file, then `./bin/videogen lore validate --project $1`.
-     Show inferred lore at GATE 2.
-   - **Exists and compatible** → DO NOT modify. New episode picks it up.
-   - **Exists and contradicts** → surface the conflict, let user pick.
+| Role | Skill file | What they do |
+|------|------------|--------------|
+| 编剧 | `.claude/skills/screenwriter/SKILL.md` (wraps 山音 screenwriting-master) | premise → `scenes/scene-NN.md` (one scene per file) |
+| 导演 | `.claude/skills/video-director/SKILL.md` (wraps 山音 director-master) | scene-NN.md → `scenes/scene-NN.json` (storyboard fragment) |
+| VFX 审核 | `.claude/skills/vfx-reviewer/SKILL.md` | pre-render storyboard quality gate. **DEFAULT: bypassed.** Run only if `$4` contains `--vfx`. |
+| 视频审核 | `.claude/skills/video-reviewer/SKILL.md` | per-clip qwen3-vl-plus quality gate, runs inside `render`. |
+| CLI | `videogen` | render + stitch + review (automated). |
 
 ---
 
-## GATE 1 · Cast confirm
-
-Show `projects/$1/$2/cast.json` as a table. Call out any premise characters
-not in cast. Ask: keep going, add files, or adjust premise?
-
-If the user wants to add a recurring main character, drop a folder into
-`projects/$1/cast/<name>/` (with `cast.md` + portrait). For an
-episode-only NPC, use `projects/$1/$2/cast/<name>/`. Then re-run
-`./bin/videogen cast init --project $1 --episode $2`.
-
----
-
-## Phase 1 — Screenwriter (switch to screenwriter role)
-
-Read the `screenwriter` skill, then:
-
-1. Read lore, soul cards, cast.json.
-2. Write `projects/$1/$2/script.md` following the screenwriter skill.
-3. Extract the CAST CHECK block — identify NPCs needing generation.
-
----
-
-## GATE 2 · Script approval
-
-Show the script + inferred lore (if new). Ask: tone OK? dialog OK? pacing OK?
-One question, one gate.
-
-If NPCs were identified, generate them now (default to the **episode** tier
-unless the user says they recur):
+## Phase 0 — environment (no user input)
 
 ```bash
-./bin/videogen cast generate-npc --project $1 --episode $2 \
-  --name "<NPC>" --desc "<desc>" --mood "<anchor>"
-./bin/videogen cast soul template --project $1 --episode $2 --name "<NPC>"
-# ... repeat for each NPC ...
+./bin/videogen doctor
+./bin/videogen episode init --project $1 --episode $2
+test -f projects/$1/$2/cast.json || ./bin/videogen cast init --project $1 --episode $2
+```
+
+Lore handling — 3-case rule (lore is project-tier, shared across episodes):
+
+- **Missing/empty** → infer values from premise (genre, era, visual_style,
+  palette, mood_anchor, forbidden). Run
+  `./bin/videogen lore template --project $1 --title "<inferred>"`,
+  fill the file, then `./bin/videogen lore validate --project $1`.
+  Surface inferred lore at GATE 2.
+- **Exists & compatible** → don't modify.
+- **Exists & contradicts** → surface conflict, ask user.
+
+Verify Shanyin skills are installed; if not:
+
+```bash
+test -d .claude/skills/screenwriter/references/shanyin-screenwriting \
+  && test -d .claude/skills/video-director/references/shanyin-director \
+  || bash scripts/install-shanyin-skills.sh
+```
+
+---
+
+## GATE 1 · cast confirm
+
+Show `projects/$1/$2/cast.json` as a table. Call out characters from
+the premise that aren't in cast yet. Ask the user: keep going, add
+files (project mains → `projects/$1/cast/<name>/`; episode-only NPCs →
+`projects/$1/$2/cast/<name>/`), or adjust the premise?
+
+After user confirms / adds:
+
+```bash
 ./bin/videogen cast init --project $1 --episode $2
 ```
 
 ---
 
-## Phase 2 — Director (switch to director role)
+## Phase 1 — Screenwriter ↔ Director per-scene parallel pipeline
 
-Read the `video-director` skill, then:
+This is the new core. Editor and director work concurrently — director
+processes scene N as soon as it is marked ready, while editor drafts
+scene N+1.
 
-1. Read the approved script, cast, lore, souls.
-2. Define scenes, then compile shots into `projects/$1/$2/storyboard.json`.
-3. Validate: `./bin/videogen storyboard validate --project $1 --episode $2`.
+### Step 1.0 — decide scene count
 
----
+Read `lore.duration_target_s` (default 180s). Decide a target scene
+count: `60s → 2-3`, `180s → 4-6`, `300s → 6-10`, `600s → 10-18`. The
+exact number is the screenwriter's call; you give an upper bound.
 
-## Phase 2.5 — VFX Review (switch to vfx-reviewer role)
+### Step 1.1 — first scene (sequential break-in)
 
-Read the `vfx-reviewer` skill, then:
+Run **only the screenwriter** for scene 1 first, so the director has
+enough context to define `direction.json` (the per-episode 导演定调).
 
-1. Run the full checklist (A–L) on every shot.
-2. Produce the structured review report.
+Spawn one screenwriter Task subagent (subagent_type=`generalPurpose`):
 
-**If verdict is ❌ BLOCK:**
-Switch back to director role, fix all critical issues, re-validate, and
-re-run VFX review. Loop until verdict is ✅ or ⚠️.
+> Read `.claude/skills/screenwriter/SKILL.md` and follow it. Write only
+> scene 1 of project `$1`, episode `$2`, from this premise: $3.
+> Output to `projects/$1/$2/scenes/scene-01.md`. After writing, run
+> `./bin/videogen scene ready --project $1 --episode $2 --num 1`.
+> Do not draft scene 2 — the producer will fan out from here.
 
-**If verdict is ⚠️ PASS WITH WARNINGS:**
-Fix warnings if straightforward. Log remaining warnings for the user.
+### Step 1.2 — fan out: parallel batches per scene
 
----
+For scene N = 2, 3, … until both editor and director are done, send
+**one message with two Task tool calls in parallel**:
 
-## Phase 3 — Budget estimate (no user input)
+- Screenwriter Task → write `scene-N.md`, then `scene ready --num N`.
+  Provide the same premise + the prior scenes' `.md` for continuity
+  context. If N is the LAST scene, also remind it to append the
+  `<!-- CAST CHECK -->` block.
+- Director Task → process `scene-(N-1).md`. It must:
+  1. Wait until `scenes/scene-(N-1).ready` exists (poll briefly if needed).
+  2. Read `.claude/skills/video-director/SKILL.md` and follow it.
+  3. If `direction.json` doesn't exist (only true on N=2), produce it first.
+  4. Read `scenes/scene-(N-1).md` and emit `scenes/scene-(N-1).json`.
+
+### Step 1.3 — close out
+
+After the screenwriter's last scene is done, run **one final director Task**
+in its own batch to process the last scene.
+
+### Step 1.4 — merge + validate
 
 ```bash
+./bin/videogen scene status   --project $1 --episode $2
+./bin/videogen scene compile  --project $1 --episode $2
+./bin/videogen storyboard validate --project $1 --episode $2
+```
+
+If validate fails → switch to director role, fix the offending
+`scenes/scene-NN.json`, re-compile.
+
+---
+
+## GATE 2 · script approval
+
+Show `projects/$1/$2/script.md` (the merged screenplay) + inferred lore
+(if it was new). Ask: tone OK? dialog OK? pacing OK? **One question, one gate.**
+
+If the screenplay's `<!-- CAST CHECK -->` flagged 有名 NPCs not in cast,
+generate them now (default to episode tier):
+
+```bash
+./bin/videogen cast generate-npc --project $1 --episode $2 \
+    --name "<NPC>" --desc "<desc>" --mood "<anchor>"
+./bin/videogen cast soul template --project $1 --episode $2 --name "<NPC>"
+./bin/videogen cast init --project $1 --episode $2
+```
+
+If user requested narrative changes, re-spawn the affected
+`scene-NN.md` editor subagent + the matching director subagent + recompile.
+
+---
+
+## Phase 2.5 — VFX review (OPT-IN, default skipped)
+
+Only run this phase if `$4` contains `--vfx`. Otherwise skip directly
+to Phase 3.
+
+If `--vfx`:
+1. Spawn a Task subagent that reads `.claude/skills/vfx-reviewer/SKILL.md`
+   and runs the full A–L checklist on the merged storyboard.
+2. If verdict is ❌ BLOCK → switch to director, fix critical issues,
+   re-validate, re-run VFX. Loop until ✅ or ⚠️.
+3. ⚠️ warnings: log for the user but don't block.
+
+---
+
+## Phase 3 — budget estimate (no user input)
+
+```bash
+./bin/videogen render-graph        --project $1 --episode $2
 ./bin/videogen storyboard estimate --project $1 --episode $2
 ./bin/videogen storyboard show     --project $1 --episode $2
 ```
 
+`render-graph` shows how many parallel chain groups exist — this is
+the parallel render plan. If it's almost a single giant chain, push
+back to the director: too many `use_prev_last_frame_as_first: true`.
+
 ---
 
-## GATE 3 · Storyboard approval
+## GATE 3 · storyboard approval
 
-Show the storyboard table + estimate (shots, duration, wall-clock, cost).
-If `estimate` exited 2 (over budget), explicitly call out the cost.
-Also show any remaining VFX warnings.
+Show:
+- the storyboard table (`storyboard show`),
+- the chain-group plan (`render-graph`),
+- the budget estimate (shots, duration, wall-clock, cost),
+- any remaining VFX warnings (only if `--vfx` was used).
+
+If `estimate` exited 2 (over budget), call out the cost explicitly.
 
 Ask: render now?
 
 ---
 
-## Phase 4 — Render + Stitch (CLI automation)
+## Phase 4 — render + per-clip review (CLI automation)
 
 ```bash
 ./bin/videogen render --project $1 --episode $2 --yes
 ```
 
-This blocks 30–90 min. Every 3–5 shots, peek
-`projects/$1/$2/shots_state.json` and post a 1-line status update.
+This blocks. The CLI:
+- Runs chain groups in parallel up to `VIDEOGEN_MAX_CONCURRENCY`.
+- Reviews every clip with qwen3-vl-plus.
+- Auto-rewrites prompts on REJECT for the first N-1 retries.
+- On 3rd-round failure, picks the best-of-N attempt as a fallback winner
+  AND flags the shot for director rewrite.
 
-On FAILED shots — apply director skill's failure recovery:
-rewrite prompt / degrade model / soften content / retry.
-Don't stop unless 3 strategies fail on the same shot.
+Exit codes:
 
-After all succeed:
+| Code | Meaning | Producer action |
+|------|---------|-----------------|
+| 0 | All shots accepted (or cached) | proceed to stitch |
+| 2 | Over budget | re-prompt the user |
+| 3 | One or more shots flagged `needs_director_rewrite` | escalation loop ↓ |
+
+### Phase 4.1 — escalation loop (only if exit 3)
+
+When exit 3 is returned, read
+`projects/$1/$2/needs_director_rewrite.json` and for each shot listed:
+
+1. Spawn a **video-reviewer Task subagent** to synthesise the three
+   rounds of critique into `reviews/escalation-<SHOT>.md`. (Reads
+   `.claude/skills/video-reviewer/SKILL.md` § Escalation.)
+2. Spawn a **director Task subagent** with the escalation report as
+   input. It edits the matching shot in `storyboard.json` (prompt /
+   model / duration / characters / seed), then exits.
+3. Run:
+   ```bash
+   ./bin/videogen render --project $1 --episode $2 --shot <SHOT> \
+       --force --reset-attempts --yes
+   ```
+4. Repeat until exit 0 or up to **2 escalation passes** per shot. After
+   that, give the user the best-of-N clip and a written report; ask
+   them to decide.
+
+After all shots succeed:
 
 ```bash
 ./bin/videogen stitch --project $1 --episode $2
 ```
 
+`stitch` reads `winner_path` per shot from `shots_state.json` and
+concatenates winners only.
+
 ---
 
-## GATE 4 · Final review
+## GATE 4 · final review
 
-Show `projects/$1/$2/final/$1-$2.mp4` path + time-coded shot map:
+Show `projects/$1/$2/final/$1-$2.mp4` path + a time-coded shot map:
 
 ```
-0:00-0:15  S01-001  空镜·会场
-0:15-0:30  S01-002  钱夫人冲入
+0:00-0:15  S01-001  ver1  空镜·会场
+0:15-0:30  S01-002  ver2  钱夫人冲入   ← winner is ver2 (auto-retry)
 ...
 ```
+
+Highlight any shot whose winner was below threshold (best-of-N fallback).
 
 Ask: "请看完后告诉我具体问题 — 比如 '0:30 角色脸变了'、'挨打那段没看到
 钱夫人'、'最后嘴没动' 等。我来定位是哪个 shot 并修复。"
 
-Do NOT ask the user to pick shot IDs. They describe symptoms; you diagnose
-which shot(s) to fix (as director), re-render with `--force`, then re-stitch.
+User describes symptoms; you diagnose which shot(s), spawn director
+subagent to edit, re-render with `--shot <id> --force --reset-attempts`,
+then re-stitch.
 
 ---
 
@@ -171,5 +266,5 @@ which shot(s) to fix (as director), re-render with `--force`, then re-stitch.
 - Brief status lines, not paragraphs.
 - Show tables, not raw JSON.
 - One question per gate.
-- When switching roles (screenwriter → director → reviewer), announce it
-  briefly: "编剧阶段完成，现在切换到导演角色开始分镜..."
+- When fanning out to subagents, announce it: "scene 3 编剧 + scene 2 导演 并行启动..."
+- When escalating: "shot S01-002 三轮均不达标 (最佳 6.8), 升级到导演重改 prompt..."

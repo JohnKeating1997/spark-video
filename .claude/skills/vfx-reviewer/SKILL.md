@@ -163,6 +163,70 @@ Rule 6 from the director's playbook — cross-shot recall:
   does N+1's prompt mention 钱夫人 is still in frame?
 - Missing recall for important characters → **WARNING**.
 
+### M. 叙事目的 narrative_purpose 质量（山音融合 / Critical）
+
+每个 shot 必须有具体的 `narrative_purpose` 字段，且不能是空话。
+
+- **CRITICAL**：`narrative_purpose` 缺失或为空字符串。
+- **CRITICAL**：`narrative_purpose` 命中下列空话黑名单 ——
+  `"展现冲突"`、`"推进剧情"`、`"推进故事"`、`"建立场景"`、
+  `"渲染气氛"`、`"表现情绪"`、`"TBD"`、`"TODO"`。
+- **WARNING**：`narrative_purpose` 长度 < 8 字符（一定是空话变体）。
+- **WARNING**：多个 shot 共用同一 `narrative_purpose` 文案 —— 说明导演
+  在偷懒，没有为每个 shot 单独设计目的。
+- **判定原则**：合格的 narrative_purpose 应能回答"这个 shot 不存在故事
+  会丢什么"。如果回答不上来 → **WARNING**。
+
+参考的合格写法：
+- "用低角度仰拍 + 缓慢推近, 放大钱夫人挑衅时的优越感"
+- "通过她偷瞄郭芙蓉的眼神, 暗示她已经心虚"
+- "从笑意到僵硬, 完成面子→错愕的内部节奏切换"
+
+### N. 出彩设计密度（山音 Double Check 第三层 / Suggestion → Warning）
+
+山音铁律：每场戏应有 ~20% 的镜头是"出彩设计"——非常规景别、非常规
+运镜、出彩的细节捕捉、意料之外的剪辑节奏。
+
+- 统计每个 scene 内的 shot 数 N。
+- 统计该 scene 内有多少 shot 的 prompt 含**非常规元素**（参考下面清单）。
+  - 大特写、极远景、贴地仰拍、俯瞰俯拍、镜面反射、剪影、过肩、跟拍
+    长镜、定格、慢动作、错位构图、第四面墙吐槽……
+- 出彩比 < 10% → **WARNING**（"全场都是中景正反打"问题）。
+- 出彩比 10%-20% → **SUGGESTION**。
+- 出彩比 ≥ 20% → 合格。
+- 出彩点应**落在叙事重心 shot**（高潮 / 情感转折），而不是开场建场。
+  落错位置 → **WARNING**。
+
+### O. 视觉母题落地（山音 imagery_system / Critical）
+
+如果 `lore.imagery_system.motifs` 非空，导演必须让每个 motif 在
+storyboard 中至少出现一次实物落地：
+
+- 短片（≤300s）：每个 motif 至少在 2 个 shot 的 prompt 里被原文或近义
+  词点到。motif 落地数 < 2 → **CRITICAL**。
+- 长片（>300s）：每个 motif 至少 5 次。< 5 次 → **WARNING**。
+- 落地必须是具体可拍的画面，不是抽象提及（例如 motif 是 "搓动的围裙"，
+  prompt 里要写 `"图1 钱夫人 双手反复搓动腰间围裙"`，而不是 `"她紧张地
+  搓着围裙"` 这种带情绪标签的）。
+- `lore.imagery_system.highlight_elements` 同样规则，但门槛减半（短片
+  ≥1，长片 ≥2）。
+
+### P. 对白镜头多样化（山音 / Warning）
+
+整集 r2v dialog shot（即同时含 `characters` 中 2 人 + 显式对白文本的
+shot）的"非正反打比例"必须 ≥ 30%。
+
+判定方法：
+- **正反打 shot 标志**：prompt 同时含「图1」和「图2」+ 景别为中景 /
+  近景 + 不含跟拍 / 过肩 / 镜面 / 旁白错位关键词。
+- **非正反打 shot 标志**：prompt 含下列任一关键词 ——
+  `跟拍`、`并肩`、`边走边说`、`过肩`、`OS`、`POV`、`镜中`、`镜面`、
+  `反射`、`画外音`、`画外台词`、`渐入`、`大特写` + 单角色出现。
+- 整集 dialog shot 数 ≤ 1 → 跳过本检查。
+- 非正反打比例 < 30% → **WARNING**：列出全部正反打 shot id, 建议
+  把其中至少 N 个改为对白武器 2/3/4/5（详见 director skill 的对白
+  镜头多样化章节及 references/shot-design.md §五）。
+
 ## How to run
 
 ```bash

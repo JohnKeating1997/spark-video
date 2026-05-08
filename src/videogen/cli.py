@@ -33,6 +33,8 @@ from . import (
     lore as lore_mod,
     npc as npc_mod,
     render as render_mod,
+    review as review_mod,
+    scene as scene_mod,
     soul as soul_mod,
     state,
     wan,
@@ -509,16 +511,20 @@ def sb_show(
 
     table = Table(title=sb.title)
     table.add_column("ID"); table.add_column("Scene"); table.add_column("Dur")
-    table.add_column("Model"); table.add_column("Cast"); table.add_column("Prompt(60)")
+    table.add_column("Model"); table.add_column("Cast")
+    table.add_column("Purpose(40)"); table.add_column("Prompt(50)")
     table.add_column("Anchor")
     anchor = (lore.front.mood_anchor if lore else None) or ""
     for s in sb.shots:
         anchor_hit = "✓" if (anchor and anchor in s.prompt) else ("—" if anchor else " ")
+        np = s.narrative_purpose or ""
+        np_cell = (np[:40] + "…") if len(np) > 40 else (np or "[red]—[/]")
         table.add_row(
             s.id, s.scene, f"{s.duration}s",
             s.model.replace("wan2.7-", ""),
             ",".join(s.characters) or "—",
-            (s.prompt[:60] + "…") if len(s.prompt) > 60 else s.prompt,
+            np_cell,
+            (s.prompt[:50] + "…") if len(s.prompt) > 50 else s.prompt,
             anchor_hit,
         )
     console.print(table)
@@ -529,6 +535,108 @@ def sb_show(
                 f"[yellow]·[/] {len(misses)}/{len(sb.shots)} shots missing the mood anchor: "
                 f"{', '.join(misses[:6])}{'…' if len(misses) > 6 else ''}"
             )
+    no_purpose = [s.id for s in sb.shots if not s.narrative_purpose]
+    if no_purpose:
+        console.print(
+            f"[yellow]·[/] {len(no_purpose)}/{len(sb.shots)} shots missing narrative_purpose: "
+            f"{', '.join(no_purpose[:6])}{'…' if len(no_purpose) > 6 else ''}"
+        )
+
+
+# ---------- scene -------------------------------------------------------------
+scene_app = typer.Typer(help="Per-scene screenplay/storyboard fragments (parallel pipeline)")
+app.add_typer(scene_app, name="scene")
+
+
+@scene_app.command("scaffold")
+def scene_scaffold(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+    num: int = typer.Option(..., "--num", "-n", help="scene number (1, 2, 3, ...)"),
+    force: bool = typer.Option(False, "--force"),
+):
+    """Create empty scenes/scene-NN.md template for the screenwriter."""
+    out = scene_mod.scaffold_scene(project_id, episode_id, num, force=force)
+    if out.exists() and not force:
+        # scaffold_scene returns the path either way; figure out if we wrote.
+        pass
+    console.print(f"[green]✓ scene template → {out}[/]")
+    console.print(
+        f"  fill it in, then signal ready: "
+        f"[bold]./bin/videogen scene ready --project {project_id} "
+        f"--episode {episode_id} --num {num}[/]"
+    )
+
+
+@scene_app.command("ready")
+def scene_ready_cmd(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+    num: int = typer.Option(..., "--num", "-n"),
+):
+    """Touch scenes/scene-NN.ready — sentinel that director can pick up scene NN."""
+    try:
+        sentinel = scene_mod.mark_scene_ready(project_id, episode_id, num)
+    except FileNotFoundError as e:
+        _bail(str(e))
+    console.print(f"[green]✓ ready → {sentinel.name}[/]")
+
+
+@scene_app.command("status")
+def scene_status_cmd(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """Show per-scene progress (md / ready / json)."""
+    payload = scene_mod.status(project_id, episode_id)
+    if json_out:
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    table = Table(title=f"scenes · {payload['episode_id']}")
+    table.add_column("scene")
+    table.add_column("script (.md)")
+    table.add_column("ready")
+    table.add_column("storyboard (.json)")
+    if not payload["scenes"]:
+        console.print("[yellow](no scenes/ files yet)[/]")
+        return
+    for s in payload["scenes"]:
+        table.add_row(
+            f"scene-{s['num']:02d}",
+            "✓" if s["md"] else "—",
+            "✓" if s["ready"] else "—",
+            "✓" if s["json"] else "—",
+        )
+    console.print(table)
+
+
+@scene_app.command("compile")
+def scene_compile_cmd(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+    title: str | None = typer.Option(None, "--title"),
+    synopsis: str | None = typer.Option(None, "--synopsis"),
+    target: int | None = typer.Option(None, "--target", help="target duration in seconds"),
+):
+    """Merge scenes/scene-*.md → script.md and scenes/scene-*.json → storyboard.json."""
+    try:
+        result = scene_mod.compile_episode(
+            project_id, episode_id,
+            title=title, synopsis=synopsis, target_duration_s=target,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _bail(str(e))
+    console.print(
+        f"[green]✓ {result.scenes} scenes / {result.shots} shots / "
+        f"~{result.total_duration_s}s total[/]"
+    )
+    console.print(f"  script     → {result.script_path}")
+    console.print(f"  storyboard → {result.storyboard_path}")
+    if result.warnings:
+        console.print("[yellow]continuity warnings (won't block render):[/]")
+        for w in result.warnings:
+            console.print(f"  ⚠ {w}")
 
 
 # ---------- render ------------------------------------------------------------
@@ -539,8 +647,21 @@ def render_cmd(
     shot_id: str | None = typer.Option(None, "--shot", help="render only this shot"),
     force: bool = typer.Option(False, "--force", help="ignore cache, re-render"),
     yes: bool = typer.Option(False, "--yes", "-y", help="skip the over-budget confirmation gate"),
+    review: bool = typer.Option(True, "--review/--no-review", help="qwen3-vl-plus per-clip review (default on)"),
+    score_threshold: float | None = typer.Option(None, "--score-threshold", help="ACCEPT if score >= threshold (default from .env)"),
+    max_retry: int | None = typer.Option(None, "--max-retry", help="max attempts per shot (default 3 from .env)"),
+    auto_rewrite: bool = typer.Option(True, "--auto-rewrite/--no-auto-rewrite", help="qwen-text auto rewrite between retries"),
+    concurrency: int | None = typer.Option(None, "--concurrency", help="max parallel chain groups"),
+    reset_attempts: bool = typer.Option(False, "--reset-attempts", help="wipe prior attempts for the targeted shot(s)"),
 ):
-    """Render shots into MP4 clips."""
+    """Render shots into MP4 clips, in parallel by chain group, with per-clip review.
+
+    Exit codes:
+      0  all shots passed (or were cached)
+      1  invalid args / missing storyboard
+      2  over-budget; re-run with --yes
+      3  one or more shots flagged for director rewrite (escalation needed)
+    """
     raw = state.read_json(project_id, "storyboard.json", episode_id=episode_id)
     if not raw:
         console.print("[red]storyboard.json missing — run /storyboard or write it manually first.[/]")
@@ -559,26 +680,119 @@ def render_cmd(
             )
             raise typer.Exit(code=2)
 
-    if shot_id:
-        sb = Storyboard(
-            project_id=sb.project_id,
-            title=sb.title,
-            synopsis=sb.synopsis,
-            target_duration_s=sb.target_duration_s,
-            resolution=sb.resolution,
-            ratio=sb.ratio,
-            scenes=sb.scenes,
-            shots=[s for s in sb.shots if s.id == shot_id],
-        )
-        if not sb.shots:
-            console.print(f"[red]shot {shot_id} not found[/]")
-            raise typer.Exit(code=1)
+    cfg = render_mod.RenderConfig.from_settings(
+        do_review=review,
+        threshold=score_threshold,
+        max_retry=max_retry,
+        do_auto_rewrite=auto_rewrite,
+    )
 
     try:
-        out = render_mod.render_all(project_id, episode_id, sb, only_missing=not force)
+        out = render_mod.render_all(
+            project_id, episode_id, sb,
+            only_missing=not force,
+            cfg=cfg,
+            concurrency=concurrency,
+            shot_ids=[shot_id] if shot_id else None,
+            reset=reset_attempts,
+        )
     except FileNotFoundError as e:
         _bail(str(e))
+
     typer.echo(json.dumps(out, ensure_ascii=False, indent=2))
+
+    # Exit 3 if any targeted shot needs director rewrite.
+    targeted = {shot_id} if shot_id else None
+    needs = [
+        sid for sid, rec in out.items()
+        if rec.get("needs_director_rewrite")
+        and (targeted is None or sid in targeted)
+    ]
+    if needs:
+        console.print(
+            f"[red]exit 3: {len(needs)} shot(s) need director rewrite: "
+            f"{', '.join(needs[:6])}{'…' if len(needs) > 6 else ''}[/]"
+        )
+        raise typer.Exit(code=3)
+
+
+@app.command("render-graph")
+def render_graph_cmd(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """Show how the storyboard slices into parallel chain groups."""
+    raw = state.read_json(project_id, "storyboard.json", episode_id=episode_id)
+    if not raw:
+        _bail("storyboard.json missing")
+    sb = Storyboard.model_validate(raw)
+    groups = render_mod.slice_chain_groups(sb.shots)
+    if json_out:
+        payload = [
+            {"index": g.index, "label": g.label(),
+             "shots": [s.id for s in g.shots],
+             "duration_s": sum(s.duration for s in g.shots)}
+            for g in groups
+        ]
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    table = Table(title=f"Chain DAG · {len(groups)} groups (concurrency cap = {SETTINGS.max_concurrency})")
+    table.add_column("group"); table.add_column("shots"); table.add_column("dur")
+    for g in groups:
+        table.add_row(
+            f"#{g.index}",
+            " → ".join(s.id for s in g.shots),
+            f"{sum(s.duration for s in g.shots)}s",
+        )
+    console.print(table)
+    console.print(
+        f"[dim]每个 group 内串行(链帧依赖), groups 之间 ThreadPoolExecutor 并发. "
+        f"想增加并行度: 把更多 shot 的 use_prev_last_frame_as_first 改为 false。[/]"
+    )
+
+
+# ---------- review ------------------------------------------------------------
+@app.command("review")
+def review_cmd(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+    shot_id: str = typer.Option(..., "--shot", help="shot id, e.g. S01-002"),
+    version: int | None = typer.Option(None, "--ver", help="attempt version (default: latest)"),
+    threshold: float | None = typer.Option(None, "--score-threshold"),
+):
+    """Re-run qwen3-vl-plus review on a previously rendered clip."""
+    raw = state.read_json(project_id, "storyboard.json", episode_id=episode_id)
+    if not raw:
+        _bail("storyboard.json missing")
+    sb = Storyboard.model_validate(raw)
+    shot = next((s for s in sb.shots if s.id == shot_id), None)
+    if not shot:
+        _bail(f"shot {shot_id} not in storyboard")
+
+    shots_state = render_mod.load_shots_state(project_id, episode_id)
+    rec = shots_state.get(shot_id)
+    if not rec or not rec.get("attempts"):
+        _bail(f"no attempts on disk for {shot_id}; render it first")
+
+    if version is None:
+        attempt = rec["attempts"][-1]
+    else:
+        attempt = next((a for a in rec["attempts"] if a.get("version") == version), None)
+        if not attempt:
+            _bail(f"no attempt ver{version} for {shot_id}")
+    if attempt.get("status") != "SUCCEEDED":
+        _bail(f"attempt ver{attempt.get('version')} did not succeed; nothing to review")
+    if not attempt.get("video_url"):
+        _bail("attempt has no video_url; cannot fetch the clip for review")
+
+    scene = sb.scene_map().get(shot.scene)
+    lore = lore_mod.load(project_id, projects_dir=SETTINGS.projects_dir)
+    review = review_mod.review_clip(
+        attempt["video_url"], shot=shot, scene=scene, lore=lore,
+        threshold=threshold,
+    )
+    typer.echo(json.dumps(review, ensure_ascii=False, indent=2))
 
 
 # ---------- stitch ------------------------------------------------------------
@@ -587,22 +801,72 @@ def stitch_cmd(
     project_id: str = typer.Option(..., "--project", "-p"),
     episode_id: str = typer.Option(..., "--episode", "-e"),
     crossfade: float = typer.Option(0.0, "--crossfade", help="crossfade seconds (0 = hard cut)"),
+    allow_below_threshold: bool = typer.Option(
+        False, "--allow-below-threshold",
+        help="stitch even if some shots are flagged needs_director_rewrite (use best-of-N)",
+    ),
 ):
-    """Concat all rendered clips into final/<project>-<episode>.mp4"""
+    """Concat winner clip per shot into final/<project>-<episode>.mp4
+
+    Reads `shots_state.json[shot].winner_path` to pick the winning version.
+    Shots flagged `needs_director_rewrite` block stitch unless
+    `--allow-below-threshold` is passed.
+    """
     raw = state.read_json(project_id, "storyboard.json", episode_id=episode_id)
+    if not raw:
+        _bail("storyboard.json missing")
     sb = Storyboard.model_validate(raw)
     edir = state.episode_dir(project_id, episode_id)
     ep_norm = state.normalize_episode_id(episode_id)
+
+    shots_state = render_mod.load_shots_state(project_id, episode_id)
     clips: list[Path] = []
+    flagged: list[str] = []
+    missing: list[str] = []
+    summary: list[tuple[str, int | None, str]] = []
+
     for s in sb.shots:
-        p = edir / "clips" / f"{s.id}.mp4"
-        if not p.exists():
-            console.print(f"[yellow]missing {s.id}.mp4 — run `videogen render` first[/]")
-            raise typer.Exit(code=1)
-        clips.append(p)
+        rec = shots_state.get(s.id) or {}
+        winner_path_str = rec.get("winner_path")
+        winner_clip = Path(winner_path_str) if winner_path_str else (edir / "clips" / f"{s.id}.mp4")
+        if not winner_clip.exists():
+            missing.append(s.id)
+            continue
+        if rec.get("needs_director_rewrite"):
+            flagged.append(s.id)
+        clips.append(winner_clip)
+        summary.append((s.id, rec.get("winner_version"), winner_clip.name))
+
+    if missing:
+        console.print(
+            f"[red]missing winner clip(s):[/] {', '.join(missing)}\n"
+            f"  run `./bin/videogen render --project {project_id} --episode {episode_id}` first."
+        )
+        raise typer.Exit(code=1)
+
+    if flagged and not allow_below_threshold:
+        console.print(
+            f"[red]{len(flagged)} shot(s) flagged needs_director_rewrite:[/] "
+            f"{', '.join(flagged[:6])}{'…' if len(flagged) > 6 else ''}\n"
+            f"  fix them first OR re-run stitch with --allow-below-threshold to ship best-of-N."
+        )
+        raise typer.Exit(code=3)
+
     out = edir / "final" / f"{project_id}-{ep_norm}.mp4"
     ff.concat(clips, out, crossfade_s=crossfade)
     console.print(f"[green]✓ final video → {out}[/]")
+
+    # Time-coded shot map for the GATE 4 review.
+    table = Table(title=f"shot map · {out.name}")
+    table.add_column("shot"); table.add_column("ver"); table.add_column("file"); table.add_column("flag")
+    for sid, ver, name in summary:
+        table.add_row(
+            sid,
+            f"ver{ver}" if ver else "—",
+            name,
+            "[red]rewrite[/]" if sid in set(flagged) else "",
+        )
+    console.print(table)
 
 
 # ---------- task --------------------------------------------------------------

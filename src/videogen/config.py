@@ -21,6 +21,11 @@ class Settings:
     max_concurrency: int
     poll_interval: int
     projects_dir: Path
+    # Per-clip review + auto-rewrite (Zone 3 of the multi-agent pipeline).
+    review_threshold: float
+    review_model: str
+    rewrite_model: str
+    max_retry: int
 
     @classmethod
     def load(cls) -> "Settings":
@@ -42,6 +47,10 @@ class Settings:
             max_concurrency=int(os.getenv("VIDEOGEN_MAX_CONCURRENCY", "4")),
             poll_interval=int(os.getenv("VIDEOGEN_POLL_INTERVAL", "15")),
             projects_dir=Path(os.getenv("VIDEOGEN_PROJECTS_DIR", "./projects")).resolve(),
+            review_threshold=float(os.getenv("VIDEOGEN_REVIEW_THRESHOLD", "7.0")),
+            review_model=os.getenv("VIDEOGEN_REVIEW_MODEL", "qwen3-vl-plus").strip(),
+            rewrite_model=os.getenv("VIDEOGEN_REWRITE_MODEL", "qwen-plus").strip(),
+            max_retry=int(os.getenv("VIDEOGEN_MAX_RETRY", "3")),
         )
 
     def require_api_key(self) -> str:

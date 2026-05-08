@@ -52,3 +52,7 @@ projects/**/*.wav
 projects/**/*.aac
 projects/**/*.flac
 projects/**/*.m4a
+
+# === Vendored upstream skills (山音) — fetched by scripts/install-shanyin-skills.sh
+.claude/skills/screenwriter/references/shanyin-screenwriting/
+.claude/skills/video-director/references/shanyin-director/
