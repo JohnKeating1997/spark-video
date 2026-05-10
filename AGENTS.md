@@ -1,7 +1,23 @@
 # AGENTS.md — entry point for any agentic CLI working in this repo
 
 This repo is a **director's toolbox** for generating long-form (3–10 min) AI
-videos with consistent characters using **Wan 2.7** models on Alibaba DashScope.
+videos with consistent characters on Alibaba DashScope. Two video model
+families are supported via a provider abstraction:
+
+- **HappyHorse 1.0** (default) — `happyhorse-1.0-{t2v,i2v,r2v}`. Fewer
+  features than Wan but newer.
+- **Wan 2.7** — `wan2.7-{t2v-2026-04-25,i2v-2026-04-25,r2v}`. Richer
+  features (reference_voice, first_frame chain-bridging in r2v,
+  negative_prompt, prompt_extend).
+
+Storyboards are written **provider-agnostically** — each shot declares a
+generic `kind` (`t2v` / `i2v` / `r2v`) and the active provider maps it
+to a concrete model name at render time. Provider resolution order:
+`videogen render --provider` flag → `Storyboard.provider` (per-episode,
+set by `scene compile --provider`) → `VIDEOGEN_VIDEO_PROVIDER` env var
+→ built-in default `happyhorse`. See `src/videogen/providers/` for the
+implementation and `.claude/skills/video-director/SKILL.md` § "Provider
+capability table" for behavioural differences directors must know.
 
 ## Architecture — Multi-Agent Production Team (parallel pipeline)
 
@@ -57,7 +73,7 @@ runs in parallel:
 | **Screenwriter** | `.claude/skills/screenwriter/SKILL.md` *(wraps `references/shanyin-screenwriting/SKILL.md`)* | Premise → `scenes/scene-NN.md` (one scene per file, sentinel `scene-NN.ready`) | per-scene markdown |
 | **Director** | `.claude/skills/video-director/SKILL.md` *(wraps `references/shanyin-director/SKILL.md`)* | scene-NN.md → `scenes/scene-NN.json` (storyboard fragment, validated against `storyboard.py` schema) | per-scene JSON |
 | **VFX Reviewer** *(opt-in)* | `.claude/skills/vfx-reviewer/SKILL.md` | Pre-render storyboard quality gate. Skipped unless `/episode … --vfx`. | report |
-| **Video Reviewer** *(new)* | `.claude/skills/video-reviewer/SKILL.md` | Per-clip 0-10 scoring (logic / proportion / physics / style) via qwen3-vl-plus; drives auto-rewrite + escalation. | `reviews/<shot>-verN.json` |
+| **Video Reviewer** *(new)* | `.claude/skills/video-reviewer/SKILL.md` | Per-clip 0-10 scoring on 6 axes (logic / proportion / physics / style / cast_match / dialog_attribution) via qwen3-vl-plus, with cast portraits attached to the multimodal call so face-swap and 台词错位 are caught; drives auto-rewrite + escalation. | `reviews/<shot>-verN.json` |
 | **CLI** | — | API calls, OSS uploads, ffmpeg, parallel render, review, stitch, state. | clips + final mp4 |
 
 ### Role boundaries (hard rules)
@@ -104,7 +120,11 @@ projects/<project_id>/
     ├── reviews/
     │   ├── S01-001-ver1.json          ← {score, breakdown, critique, verdict}
     │   └── escalation-S01-001.md      ← only when needs_director_rewrite=true
-    ├── final/  logs/
+    ├── final/
+    ├── logs/
+    │   └── model_calls.jsonl          ← every model call (video / review /
+    │                                    rewrite / t2i): request + response
+    │                                    + duration + shot/version context
     ├── shots_state.json               ← attempts[] + winner_version per shot
     ├── needs_director_rewrite.json    ← present only when render exits 3
     └── state.json
@@ -113,10 +133,12 @@ projects/<project_id>/
 ## Always-on rules
 
 1. Read the relevant skill file before doing any work in that role.
-   Screenwriter / director SKILL.md files are *wrappers* — also read the
-   inner Shanyin SKILL each cites.
-2. Never call the Wan / qwen HTTP API yourself — go through `videogen`
-   subcommands (`render`, `review`, `task ...`).
+ Screenwriter / director SKILL.md files are *wrappers* — also read the
+ inner Shanyin SKILL each cites.
+2. Never call the DashScope video / qwen HTTP API yourself — go through
+ `videogen` subcommands (`render`, `review`, `task ...`). The provider
+ layer (`src/videogen/providers/`) is the only code allowed to talk to
+ DashScope's video-synthesis endpoint.
 3. Never invent character names not in `projects/<id>/<episode>/cast.json`.
 4. Read `projects/<id>/lore.md` BEFORE writing any scene. If absent,
    scaffold with `./bin/videogen lore template --project <id>` and fill
@@ -136,7 +158,8 @@ projects/<project_id>/
    If exit 2 (over `VIDEOGEN_LONG_CONFIRM_S`), require user approval
    before passing `--yes`.
 10. Default each shot's duration to the model maximum (15s). Only shorten
-    when the script genuinely needs a quick beat.
+ when the script genuinely needs a quick beat. Per-provider duration
+ *floor* differs (Wan 2s, HappyHorse 3s) — the provider clamps and warns.
 11. State of every episode lives in `projects/<id>/<episode>/`. Treat it
     as the source of truth.
 12. Episode IDs are normalized: pass `--episode 001` → CLI maps to
@@ -165,10 +188,12 @@ agent-spawned shells unless you have first verified it's on PATH.
 ## Slash commands
 
 ### Full pipeline
-- `/episode <project> <episode> "<premise>" [--vfx]` — autopilot:
-  per-scene editor↔director parallel → render (parallel + per-clip
-  review + auto-rewrite + escalation) → stitch. `--vfx` opts into
-  pre-render VFX review (default: bypassed).
+- `/episode <project> <episode> "<premise>" [--vfx] [--provider=happyhorse|wan]` —
+ autopilot: per-scene editor↔director parallel → render (parallel +
+ per-clip review + auto-rewrite + escalation) → stitch. `--vfx` opts
+ into pre-render VFX review (default: bypassed). `--provider` pins the
+ video model family for this episode (default: env `VIDEOGEN_VIDEO_PROVIDER`,
+ falling back to `happyhorse`).
 
 ### Per-scene (parallel pipeline)
 - `/scene-write <project> <episode> <num> "<premise/note>"` — drive the
@@ -214,7 +239,8 @@ agent-spawned shells unless you have first verified it's on PATH.
 ./bin/videogen scene scaffold --project <p> --episode <e> --num <N>      # template
 ./bin/videogen scene ready    --project <p> --episode <e> --num <N>      # editor signal
 ./bin/videogen scene status   --project <p> --episode <e>                # progress
-./bin/videogen scene compile  --project <p> --episode <e>                # merge → script.md + storyboard.json
+./bin/videogen scene compile  --project <p> --episode <e> \
+        [--provider happyhorse|wan]                                     # merge → script.md + storyboard.json (writes storyboard.provider)
 
 # Storyboard (per episode)
 ./bin/videogen storyboard validate --project <p> --episode <e>
@@ -227,7 +253,7 @@ agent-spawned shells unless you have first verified it's on PATH.
         [--shot <id>] [--force] [--reset-attempts] [--yes] \
         [--review/--no-review] [--score-threshold 7.0] \
         [--max-retry 3] [--auto-rewrite/--no-auto-rewrite] \
-        [--concurrency 4]
+        [--concurrency 4] [--provider happyhorse|wan]
 ./bin/videogen review --project <p> --episode <e> --shot <id> [--ver N]
 ./bin/videogen stitch --project <p> --episode <e> [--crossfade 0.5] \
         [--allow-below-threshold]
@@ -248,9 +274,12 @@ into that episode only.
 ## Schema
 
 Storyboard shape: see `src/videogen/storyboard.py` (`Scene` + `Shot` +
-`Storyboard` Pydantic models). Per-shot review state: see
-`src/videogen/render.py` (`_empty_shot_record` for the `attempts[]` +
-`winner_version` schema).
+`Storyboard` Pydantic models). Shots use `kind: t2v|i2v|r2v` (not
+vendor-specific model names); legacy `model: "wan2.7-*"` strings are
+auto-migrated on load. `Storyboard.provider` pins the model family for
+the episode. Per-shot review state: see `src/videogen/render.py`
+(`_empty_shot_record` for the `attempts[]` + `winner_version` schema).
+Provider implementations: `src/videogen/providers/{base,wan,happyhorse}.py`.
 
 ## Configuration knobs (.env)
 
@@ -268,3 +297,9 @@ Parallelism (Zone 2):
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `VIDEOGEN_MAX_CONCURRENCY` | `4` | parallel chain groups in `render` |
+
+Provider:
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `VIDEOGEN_VIDEO_PROVIDER` | `happyhorse` | `happyhorse` \| `wan`. Workspace-wide default. Per-episode override: `Storyboard.provider` (set by `scene compile --provider`). Per-run override: `videogen render --provider`. See `src/videogen/providers/` and the director SKILL.md "Provider capability table". |

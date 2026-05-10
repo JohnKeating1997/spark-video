@@ -1,4 +1,10 @@
-"""NPC portrait generation via Wan text-to-image.
+"""NPC portrait generation via Wan text-to-image (wan2.6-t2i).
+
+This is the **text-to-image** API, distinct from the video provider
+abstraction in ``src/videogen/providers/``. We always use ``wan2.6-t2i``
+here regardless of which video provider is active for the episode —
+HappyHorse does not (yet) ship a t2i model, and the resulting portrait
+PNG plugs into either video family identically as a ``reference_image``.
 
 When the storyboard references characters (e.g. 少林方丈, 武当冲虚道长) who
 have dialog or are explicitly mentioned but lack a cast entry (no portrait
@@ -17,7 +23,7 @@ from typing import Any
 import httpx
 from rich.console import Console
 
-from . import state, upload as up
+from . import model_log, state, upload as up
 from .config import SETTINGS
 from .cast import episode_cast_dir, project_cast_dir
 
@@ -76,19 +82,26 @@ def generate_portrait(
     """
     prompt = _build_portrait_prompt(name, description, mood_anchor)
 
-    console.print(f"[cyan]generating portrait for {name}…[/]")
-    image_url = _call_t2i(prompt, negative_prompt=negative_prompt, size=size)
+    # Bind project/episode onto the model-log context so the t2i HTTP calls
+    # below land in the right logs/model_calls.jsonl. Episode is optional —
+    # project-level NPC calls log to projects/<id>/logs/.
+    log_token = model_log.set_context(project_id=project_id, episode_id=episode_id)
+    try:
+        console.print(f"[cyan]generating portrait for {name}…[/]")
+        image_url = _call_t2i(prompt, negative_prompt=negative_prompt, size=size)
 
-    if episode_id:
-        char_dir = episode_cast_dir(project_id, episode_id) / name
-    else:
-        char_dir = project_cast_dir(project_id) / name
-    char_dir.mkdir(parents=True, exist_ok=True)
-    out_path = char_dir / f"{name}.png"
+        if episode_id:
+            char_dir = episode_cast_dir(project_id, episode_id) / name
+        else:
+            char_dir = project_cast_dir(project_id) / name
+        char_dir.mkdir(parents=True, exist_ok=True)
+        out_path = char_dir / f"{name}.png"
 
-    _download_image(image_url, out_path)
-    console.print(f"[green]✓ portrait saved → {out_path}[/]")
-    return out_path
+        _download_image(image_url, out_path)
+        console.print(f"[green]✓ portrait saved → {out_path}[/]")
+        return out_path
+    finally:
+        model_log.reset_context(log_token)
 
 
 def _build_portrait_prompt(name: str, description: str, mood_anchor: str) -> str:
@@ -131,21 +144,40 @@ def _call_t2i(
         },
     }
 
-    with httpx.Client(timeout=120.0) as c:
-        r = c.post(url, json=body, headers=_headers())
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("code"):
-                raise RuntimeError(f"t2i sync failed: {data['code']} — {data.get('message')}")
-            choices = data.get("output", {}).get("choices", [])
-            if choices:
-                content = choices[0].get("message", {}).get("content", [])
-                for item in content:
-                    if item.get("type") == "image":
-                        return item["image"]
-            raise RuntimeError(f"t2i returned no image: {data}")
+    t0 = time.time()
+    data: dict | None = None
+    err: str | None = None
+    try:
+        with httpx.Client(timeout=120.0) as c:
+            r = c.post(url, json=body, headers=_headers())
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("code"):
+                    raise RuntimeError(f"t2i sync failed: {data['code']} — {data.get('message')}")
+                choices = data.get("output", {}).get("choices", [])
+                if choices:
+                    content = choices[0].get("message", {}).get("content", [])
+                    for item in content:
+                        if item.get("type") == "image":
+                            return item["image"]
+                raise RuntimeError(f"t2i returned no image: {data}")
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        model_log.log_call(
+            kind="t2i_sync",
+            provider="wan",
+            model=T2I_MODEL,
+            endpoint=url,
+            request=body,
+            response=data,
+            duration_ms=(time.time() - t0) * 1000,
+            error=err,
+        )
 
-    # Fallback: async path (for non-wan2.6 compatible endpoints)
+    # Non-200 status — try async path (only reached when the with-block exited
+    # without entering the if r.status_code == 200 branch).
     return _call_t2i_async(prompt, negative_prompt=negative_prompt, size=size)
 
 
@@ -176,26 +208,55 @@ def _call_t2i_async(
         },
     }
 
-    with httpx.Client(timeout=60.0) as c:
-        r = c.post(url, json=body, headers=_async_headers())
-        r.raise_for_status()
-        data = r.json()
-
-    if data.get("code"):
-        raise RuntimeError(f"t2i async submit failed: {data}")
+    t0 = time.time()
+    data: dict | None = None
+    err: str | None = None
+    try:
+        with httpx.Client(timeout=60.0) as c:
+            r = c.post(url, json=body, headers=_async_headers())
+            r.raise_for_status()
+            data = r.json()
+        if data.get("code"):
+            raise RuntimeError(f"t2i async submit failed: {data}")
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        model_log.log_call(
+            kind="t2i_async_submit",
+            provider="wan",
+            model=T2I_MODEL,
+            endpoint=url,
+            request=body,
+            response=data,
+            task_id=(data or {}).get("output", {}).get("task_id"),
+            duration_ms=(time.time() - t0) * 1000,
+            error=err,
+        )
     task_id = data["output"]["task_id"]
     console.print(f"[dim]  t2i task: {task_id}[/]")
 
-    # Poll
+    poll_start = time.time()
+    query_url = f"{SETTINGS.base_url}/tasks/{task_id}"
     for _ in range(60):
         time.sleep(5)
-        query_url = f"{SETTINGS.base_url}/tasks/{task_id}"
         with httpx.Client(timeout=30.0) as c:
             r = c.get(query_url, headers=_headers())
             r.raise_for_status()
             result = r.json()
 
         status = result.get("output", {}).get("task_status")
+        if status in ("SUCCEEDED", "FAILED", "CANCELED"):
+            model_log.log_call(
+                kind="t2i_async_wait",
+                provider="wan",
+                model=T2I_MODEL,
+                endpoint=query_url,
+                task_id=task_id,
+                response=result,
+                duration_ms=(time.time() - poll_start) * 1000,
+                extra={"terminal_status": status},
+            )
         if status == "SUCCEEDED":
             results = result["output"].get("results", [])
             if results and results[0].get("url"):
@@ -204,6 +265,15 @@ def _call_t2i_async(
         if status in ("FAILED", "CANCELED"):
             raise RuntimeError(f"t2i task {status}: {result}")
 
+    model_log.log_call(
+        kind="t2i_async_wait",
+        provider="wan",
+        model=T2I_MODEL,
+        endpoint=query_url,
+        task_id=task_id,
+        duration_ms=(time.time() - poll_start) * 1000,
+        error=f"timeout after 5 min in status {status}",
+    )
     raise TimeoutError(f"t2i task {task_id} timed out after 5 min")
 
 

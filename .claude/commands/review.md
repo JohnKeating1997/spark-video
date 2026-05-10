@@ -38,9 +38,9 @@ The same JSON is written to `projects/$1/$2/reviews/<SHOT>-ver<N>.json`.
 Show the user a compact table:
 
 ```
-shot       ver  score  logic prop physics style  verdict
-S01-001    1    8.2    8     8    8       9      ACCEPT
-S01-002    1    6.5    7     5    6       8      REJECT
+shot       ver  score  logic prop phys style cast dialog  verdict
+S01-001    1    8.5    9     8    8    9     8    9       ACCEPT
+S01-002    1    6.2    7     6    7    8     5    4       REJECT
 ...
 ```
 

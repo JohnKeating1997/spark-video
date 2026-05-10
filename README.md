@@ -1,8 +1,16 @@
 # videoGen — Long-form AI Video Director
 
 Generate **3–10 minute** AI videos with consistent characters and scene
-continuity, driven by **Claude Code** or **Qwen Code** as the directing brain
-on top of **Wan 2.7** (Alibaba DashScope).
+continuity, driven by **Claude Code** or **Qwen Code** as the directing
+brain on top of Alibaba DashScope's video models. Two model families are
+supported through a provider abstraction:
+
+- **HappyHorse 1.0** *(default)* — `happyhorse-1.0-{t2v,i2v,r2v}`
+- **Wan 2.7** — `wan2.7-{t2v-2026-04-25,i2v-2026-04-25,r2v}`
+
+Pick the family per workspace (`VIDEOGEN_VIDEO_PROVIDER` in `.env`),
+per episode (`scene compile --provider`), or per render
+(`videogen render --provider`).
 
 > "像抽卡一样写视频" — type a premise, get a screenplay → storyboard → 35-shot
 > finished mp4. Re-roll any shot, retry any scene, swap any actor.
@@ -22,17 +30,18 @@ on top of **Wan 2.7** (Alibaba DashScope).
                ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  videogen CLI  (Python · parallel engine)                    │
-│  scene   →  per-scene scaffold / ready / compile             │
-│  cast    →  scan ./cast, OSS upload, cast.json               │
-│  wan     →  submit + poll t2v / i2v / r2v / videoedit        │
-│  render  →  chain-DAG slicing, ThreadPoolExecutor parallel,  │
+│  scene    →  per-scene scaffold / ready / compile (--provider)│
+│  cast     →  scan ./cast, OSS upload, cast.json              │
+│  providers →  Wan / HappyHorse adapters (submit + poll)       │
+│             kind (t2v/i2v/r2v) → vendor model + req body     │
+│  render   →  chain-DAG slicing, ThreadPoolExecutor parallel, │
 │             versioned attempts, qwen3-vl-plus review,        │
 │             qwen-text auto-rewrite, escalation               │
-│  ffmpeg  →  last-frame extraction, concat, crossfade         │
-│  state   →  per-episode JSON, attempts[] + winner_version    │
+│  ffmpeg   →  last-frame extraction, concat, crossfade        │
+│  state    →  per-episode JSON, attempts[] + winner_version   │
 └──────────────┬──────────────────────────────────────────────┘
                ▼
-       Wan API + qwen-vl + qwen-text (DashScope) + ffmpeg + OSS
+       DashScope (Wan / HappyHorse) + qwen-vl + qwen-text + ffmpeg + OSS
 ```
 
 ### Three places it runs in parallel
@@ -53,9 +62,9 @@ on top of **Wan 2.7** (Alibaba DashScope).
 
 ## Why CLI + Skill, not MCP?
 
-- **Wan tasks are async (1–5 min/clip × 30 clips)** → polling, retries, OSS
-  uploads, ffmpeg work all live in the CLI. The agent calls subcommands and
-  reads JSON state — no in-flight blocking.
+- **Video tasks are async (1–5 min/clip × 30 clips)** → polling, retries,
+  OSS uploads, ffmpeg work all live in the CLI. The agent calls
+  subcommands and reads JSON state — no in-flight blocking.
 - **The hard part is creative direction**, not API plumbing. Skills carry the
   director's playbook (model choice per shot, pacing, prompt anchors,
   failure recovery).
@@ -157,7 +166,7 @@ videoGen/
 ├── pyproject.toml             # Python deps
 ├── .env.example
 ├── AGENTS.md / CLAUDE.md / QWEN.md
-├── api-references/dashscope/  # Wan 2.7 + qwen API docs
+├── api-references/dashscope/  # Wan 2.7 + HappyHorse 1.0 + qwen API docs
 ├── scripts/
 │   └── install-shanyin-skills.sh   # one-time: pull wrapped 山音 skills
 ├── .claude/
@@ -173,7 +182,7 @@ videoGen/
 │   ├── config.py              # env + region routing
 │   ├── cast.py                # ./cast → cast.json
 │   ├── upload.py              # local file → oss:// URL
-│   ├── wan.py                 # Wan submit + wait
+│   ├── providers/             # Wan / HappyHorse adapters (submit + wait + req shape)
 │   ├── review.py              # qwen3-vl-plus per-clip scoring
 │   ├── rewrite.py             # qwen-text auto prompt rewrite
 │   ├── scene.py               # per-scene scaffold / ready / compile
@@ -200,21 +209,27 @@ videoGen/
 
 ## Shot-by-shot model strategy (TL;DR)
 
-| Need | Model | Notes |
-|---|---|---|
-| Dialog with named characters | `wan2.7-r2v` | reference_image + reference_voice per character |
-| Establishing/no-character | `wan2.7-t2v-2026-04-25` | up to 15s |
-| Visual transition only | `wan2.7-i2v-2026-04-25` | first_frame + last_frame chaining |
-| Edit existing clip | `wan2.7-videoedit` | not used in the default pipeline |
+The director writes the **kind**, not a vendor model name. The active
+provider maps it to its concrete model at render time.
 
-**Continuity trick**: every shot's prompt is paired with `first_frame =
-last_frame_of_previous_shot.png` (extracted by ffmpeg), so successive shots
-visually flow. r2v even lets you stack reference_image + first_frame so you
-keep both character identity and scene continuity.
+| Need | Kind | Wan 2.7 model | HappyHorse 1.0 model | Notes |
+|---|---|---|---|---|
+| Dialog with named characters | `r2v` | `wan2.7-r2v` | `happyhorse-1.0-r2v` | Wan adds reference_voice + first_frame chain bridging; HappyHorse takes only reference_image |
+| Establishing/no-character | `t2v` | `wan2.7-t2v-2026-04-25` | `happyhorse-1.0-t2v` | up to 15s |
+| Visual transition only | `i2v` | `wan2.7-i2v-2026-04-25` | `happyhorse-1.0-i2v` | first_frame + last_frame chaining |
 
-**Default each shot to the model maximum (15s).** A 3-min video is ~12 shots
-not 22 — fewer cuts, fewer identity drifts, fewer API calls. The schema
-auto-clamps duration to the model ceiling.
+**Continuity trick** (Wan path): every shot's prompt is paired with
+`first_frame = last_frame_of_previous_shot.png` (extracted by ffmpeg),
+so successive shots visually flow. Wan r2v even lets you stack
+reference_image + first_frame so you keep both character identity AND
+scene continuity. HappyHorse r2v can't do this — when a chained `r2v`
+shot is requested the renderer **auto-demotes** it to `i2v` (drops the
+cast images, keeps the chain).
+
+**Default each shot to the model maximum (15s).** A 3-min video is ~12
+shots not 22 — fewer cuts, fewer identity drifts, fewer API calls. The
+schema auto-clamps duration to the kind ceiling and the active provider
+clamps to its own floor (Wan 2s, HappyHorse 3s).
 
 ## Budget gate
 
@@ -235,9 +250,9 @@ See [`DEBUGGING.md`](./DEBUGGING.md).
 
 ## Cost note
 
-Wan 2.7 is billed by output seconds × resolution. A 3-min 720p video with
-~22 shots typically costs around the same as 3 minutes of single-shot 720p
-generation. Re-rolls double the bill, so use `candidates: 1` for fillers and
+Both Wan 2.7 and HappyHorse 1.0 are billed by output seconds × resolution.
+A 3-min 720p video with ~22 shots typically costs around the same as
+3 minutes of single-shot 720p generation. Re-rolls double the bill, so use `candidates: 1` for fillers and
 `2-4` only for hero shots.
 
 The per-clip review (qwen3-vl-plus) and auto-rewriter (qwen-plus) add

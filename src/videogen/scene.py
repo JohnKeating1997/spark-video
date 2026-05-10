@@ -128,6 +128,7 @@ def compile_episode(
     target_duration_s: int | None = None,
     resolution: str | None = None,
     ratio: str | None = None,
+    provider: str | None = None,
 ) -> CompileResult:
     """Merge scenes/scene-*.md + scenes/scene-*.json into script.md + storyboard.json.
 
@@ -189,6 +190,9 @@ def compile_episode(
         scenes.append(payload["scene"])
         shots.extend(payload["shots"])
 
+    # Provider resolution: explicit arg → env default → leave None and let
+    # render-time fallback fill it in.
+    resolved_provider = provider or SETTINGS.video_provider or None
     sb_dict = {
         "project_id": project_id,
         "title": title,
@@ -196,6 +200,7 @@ def compile_episode(
         "target_duration_s": target_duration_s or _infer_target_from_scenes(md_files) or 180,
         "resolution": resolution or SETTINGS.resolution,
         "ratio": ratio or SETTINGS.ratio,
+        "provider": resolved_provider,
         "scenes": scenes,
         "shots": shots,
     }

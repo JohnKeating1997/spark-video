@@ -30,11 +30,31 @@ def extract_last_frame(video: Path, out: Path) -> Path:
     """Extract the very last frame as PNG. Used as next clip's first_frame."""
     _ensure_ffmpeg()
     out.parent.mkdir(parents=True, exist_ok=True)
+    # Get total frame count first
+    probe_cmd = [
+        "ffprobe", "-v", "error", "-count_frames",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=nb_read_frames",
+        "-of", "csv=p=0", str(video),
+    ]
+    r = subprocess.run(probe_cmd, capture_output=True, text=True)
+    nb_frames = int(r.stdout.strip()) - 1  # last frame index
+    if nb_frames < 0:
+        nb_frames = 0
+    # Use select filter to grab the exact last frame
     cmd = [
-        "ffmpeg", "-y", "-sseof", "-0.1", "-i", str(video),
-        "-vframes", "1", "-q:v", "2", str(out),
+        "ffmpeg", "-y", "-i", str(video),
+        "-vf", f"select='eq(n\\,{nb_frames})'",
+        "-vsync", "vfr", "-vframes", "1", "-q:v", "2", str(out),
     ]
     subprocess.run(cmd, check=True, capture_output=True)
+    if not out.exists() or out.stat().st_size == 0:
+        # Fallback: try -sseof with larger offset
+        cmd2 = [
+            "ffmpeg", "-y", "-sseof", "-0.5", "-i", str(video),
+            "-vframes", "1", "-q:v", "2", str(out),
+        ]
+        subprocess.run(cmd2, check=False, capture_output=True)
     return out
 
 

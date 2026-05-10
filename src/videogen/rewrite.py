@@ -13,11 +13,13 @@ shot in the running.
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from . import model_log
 from .config import SETTINGS
 from .lore import Lore
 from .storyboard import Scene, Shot
@@ -99,11 +101,29 @@ def _call_qwen_text(system: str, user: str, *, model: str) -> str:
         "Authorization": f"Bearer {SETTINGS.require_api_key()}",
         "Content-Type": "application/json",
     }
-    with httpx.Client(timeout=60.0) as c:
-        r = c.post(url, json=body, headers=headers)
-        r.raise_for_status()
-        data = r.json()
-    return data["choices"][0]["message"]["content"]
+    t0 = time.time()
+    data: dict | None = None
+    err: str | None = None
+    try:
+        with httpx.Client(timeout=60.0) as c:
+            r = c.post(url, json=body, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        model_log.log_call(
+            kind="rewrite",
+            provider="dashscope",
+            model=model,
+            endpoint=url,
+            request=body,
+            response=data,
+            duration_ms=(time.time() - t0) * 1000,
+            error=err,
+        )
 
 
 def _sanitize(text: str, mood_anchor: str | None) -> str:

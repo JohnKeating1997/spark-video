@@ -26,6 +26,11 @@ class Settings:
     review_model: str
     rewrite_model: str
     max_retry: int
+    # Default video model family. ``wan`` | ``happyhorse``. Director skill
+    # writes generic kinds (t2v/i2v/r2v) and the provider maps them to its
+    # own concrete model names. Per-episode overrides live in
+    # ``Storyboard.provider``; ``--provider`` on the CLI beats both.
+    video_provider: str
 
     @classmethod
     def load(cls) -> "Settings":
@@ -51,6 +56,7 @@ class Settings:
             review_model=os.getenv("VIDEOGEN_REVIEW_MODEL", "qwen3-vl-plus").strip(),
             rewrite_model=os.getenv("VIDEOGEN_REWRITE_MODEL", "qwen-plus").strip(),
             max_retry=int(os.getenv("VIDEOGEN_MAX_RETRY", "3")),
+            video_provider=os.getenv("VIDEOGEN_VIDEO_PROVIDER", "happyhorse").strip().lower(),
         )
 
     def require_api_key(self) -> str:

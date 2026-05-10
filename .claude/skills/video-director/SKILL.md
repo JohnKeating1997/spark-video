@@ -1,6 +1,6 @@
 ---
 name: video-director
-description: Translate a screenplay (one scene at a time) into a Wan 2.7 storyboard fragment for the videogen pipeline. Wraps 山音超级导演大师 — the upstream Shanyin SKILL is the single source of truth for craft.
+description: Translate a screenplay (one scene at a time) into a provider-agnostic storyboard fragment for the videogen pipeline. Wraps 山音超级导演大师 — the upstream Shanyin SKILL is the single source of truth for craft.
 ---
 
 # 导演 Skill — videogen wrapper around 山音超级导演大师
@@ -8,7 +8,8 @@ description: Translate a screenplay (one scene at a time) into a Wan 2.7 storybo
 You are the **director** of a long-form AI video shoot. Your craft
 authority is **`references/shanyin-director/SKILL.md`** (山音超级导演大师, by @山音).
 This file does NOT replicate that methodology — it tells you how to plug
-山音 into the `videogen` pipeline + the Wan 2.7 model surface.
+山音 into the `videogen` pipeline + the **provider-agnostic shot kind
+surface** (`t2v` / `i2v` / `r2v`).
 
 ## STEP 0 — required reads (every invocation)
 
@@ -22,8 +23,15 @@ This file does NOT replicate that methodology — it tells you how to plug
 4. `projects/<id>/<episode>/cast.json` (the per-episode cast).
 5. The screenplay scene you are storyboarding (see Workflow below).
 6. `references/shot-design.md` and `references/direction-tone.md` in this
-   skill folder — videogen-specific shot syntax + Wan model selection
-   table layered on top of 山音.
+   skill folder — videogen-specific shot syntax + provider feature table
+   layered on top of 山音.
+7. The active **video provider** for this episode — determined by (in
+   priority order): `--provider` flag → `Storyboard.provider` →
+   `VIDEOGEN_VIDEO_PROVIDER` env → built-in default `happyhorse`. Run
+   `cat .env | grep VIDEOGEN_VIDEO_PROVIDER` (or read the `provider`
+   field at the top of any existing `storyboard.json`) to confirm. Your
+   shot prompts may need provider-specific syntax (see § Provider
+   capability table below).
 
 ## Your contract with the videogen pipeline
 
@@ -65,7 +73,7 @@ Schema:
       "narrative_purpose": "...",
       "prompt": "...",
       "duration": 15,
-      "model": "wan2.7-r2v",
+      "kind": "r2v",
       "characters": ["..."],
       "use_prev_last_frame_as_first": true,
       "shot_group_id": "G01",
@@ -82,6 +90,11 @@ The shape MUST match `Scene` and `Shot` in
 [src/videogen/storyboard.py](../../../src/videogen/storyboard.py). The
 `scene compile` step validates it via `Storyboard.model_validate` after
 merging all fragments.
+
+**Use `kind`, NOT a vendor-specific model name.** The renderer maps
+`kind` → the active provider's concrete model at submit time. Old
+storyboards that still use `model: "wan2.7-r2v"` etc. are auto-migrated
+on validate, but new files must use `kind: t2v|i2v|r2v`.
 
 **Shot id convention**: `S<NN>-<ZZZ>` where `NN` is scene number and
 `ZZZ` is 1-based shot index inside that scene (`S01-001`, `S01-002`,
@@ -115,20 +128,43 @@ viewing decisions, imagery system, and dual-pacing curve from
 `references/direction-tone.md`. Subsequent scenes read it and stay
 consistent. CLI does not consume it; VFX reviewer + you do.
 
-## Wan model selection (videogen-specific)
+## Shot kind selection (provider-agnostic)
 
-| Situation | Model | Notes |
-|-----------|-------|-------|
-| Dialog / character-driven shot | `wan2.7-r2v` | reference_image (+ voice). r2v shots may set duration up to 15s. |
-| Establishing shot, no character | `wan2.7-t2v-2026-04-25` | Always for first shot of new scene if no character must be locked. |
-| Pure visual transition between two known frames | `wan2.7-i2v-2026-04-25` | Requires a previous chained frame; never use it on the first shot of a chain group. |
+| Situation | Kind | Notes |
+|-----------|------|-------|
+| Dialog / character-driven shot | `r2v` | Reference images from cast.json. Wan additionally locks character voice; HappyHorse does not (see capability table). |
+| Establishing shot, no character | `t2v` | Use as the first shot of any new scene whenever no character must be locked. Maximises chain-DAG parallelism. |
+| Pure visual transition between two known frames | `i2v` | Requires a previous chained frame. Never the first shot of a chain group. |
 
-**Defaults**: pick the model maximum duration (15s for all three) unless
-the script genuinely needs a quick beat. Long shots = fewer cuts =
-better identity continuity = lower cost.
+**Defaults**: pick the provider's maximum duration (15s for both Wan
+and HappyHorse) unless the script genuinely needs a quick beat. Long
+shots = fewer cuts = better identity continuity = lower cost.
 
-**Mix target**: ~70% r2v, ~25% t2v, ~5% i2v (i2v should be rare — only
-when you really want a dissolve/transition feel within one chain group).
+**Mix target**: ~70% `r2v`, ~25% `t2v`, ~5% `i2v` (i2v should be rare —
+only when you really want a dissolve/transition feel within one chain
+group).
+
+## Provider capability table — what each family supports
+
+The producer picks the active provider before render. You write the same
+`kind` either way, but you should be **aware of the differences** so your
+prompts and structure don't rely on features the active provider lacks.
+
+| Capability | Wan 2.7 | HappyHorse 1.0 | If active provider doesn't support it |
+|-----------|--------|---------------|--------------------------------------|
+| `r2v` first-frame chain (continue an action mid-scene with multiple cast images) | ✅ | ❌ | The renderer **auto-demotes** that shot to `i2v` (drops cast images, keeps the chain). Plan for it: if a key character must be visible, prefer breaking the chain and using `r2v` fresh. |
+| `r2v` reference voice (audio in cast.json) | ✅ | ❌ | Audio is silently skipped. If spoken dialog matters, plan a TTS post-pass; the storyboard text still carries the lines. |
+| `negative_prompt` | ✅ | ❌ | Field is ignored. Encode forbidden imagery in the positive prompt instead. |
+| `prompt_extend` | ✅ | ❌ | Renderer omits the parameter. Write fully-specified prompts; do not rely on Wan-style auto-elaboration. |
+| Reference syntax in r2v prompts | `图1 / 图2 / 视频1` | `[Image 1] / [Image 2]` | Use the family-correct syntax. If you don't know which family is active, prefer `[Image 1]` style — happyhorse rejects 图1, but Wan accepts both. |
+| i2v `ratio` parameter | ✅ | ❌ (auto-derived from first frame) | Renderer omits ratio for HappyHorse i2v; output ratio matches the chained frame. |
+| Duration floor | 2s | 3s | Renderer clamps to the floor and warns. |
+| Duration ceiling | 15s | 15s | Same. |
+
+**Heuristic when prompt syntax matters**: if you must include "图1/图2"
+or "Image 1/Image 2" references in an `r2v` prompt, ask the producer
+which provider is pinned for the episode and use that family's syntax.
+The mood_anchor stays unchanged either way.
 
 ## Mood anchor (single biggest visual cohesion lever)
 
@@ -177,7 +213,7 @@ review report (a `reviews/<shot>-verN.json`) plus the original shot. You:
 
 1. Read the review's `critique` and `breakdown`.
 2. Edit the corresponding shot in `storyboard.json` — usually rewrite the
-   prompt, sometimes change model / duration / characters / seed.
+   prompt, sometimes change kind / duration / characters / seed.
 3. Run `./bin/videogen render --project <id> --episode <ep> --shot <id> --force --reset-attempts`.
 
 The CLI handles the first 2 retry rounds with auto prompt-rewrite (see
@@ -188,11 +224,15 @@ get called for the third escalation, when nuanced judgment is needed.
 
 - Don't write the screenplay. The screenwriter does that.
 - Don't invent character names not in `cast.json`.
+- Don't write vendor-specific model strings into `kind` (e.g.
+  `wan2.7-r2v`). The schema migrates them automatically, but the
+  director output should be clean — write `t2v` / `i2v` / `r2v`.
 - Don't set `use_prev_last_frame_as_first: true` on the first shot of a
   scene unless you actually want a cross-scene chain (you almost
   never do).
 - Don't pick `duration < 15` without a reason.
-- Don't set `duration > 10` on r2v shots that include `reference_video`
-  (the schema clamps it anyway).
 - Don't call `render` before `storyboard validate` passes.
-- Don't call the Wan HTTP API directly — use the CLI.
+- Don't call the DashScope HTTP API directly — use the CLI.
+- Don't assume a feature is available across all providers. Cross-check
+  the capability table before writing prompts that rely on
+  `negative_prompt`, voice, or first-frame r2v continuation.

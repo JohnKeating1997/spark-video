@@ -15,9 +15,9 @@ The folder *name* is the character's display name. Anything inside the folder
 belongs to that character — no name-prefix matching needed.
 
 If a character has more than one portrait inside its own folder, the CLI builds
-a grid composite (``<id>.grid.png``) and feeds that to Wan as ``reference_image``
-— Wan supports multi-pane reference images. Grids are NEVER built across
-different characters.
+a grid composite (``<id>.grid.png``) and feeds that as ``reference_image`` to
+the active video provider. Both Wan and HappyHorse r2v accept multi-pane
+reference images. Grids are NEVER built across different characters.
 
 Two-tier discovery (per episode build):
 
@@ -161,7 +161,7 @@ def _merge(project_buckets: dict, episode_buckets: dict) -> dict[str, dict[str, 
     across characters (grid building stays per-folder upstream).
 
     For a character present in both tiers:
-      * episode images/audios are *prepended* (referenced first by Wan).
+      * episode images/audios are *prepended* (referenced first by the model).
       * episode soul card overrides project soul card if present.
       * source flips to ``episode``.
     """

@@ -31,15 +31,16 @@ from . import (
     cast as cast_mod,
     ffmpeg as ff,
     lore as lore_mod,
+    model_log,
     npc as npc_mod,
     render as render_mod,
     review as review_mod,
     scene as scene_mod,
     soul as soul_mod,
     state,
-    wan,
 )
 from .config import SETTINGS
+from .providers import get_provider, list_providers
 from .storyboard import Storyboard
 
 app = typer.Typer(
@@ -47,7 +48,7 @@ app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_show_locals=False,
     pretty_exceptions_short=True,
-    help="Long-form AI video generator (Wan2.7) — driven by Claude Code Skills.",
+    help="Long-form AI video generator (Wan / HappyHorse) — driven by Claude Code Skills.",
 )
 console = Console()
 
@@ -427,9 +428,9 @@ def sb_estimate(
     threshold = SETTINGS.long_confirm_s
     over_budget = total_s > threshold
 
-    by_model: dict[str, int] = {}
+    by_kind: dict[str, int] = {}
     for s in sb.shots:
-        by_model[s.model] = by_model.get(s.model, 0) + s.duration
+        by_kind[s.kind] = by_kind.get(s.kind, 0) + s.duration
 
     payload = {
         "project_id": project_id,
@@ -440,7 +441,8 @@ def sb_estimate(
         "wall_clock_min_estimate": round(wall_min, 1),
         "resolution": sb.resolution,
         "ratio": sb.ratio,
-        "duration_by_model_s": by_model,
+        "duration_by_kind_s": by_kind,
+        "provider": sb.provider or SETTINGS.video_provider,
         "long_confirm_threshold_s": threshold,
         "over_budget": over_budget,
         "advice": (
@@ -460,8 +462,9 @@ def sb_estimate(
         table.add_row("target", f"{sb.target_duration_s}s")
         table.add_row("wall-clock estimate", f"~{wall_min:.0f} min (sequential, 1–5 min/shot)")
         table.add_row("resolution / ratio", f"{sb.resolution} / {sb.ratio}")
-        table.add_row("duration by model",
-                     ", ".join(f"{m.replace('wan2.7-','')}: {d}s" for m, d in by_model.items()))
+        table.add_row("provider", payload["provider"])
+        table.add_row("duration by kind",
+                     ", ".join(f"{k}: {d}s" for k, d in by_kind.items()))
         table.add_row("budget threshold", f"{threshold}s")
         table.add_row(
             "verdict",
@@ -509,9 +512,20 @@ def sb_show(
         console.print(scene_table)
         console.print("")
 
+    provider_name = sb.provider or SETTINGS.video_provider
+    try:
+        provider = get_provider(provider_name)
+        provider_label = (
+            f"{provider.name} (t2v={provider.model_for('t2v')}, "
+            f"i2v={provider.model_for('i2v')}, r2v={provider.model_for('r2v')})"
+        )
+    except ValueError:
+        provider_label = f"{provider_name} (unknown!)"
+    console.print(f"[dim]video provider: {provider_label}[/]")
+
     table = Table(title=sb.title)
     table.add_column("ID"); table.add_column("Scene"); table.add_column("Dur")
-    table.add_column("Model"); table.add_column("Cast")
+    table.add_column("Kind"); table.add_column("Cast")
     table.add_column("Purpose(40)"); table.add_column("Prompt(50)")
     table.add_column("Anchor")
     anchor = (lore.front.mood_anchor if lore else None) or ""
@@ -521,7 +535,7 @@ def sb_show(
         np_cell = (np[:40] + "…") if len(np) > 40 else (np or "[red]—[/]")
         table.add_row(
             s.id, s.scene, f"{s.duration}s",
-            s.model.replace("wan2.7-", ""),
+            s.kind,
             ",".join(s.characters) or "—",
             np_cell,
             (s.prompt[:50] + "…") if len(s.prompt) > 50 else s.prompt,
@@ -618,12 +632,20 @@ def scene_compile_cmd(
     title: str | None = typer.Option(None, "--title"),
     synopsis: str | None = typer.Option(None, "--synopsis"),
     target: int | None = typer.Option(None, "--target", help="target duration in seconds"),
+    provider: str | None = typer.Option(
+        None, "--provider",
+        help="Pin the video model family in storyboard.provider "
+             "(wan | happyhorse). Default: VIDEOGEN_VIDEO_PROVIDER env var.",
+    ),
 ):
     """Merge scenes/scene-*.md → script.md and scenes/scene-*.json → storyboard.json."""
+    if provider is not None and provider not in list_providers():
+        _bail(f"unknown --provider {provider!r}; valid: {list_providers()}")
     try:
         result = scene_mod.compile_episode(
             project_id, episode_id,
             title=title, synopsis=synopsis, target_duration_s=target,
+            provider=provider,
         )
     except (FileNotFoundError, ValueError) as e:
         _bail(str(e))
@@ -653,6 +675,11 @@ def render_cmd(
     auto_rewrite: bool = typer.Option(True, "--auto-rewrite/--no-auto-rewrite", help="qwen-text auto rewrite between retries"),
     concurrency: int | None = typer.Option(None, "--concurrency", help="max parallel chain groups"),
     reset_attempts: bool = typer.Option(False, "--reset-attempts", help="wipe prior attempts for the targeted shot(s)"),
+    provider: str | None = typer.Option(
+        None, "--provider",
+        help="Override video model family for this run (wan | happyhorse). "
+             "Default: storyboard.provider → VIDEOGEN_VIDEO_PROVIDER → happyhorse.",
+    ),
 ):
     """Render shots into MP4 clips, in parallel by chain group, with per-clip review.
 
@@ -687,6 +714,11 @@ def render_cmd(
         do_auto_rewrite=auto_rewrite,
     )
 
+    if provider is not None and provider not in list_providers():
+        _bail(
+            f"unknown --provider {provider!r}; valid: {list_providers()}"
+        )
+
     try:
         out = render_mod.render_all(
             project_id, episode_id, sb,
@@ -695,6 +727,7 @@ def render_cmd(
             concurrency=concurrency,
             shot_ids=[shot_id] if shot_id else None,
             reset=reset_attempts,
+            provider_override=provider,
         )
     except FileNotFoundError as e:
         _bail(str(e))
@@ -788,10 +821,22 @@ def review_cmd(
 
     scene = sb.scene_map().get(shot.scene)
     lore = lore_mod.load(project_id, projects_dir=SETTINGS.projects_dir)
-    review = review_mod.review_clip(
-        attempt["video_url"], shot=shot, scene=scene, lore=lore,
-        threshold=threshold,
+    try:
+        cast_data = cast_mod.load(project_id, episode_id)
+    except FileNotFoundError:
+        cast_data = None
+    log_token = model_log.set_context(
+        project_id=project_id, episode_id=episode_id,
+        shot_id=shot_id, version=attempt.get("version"),
     )
+    try:
+        review = review_mod.review_clip(
+            attempt["video_url"], shot=shot, scene=scene, lore=lore,
+            cast_data=cast_data,
+            threshold=threshold,
+        )
+    finally:
+        model_log.reset_context(log_token)
     typer.echo(json.dumps(review, ensure_ascii=False, indent=2))
 
 
@@ -870,18 +915,28 @@ def stitch_cmd(
 
 
 # ---------- task --------------------------------------------------------------
-task_app = typer.Typer(help="Inspect/manage Wan tasks directly")
+task_app = typer.Typer(help="Inspect/manage DashScope video tasks directly")
 app.add_typer(task_app, name="task")
 
 
 @task_app.command("query")
-def task_query(task_id: str):
-    typer.echo(json.dumps(wan.query(task_id), ensure_ascii=False, indent=2))
+def task_query(
+    task_id: str,
+    provider: str | None = typer.Option(None, "--provider"),
+):
+    """Query a DashScope async task (the endpoint is the same for all providers)."""
+    p = get_provider(provider)
+    typer.echo(json.dumps(p.query(task_id), ensure_ascii=False, indent=2))
 
 
 @task_app.command("wait")
-def task_wait(task_id: str, interval: int = 15):
-    typer.echo(json.dumps(wan.wait(task_id, interval=interval), ensure_ascii=False, indent=2))
+def task_wait(
+    task_id: str,
+    interval: int = 15,
+    provider: str | None = typer.Option(None, "--provider"),
+):
+    p = get_provider(provider)
+    typer.echo(json.dumps(p.wait(task_id, interval=interval), ensure_ascii=False, indent=2))
 
 
 # ---------- doctor ------------------------------------------------------------

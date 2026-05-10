@@ -1,6 +1,7 @@
 """Upload local files to DashScope's instant OSS bucket and get an oss:// URL.
 
-Wan API accepts oss://dashscope-instant/... or public HTTPS URLs.
+DashScope video APIs (Wan 2.7 / HappyHorse 1.0) accept either
+``oss://dashscope-instant/...`` or public HTTPS URLs in ``media[].url``.
 For local cast assets we use this path so users don't need their own OSS.
 
 Refs: https://help.aliyun.com/zh/model-studio/get-temporary-file-url
@@ -17,9 +18,10 @@ from .config import SETTINGS
 Purpose = Literal["video-generation"]
 
 # DashScope's "getPolicy" requires a model name to scope the upload certificate.
-# Any model in the same task group works; the resulting oss://dashscope-instant
-# URL is reusable across Wan models. We default to the r2v model which is the
-# primary entry point used by the cast pipeline.
+# Any video-generation model works; the resulting oss://dashscope-instant
+# URL is reusable across all video model families. We default to wan2.7-r2v
+# because the upload helper has been validated against it; HappyHorse-uploaded
+# OSS URLs are interchangeable.
 _DEFAULT_MODEL = "wan2.7-r2v"
 
 
@@ -29,7 +31,7 @@ def upload(
     purpose: Purpose = "video-generation",  # noqa: ARG001 — kept for API compat
     model: str = _DEFAULT_MODEL,
 ) -> str:
-    """Returns an oss:// URL usable as media `url` in Wan requests."""
+    """Returns an oss:// URL usable as ``media[].url`` in any video-generation request."""
     p = Path(local_path).expanduser().resolve()
     if not p.exists():
         raise FileNotFoundError(p)

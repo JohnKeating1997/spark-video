@@ -26,8 +26,11 @@ what to do.
 
 ## Scoring rubric
 
-`src/videogen/review.py` asks qwen3-vl-plus for four sub-scores (each 0-10),
-then averages them into the headline `score`:
+`src/videogen/review.py` asks qwen3-vl-plus for **six** sub-scores
+(each 0-10), then averages them into the headline `score`. The cast
+portrait images for every character in `shot.characters[]` are
+attached to the multimodal call alongside the video, so the model can
+match faces 1:1.
 
 | Axis | What it asks |
 |------|--------------|
@@ -35,6 +38,8 @@ then averages them into the headline `score`:
 | **proportion** | Anatomy, character size relative to environment, perspective, hands / feet / facial proportions. |
 | **physics** | Gravity, collisions, momentum, cloth, hair, fluid behaviour. |
 | **style** | Matches `lore.mood_anchor` / `visual_style` / `palette`. No `forbidden` term/asset visible. |
+| **cast_match** | Each visible character's face / hair / costume / build matches the **same-named cast portrait** that the CLI passes alongside the video. Drift / wrong identity → low score. Named characters not in cast appearing on screen → also low score. |
+| **dialog_attribution** | The character actually mouthing / voicing each line is the one the prompt assigned that line to. **A 的台词被 B 念 / B 的嘴动了说出 A 的台词** is a hard 0-3. Shots with no dialog → 10. |
 
 **Default threshold**: `7.0` (configurable via `VIDEOGEN_REVIEW_THRESHOLD`).
 
@@ -49,9 +54,16 @@ escalation) feed back to the director.
 
 ```json
 {
-  "score": 6.5,
-  "breakdown": {"logic": 7, "proportion": 5, "physics": 6, "style": 8},
-  "critique": "0:00–0:03 段右手指关节畸形, 食指多生一节; 推镜过快, 第 2 秒画面整体抖动 ...",
+  "score": 6.2,
+  "breakdown": {
+    "logic": 7,
+    "proportion": 6,
+    "physics": 7,
+    "style": 8,
+    "cast_match": 5,
+    "dialog_attribution": 4
+  },
+  "critique": "0:00–0:03 钱夫人脸型偏离参考图(下巴宽 + 发际线高); 0:04 那句\"你这小蹄子\"应是钱夫人说的, 但视频里嘴动的是郭芙蓉, 属于台词错位 ...",
   "verdict": "REJECT",
   "raw": "..."
 }
@@ -121,11 +133,11 @@ under `projects/<id>/<episode>/reviews/escalation-<shot>.md`:
 # 升级到导演 · S01-002
 
 ## 三轮评分
-| ver | score | logic | proportion | physics | style |
-|-----|-------|-------|------------|---------|-------|
-| 1   | 6.5   | 7     | 5          | 6       | 8     |
-| 2   | 6.8   | 7.5   | 5.5        | 6       | 8     |
-| 3   | 6.7   | 7     | 6          | 6       | 8     |
+| ver | score | logic | prop | phys | style | cast | dialog |
+|-----|-------|-------|------|------|-------|------|--------|
+| 1   | 6.2   | 7     | 6    | 7    | 8     | 5    | 4      |
+| 2   | 6.5   | 7.5   | 6    | 7    | 8     | 6    | 4      |
+| 3   | 6.6   | 7     | 6    | 7    | 8     | 6    | 6      |
 
 ## 共性问题
 - (列出三轮里都出现的问题, 用一句话定位时间 + 画面位置)

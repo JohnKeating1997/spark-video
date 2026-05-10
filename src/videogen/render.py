@@ -38,6 +38,7 @@ Architecture (Zone 2 + Zone 3 of the multi-agent pipeline):
 """
 from __future__ import annotations
 
+import contextvars
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -47,8 +48,17 @@ from typing import Any
 
 from rich.console import Console
 
-from . import cast as cast_mod, ffmpeg as ff, lore as lore_mod, review as review_mod, rewrite as rewrite_mod, state, wan
+from . import (
+    cast as cast_mod,
+    ffmpeg as ff,
+    lore as lore_mod,
+    model_log,
+    review as review_mod,
+    rewrite as rewrite_mod,
+    state,
+)
 from .config import SETTINGS
+from .providers import VideoProvider, get_provider
 from .storyboard import Scene, Shot, Storyboard
 
 console = Console()
@@ -168,34 +178,6 @@ def _review_path(edir: Path, shot_id: str, version: int) -> Path:
     return p / f"{shot_id}-ver{version}.json"
 
 
-def _media_for_shot(shot: Shot, cast_data: dict, prev_last_frame_url: str | None) -> tuple[str, list[dict]]:
-    """Return (model, media[]) for the Wan request."""
-    char_index = {c["name"]: c for c in cast_data["characters"]}
-    media: list[dict] = []
-
-    if shot.model == "wan2.7-r2v":
-        for name in shot.characters:
-            c = char_index.get(name)
-            if not c:
-                raise ValueError(f"shot {shot.id} references unknown cast '{name}'")
-            entry: dict[str, Any] = {"type": "reference_image", "url": c["image_url"]}
-            if c.get("audio_url"):
-                entry["reference_voice"] = c["audio_url"]
-            media.append(entry)
-        if prev_last_frame_url and shot.use_prev_last_frame_as_first:
-            media.append({"type": "first_frame", "url": prev_last_frame_url})
-
-    elif shot.model == "wan2.7-i2v-2026-04-25":
-        if not prev_last_frame_url:
-            raise ValueError(
-                f"i2v shot {shot.id} needs a previous last frame; "
-                f"set use_prev_last_frame_as_first=true on a chained predecessor "
-                f"or switch model to t2v / r2v."
-            )
-        media.append({"type": "first_frame", "url": prev_last_frame_url})
-    return shot.model, media
-
-
 def _ensure_oss_url_for(path_str: str | None) -> str | None:
     if not path_str:
         return None
@@ -215,12 +197,13 @@ def _render_one_attempt(
     shot: Shot,
     *,
     storyboard: Storyboard,
+    provider: VideoProvider,
     prompt: str,
     version: int,
     prev_last_frame_url: str | None,
     cast_data: dict,
 ) -> dict:
-    """One Wan submission → wait → download → extract last frame.
+    """One DashScope submission → wait → download → extract last frame.
 
     Returns an attempt record dict (always — caller inspects .status).
     Never raises for upstream failures; it captures them in the dict.
@@ -229,25 +212,69 @@ def _render_one_attempt(
     clip_path = _versioned_clip_path(edir, shot.id, version)
     last_frame_path = _versioned_frame_path(edir, shot.id, version)
 
-    model, media = _media_for_shot(shot, cast_data, prev_last_frame_url)
-    input_obj: dict[str, Any] = {"prompt": prompt}
-    if shot.negative_prompt:
-        input_obj["negative_prompt"] = shot.negative_prompt
-    if media:
-        input_obj["media"] = media
-    parameters: dict[str, Any] = {
-        "resolution": storyboard.resolution,
-        "ratio": storyboard.ratio,
-        "duration": shot.duration,
-        "prompt_extend": True,
-        "watermark": False,
-    }
-    if shot.seed is not None:
-        parameters["seed"] = shot.seed
-
-    console.print(f"[bold cyan]→ submit {shot.id} ver{version}[/] model={model} dur={shot.duration}s")
+    # Bind shot/version onto the model-log context so every HTTP call this
+    # attempt makes (provider.submit, provider.wait, …) lands in the logs
+    # under the right (shot_id, version) tuple.
+    log_token = model_log.set_context(shot_id=shot.id, version=version)
     try:
-        resp = wan.submit(model, input=input_obj, parameters=parameters)
+        return _do_render_attempt(
+            project_id, episode_id, shot,
+            storyboard=storyboard, provider=provider,
+            prompt=prompt, version=version,
+            prev_last_frame_url=prev_last_frame_url,
+            cast_data=cast_data,
+            clip_path=clip_path, last_frame_path=last_frame_path,
+        )
+    finally:
+        model_log.reset_context(log_token)
+
+
+def _do_render_attempt(
+    project_id: str,
+    episode_id: str,
+    shot: Shot,
+    *,
+    storyboard: Storyboard,
+    provider: VideoProvider,
+    prompt: str,
+    version: int,
+    prev_last_frame_url: str | None,
+    cast_data: dict,
+    clip_path: Path,
+    last_frame_path: Path,
+) -> dict:
+    """Body of one render attempt — separated so caller manages log context."""
+    try:
+        built = provider.build_request(
+            shot,
+            storyboard=storyboard,
+            prompt=prompt,
+            cast_data=cast_data,
+            prev_last_frame_url=prev_last_frame_url,
+        )
+    except ValueError as e:
+        return {
+            "version": version, "status": "FAILED", "error": f"build: {e}",
+            "task_id": None, "video_url": None,
+            "clip_path": None, "last_frame_path": None, "last_frame_url": None,
+            "prompt": prompt, "review": None,
+        }
+
+    model = built["model"]
+    input_obj = built["input"]
+    parameters = built["parameters"]
+
+    effective_kind = built.get("effective_kind", shot.kind)
+    kind_label = (
+        f"{shot.kind}→{effective_kind}" if effective_kind != shot.kind else shot.kind
+    )
+    console.print(
+        f"[bold cyan]→ submit {shot.id} ver{version}[/] "
+        f"provider={provider.name} model={model} kind={kind_label} "
+        f"dur={parameters.get('duration', shot.duration)}s"
+    )
+    try:
+        resp = provider.submit(model, input=input_obj, parameters=parameters)
     except Exception as e:  # noqa: BLE001
         return {
             "version": version, "status": "FAILED", "error": f"submit: {e}",
@@ -258,7 +285,7 @@ def _render_one_attempt(
     task_id = resp["output"]["task_id"]
 
     try:
-        result = wan.wait(task_id)
+        result = provider.wait(task_id)
     except Exception as e:  # noqa: BLE001
         return {
             "version": version, "status": "FAILED", "error": f"wait: {e}",
@@ -366,6 +393,7 @@ def render_shot_with_review(
     shot: Shot,
     *,
     storyboard: Storyboard,
+    provider: VideoProvider,
     prev_last_frame_url: str | None,
     cast_data: dict,
     scene: Scene | None,
@@ -391,7 +419,8 @@ def render_shot_with_review(
     for ver in range(1, cfg.max_retry + 1):
         attempt = _render_one_attempt(
             project_id, episode_id, shot,
-            storyboard=storyboard, prompt=current_prompt, version=ver,
+            storyboard=storyboard, provider=provider,
+            prompt=current_prompt, version=ver,
             prev_last_frame_url=prev_last_frame_url, cast_data=cast_data,
         )
 
@@ -400,6 +429,7 @@ def render_shot_with_review(
                 review = review_mod.review_clip(
                     attempt["video_url"],
                     shot=shot, scene=scene, lore=lore_obj,
+                    cast_data=cast_data,
                     threshold=cfg.threshold, model=cfg.review_model,
                 )
             except Exception as e:  # noqa: BLE001
@@ -525,6 +555,7 @@ def _run_chain_group(
     group: ChainGroup,
     *,
     storyboard: Storyboard,
+    provider: VideoProvider,
     cast_data: dict,
     scenes_index: dict[str, Scene],
     lore_obj: Any | None,
@@ -559,6 +590,7 @@ def _run_chain_group(
         rec = render_shot_with_review(
             project_id, episode_id, shot,
             storyboard=storyboard,
+            provider=provider,
             prev_last_frame_url=prev_last_frame_url,
             cast_data=cast_data,
             scene=scenes_index.get(shot.scene),
@@ -609,15 +641,54 @@ def render_all(
     concurrency: int | None = None,
     shot_ids: list[str] | None = None,
     reset: bool = False,
+    provider_override: str | None = None,
 ) -> dict:
     """Render the whole storyboard with chain-group parallelism + per-clip review.
+
+    Provider resolution order: ``provider_override`` (CLI ``--provider``) →
+    ``storyboard.provider`` → ``VIDEOGEN_VIDEO_PROVIDER`` env var → built-in
+    default (``happyhorse``).
 
     Returns the merged shots_state.
     """
     cfg = cfg or RenderConfig.from_settings()
+    # Bind project + episode onto the model-log context. ThreadPoolExecutor
+    # copies contextvars per task, so chain groups running in parallel will
+    # each inherit (and refine with shot/version) the same root context.
+    log_token = model_log.set_context(project_id=project_id, episode_id=episode_id)
+    try:
+        return _render_all_inner(
+            project_id, episode_id, storyboard,
+            only_missing=only_missing, cfg=cfg, concurrency=concurrency,
+            shot_ids=shot_ids, reset=reset,
+            provider_override=provider_override,
+        )
+    finally:
+        model_log.reset_context(log_token)
+
+
+def _render_all_inner(
+    project_id: str,
+    episode_id: str,
+    storyboard: Storyboard,
+    *,
+    only_missing: bool,
+    cfg: RenderConfig,
+    concurrency: int | None,
+    shot_ids: list[str] | None,
+    reset: bool,
+    provider_override: str | None,
+) -> dict:
+    """Body of render_all — split out so the caller manages log context."""
     cast_data = cast_mod.load(project_id, episode_id)
     scenes_index = storyboard.scene_map()
     lore_obj = lore_mod.load(project_id, projects_dir=SETTINGS.projects_dir)
+    provider = get_provider(provider_override or storyboard.provider)
+    console.print(
+        f"[bold]video provider:[/] {provider.name} "
+        f"(t2v={provider.model_for('t2v')}, i2v={provider.model_for('i2v')}, "
+        f"r2v={provider.model_for('r2v')})"
+    )
 
     # Filter by --shot if requested (single-shot retry).
     if shot_ids:
@@ -641,12 +712,19 @@ def render_all(
     state_lock = threading.Lock()
     workers = max(1, concurrency or SETTINGS.max_concurrency)
     futures = {}
+    # ThreadPoolExecutor does NOT propagate contextvars to worker threads,
+    # so the model-log context (project_id, episode_id) we bound at the top
+    # of render_all would be lost inside _run_chain_group. We hand each task
+    # a fresh copy of the parent thread's context and let it run inside it.
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for g in groups:
+            ctx = contextvars.copy_context()
             futures[ex.submit(
+                ctx.run,
                 _run_chain_group,
                 project_id, episode_id, g,
-                storyboard=storyboard, cast_data=cast_data,
+                storyboard=storyboard, provider=provider,
+                cast_data=cast_data,
                 scenes_index=scenes_index, lore_obj=lore_obj,
                 cfg=cfg, state_lock=state_lock,
                 only_missing=only_missing, reset=reset,

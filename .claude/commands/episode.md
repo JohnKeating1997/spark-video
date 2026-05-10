@@ -1,6 +1,6 @@
 ---
 description: One-shot autopilot — orchestrate screenwriter ↔ director (per-scene parallel) → render (chain-DAG parallel + per-clip review) → stitch. VFX review is opt-in. User confirms at 4 gates.
-argument-hint: <project_id> <episode_id> "<premise>" [--vfx]
+argument-hint: <project_id> <episode_id> "<premise>" [--vfx] [--provider=happyhorse|wan]
 ---
 
 Project: $1
@@ -13,12 +13,38 @@ write narrative, storyboard, or review — you coordinate. You stop at
 exactly **4 gates**. Between gates, drive everything via shell + Task
 subagents.
 
+### Flag parsing — provider + vfx (Phase 0 prerequisite)
+
+Parse `$4` for two optional flags. Defaults if absent:
+
+- `--vfx` → run pre-render VFX review. Default: skipped.
+- `--provider=<name>` → pin video model family for this episode.
+  Valid: `happyhorse` (default) | `wan`. Determines what the director
+  selects for `Storyboard.provider` and which DashScope models the
+  renderer submits to.
+
+Resolve the provider in this order: `--provider=...` flag → existing
+`projects/$1/$2/storyboard.json:provider` (only on rerun) →
+`VIDEOGEN_VIDEO_PROVIDER` env var (`grep ^VIDEOGEN_VIDEO_PROVIDER .env`)
+→ built-in default `happyhorse`. Keep the resolved value in a shell
+variable `PROVIDER` that you pass to every CLI call below.
+
+```bash
+# Example resolver (adapt to your shell):
+PROVIDER=$(echo "$4" | grep -oE -- '--provider=[a-z]+' | sed 's/--provider=//')
+PROVIDER=${PROVIDER:-${VIDEOGEN_VIDEO_PROVIDER:-happyhorse}}
+case "$PROVIDER" in
+  wan|happyhorse) ;;
+  *) echo "unknown provider: $PROVIDER"; exit 2 ;;
+esac
+```
+
 **Your team:**
 
 | Role | Skill file | What they do |
 |------|------------|--------------|
 | 编剧 | `.claude/skills/screenwriter/SKILL.md` (wraps 山音 screenwriting-master) | premise → `scenes/scene-NN.md` (one scene per file) |
-| 导演 | `.claude/skills/video-director/SKILL.md` (wraps 山音 director-master) | scene-NN.md → `scenes/scene-NN.json` (storyboard fragment) |
+| 导演 | `.claude/skills/video-director/SKILL.md` (wraps 山音 director-master) | scene-NN.md → `scenes/scene-NN.json` (storyboard fragment, provider-agnostic `kind`) |
 | VFX 审核 | `.claude/skills/vfx-reviewer/SKILL.md` | pre-render storyboard quality gate. **DEFAULT: bypassed.** Run only if `$4` contains `--vfx`. |
 | 视频审核 | `.claude/skills/video-reviewer/SKILL.md` | per-clip qwen3-vl-plus quality gate, runs inside `render`. |
 | CLI | `videogen` | render + stitch + review (automated). |
@@ -115,9 +141,13 @@ in its own batch to process the last scene.
 
 ### Step 1.4 — merge + validate
 
+`scene compile` writes the resolved provider into `storyboard.provider`,
+so the rest of the pipeline (render, validate, escalation) is locked
+to the same family without re-passing the flag.
+
 ```bash
 ./bin/videogen scene status   --project $1 --episode $2
-./bin/videogen scene compile  --project $1 --episode $2
+./bin/videogen scene compile  --project $1 --episode $2 --provider "$PROVIDER"
 ./bin/videogen storyboard validate --project $1 --episode $2
 ```
 
@@ -177,10 +207,11 @@ back to the director: too many `use_prev_last_frame_as_first: true`.
 ## GATE 3 · storyboard approval
 
 Show:
-- the storyboard table (`storyboard show`),
+- the storyboard table (`storyboard show` — note the `provider:` line at the top),
 - the chain-group plan (`render-graph`),
 - the budget estimate (shots, duration, wall-clock, cost),
 - any remaining VFX warnings (only if `--vfx` was used).
+- the active provider + concrete model triple (printed by `storyboard show`).
 
 If `estimate` exited 2 (over budget), call out the cost explicitly.
 
@@ -193,6 +224,12 @@ Ask: render now?
 ```bash
 ./bin/videogen render --project $1 --episode $2 --yes
 ```
+
+The provider is read from `storyboard.provider` (set by `scene compile`).
+If you need to switch families on a partially-rendered episode, pass
+`--provider <name>` here too — it overrides for this run only and is the
+appropriate escape hatch when re-rendering an existing storyboard with a
+different family.
 
 This blocks. The CLI:
 - Runs chain groups in parallel up to `VIDEOGEN_MAX_CONCURRENCY`.
@@ -220,7 +257,7 @@ When exit 3 is returned, read
 2. Spawn a **director Task subagent** with the escalation report as
    input. It edits the matching shot in `storyboard.json` (prompt /
    model / duration / characters / seed), then exits.
-3. Run:
+3. Run (provider stays pinned via `storyboard.provider`):
    ```bash
    ./bin/videogen render --project $1 --episode $2 --shot <SHOT> \
        --force --reset-attempts --yes
