@@ -1,9 +1,10 @@
-"""ffmpeg helpers for frame extraction, concat, downloads."""
+"""ffmpeg helpers for frame extraction, concat, downloads, audio mux."""
 from __future__ import annotations
 
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 import httpx
 from rich.console import Console
@@ -69,6 +70,319 @@ def extract_first_frame(video: Path, out: Path) -> Path:
     return out
 
 
+def probe_duration(media: Path) -> float:
+    """Return media duration in seconds via ffprobe. 0.0 if unknown."""
+    _ensure_ffmpeg()
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "csv=p=0", str(media),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def audio_atempo(src: Path, dest: Path, tempo: float) -> Path:
+    """Resample playback speed with FFmpeg ``atempo`` (0.5–2.0 per filter).
+
+    ``tempo`` > 1.0 shortens wall-clock duration (faster speech). When
+    ``tempo`` is ~1.0, copies ``src`` to ``dest`` without re-encode.
+    """
+    _ensure_ffmpeg()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if abs(tempo - 1.0) < 0.001:
+        shutil.copy2(src, dest)
+        return dest
+    if not (0.5 <= tempo <= 2.0):
+        raise ValueError(f"audio_atempo: tempo must be in [0.5, 2.0], got {tempo}")
+    cmd = [
+        "ffmpeg", "-y", "-i", str(src),
+        "-filter:a", f"atempo={tempo:.6f}",
+        "-vn", str(dest),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg audio_atempo failed (rc={r.returncode}):\n"
+            f"  stderr tail: {r.stderr[-800:]}"
+        )
+    return dest
+
+
+def _has_audio_stream(video: Path) -> bool:
+    """Return True if the video file contains at least one audio stream."""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "a",
+        "-show_entries", "stream=codec_type",
+        "-of", "csv=p=0", str(video),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    return r.stdout.strip() != ""
+
+
+def _normalize_audio(video: Path, out: Path, *, ar: int = 24000, ac: int = 2) -> Path:
+    """Ensure every clip has a video + AAC audio stream before concat.
+
+    ffmpeg's concat demuxer with ``-c copy`` requires homogeneous stream
+    layouts across all clips.  This function re-encodes every clip so it
+    has exactly:
+
+    - video: libx264 / yuv420p
+    - audio: AAC 192k, ``ar`` Hz, ``ac`` channels
+
+    Clips without an audio stream get a silent AAC track added
+    (``-f lavfi -i anullsrc``) padded to match the video duration.
+    Clips with mono audio are upmixed to ``ac`` channels.
+
+    Defaults (ar=24000, ac=2) match DashScope video model output params.
+
+    Returns the normalized clip path.
+    """
+    _ensure_ffmpeg()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    v_dur = probe_duration(video)
+    if v_dur <= 0:
+        # Cannot probe duration — just copy and hope it's fine.
+        shutil.copy2(video, out)
+        return out
+
+    if _has_audio_stream(video):
+        # Re-encode to ensure consistent codec params (AAC 192k, same
+        # sample rate and channel layout).  ffmpeg automatically upmixes
+        # mono→stereo when -ac 2 is specified.
+        cmd = [
+            "ffmpeg", "-y", "-i", str(video),
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-ar", str(ar), "-ac", str(ac),
+            "-movflags", "+faststart",
+            str(out),
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg _normalize_audio (re-encode) failed (rc={r.returncode}):\n"
+                f"  stderr tail: {r.stderr[-800:]}"
+            )
+    else:
+        # No audio stream — add a silent AAC track padded to video length.
+        # Use same sample rate and channel layout as the target to avoid
+        # pops/clicks at boundaries with real audio clips.
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(video),
+            "-f", "lavfi", "-i", f"anullsrc=r={ar}:cl={('stereo' if ac == 2 else 'mono')}",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-ar", str(ar), "-ac", str(ac),
+            "-shortest",
+            "-movflags", "+faststart",
+            str(out),
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg _normalize_audio (add silent) failed (rc={r.returncode}):\n"
+                f"  stderr tail: {r.stderr[-800:]}"
+            )
+    return out
+
+
+def strip_audio(video: Path, out: Path) -> Path:
+    """Remove all audio streams from a video, producing a silent clip.
+
+    Re-encodes with libx264 to ensure consistent output format.
+    Used in narration mode to strip model-generated ambient noise
+    from drama/dialogue shots that lack character voice audio.
+    """
+    _ensure_ffmpeg()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y", "-i", str(video),
+        "-an",  # drop all audio
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        str(out),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg strip_audio failed (rc={r.returncode}):\n"
+            f"  stderr tail: {r.stderr[-800:]}"
+        )
+    return out
+
+
+def mux_audio(
+    video: Path,
+    audio: Path,
+    out: Path,
+    *,
+    fit: Literal["audio", "video"] = "audio",
+) -> Path:
+    """Drop the video's original audio, replace it with ``audio``.
+
+    ``fit`` controls how the two timelines are reconciled:
+
+    * ``audio`` (narration default): final clip length == audio length.
+      If audio is longer than video → freeze the video's last frame for
+      the gap (``tpad=stop_mode=clone``). If audio is shorter → trim
+      the video to the audio length.
+
+    * ``video``: final clip length == video length. Audio is padded with
+      silence (``apad``) or trimmed to match. Not used by narration mode.
+
+    Always re-encodes (libx264 + aac) — ``-c copy`` cannot satisfy the
+    pad/trim semantics. Output is mp4 with AAC audio.
+    """
+    _ensure_ffmpeg()
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    v_dur = probe_duration(video)
+    a_dur = probe_duration(audio)
+    if v_dur <= 0 or a_dur <= 0:
+        raise RuntimeError(
+            f"mux_audio: cannot probe durations (video={v_dur}s, audio={a_dur}s)"
+        )
+
+    if fit == "audio":
+        target = a_dur
+        delta = a_dur - v_dur
+        if delta > 0.05:
+            # Audio longer → freeze last frame to cover the tail.
+            vf = f"tpad=stop_mode=clone:stop_duration={delta:.3f}"
+        else:
+            vf = "null"
+    else:
+        target = v_dur
+        # Pad audio with silence if shorter; ffmpeg trims when longer via -t.
+        vf = "null"
+
+    af = "anull" if fit == "audio" else "apad"
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(video),
+        "-i", str(audio),
+        "-filter_complex",
+        f"[0:v]{vf}[v];[1:a]{af}[a]",
+        "-map", "[v]",
+        "-map", "[a]",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-ar", "24000", "-ac", "2",
+        "-t", f"{target:.3f}",
+        "-movflags", "+faststart",
+        str(out),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg mux_audio failed (rc={r.returncode}):\n"
+            f"  stderr tail: {r.stderr[-800:]}"
+        )
+    return out
+
+
+def mix_bgm(
+    video: Path,
+    bgm: Path,
+    out: Path,
+    *,
+    volume: float = 0.25,
+    fade_in_s: float = 0.5,
+    fade_out_s: float = 1.0,
+) -> Path:
+    """Mix a BGM audio file underneath the existing audio of ``video``.
+
+    The video's original audio is preserved (dialog / sfx / TTS narration).
+    The BGM is attenuated by ``volume`` (linear gain 0.0–1.0), fitted to
+    the video duration (loops if shorter, trims if longer), then crossfaded
+    in/out and mixed in with ``amix`` using ``duration=first`` so the
+    final clip length matches the video exactly.
+
+    If the input video has no audio stream, a silent AAC track is created
+    on the fly and the BGM becomes the sole audio.
+
+    Always re-encodes (libx264 + aac). Output is mp4 with AAC audio.
+    """
+    _ensure_ffmpeg()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not bgm.exists():
+        raise FileNotFoundError(f"mix_bgm: bgm file not found: {bgm}")
+
+    v_dur = probe_duration(video)
+    if v_dur <= 0:
+        raise RuntimeError(f"mix_bgm: cannot probe video duration: {video}")
+
+    vol = max(0.0, min(1.0, float(volume)))
+    fade_in = max(0.0, float(fade_in_s))
+    fade_out = max(0.0, float(fade_out_s))
+    fade_out_start = max(0.0, v_dur - fade_out)
+
+    bgm_chain = (
+        f"[1:a]aloop=loop=-1:size=2e9,"
+        f"atrim=0:{v_dur:.3f},asetpts=PTS-STARTPTS,"
+        f"volume={vol:.4f},"
+        f"afade=t=in:st=0:d={fade_in:.3f},"
+        f"afade=t=out:st={fade_out_start:.3f}:d={fade_out:.3f}"
+        f"[bgm]"
+    )
+
+    has_audio = _has_audio_stream(video)
+    if has_audio:
+        filt = (
+            f"{bgm_chain};"
+            f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+        )
+        inputs = ["-i", str(video), "-i", str(bgm)]
+    else:
+        # No source audio — pad a silent track to match video, then mix.
+        filt = (
+            f"[2:a]atrim=0:{v_dur:.3f},asetpts=PTS-STARTPTS[src];"
+            f"{bgm_chain};"
+            f"[src][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+        )
+        inputs = [
+            "-i", str(video),
+            "-i", str(bgm),
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+        ]
+
+    cmd = [
+        "ffmpeg", "-y", *inputs,
+        "-filter_complex", filt,
+        "-map", "0:v",
+        "-map", "[aout]",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k",
+        "-shortest",
+        "-movflags", "+faststart",
+        str(out),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        # ``-c:v copy`` can fail when the source isn't mp4-friendly; retry
+        # with a re-encode pass so we always succeed on weird inputs.
+        cmd_reenc = list(cmd)
+        idx = cmd_reenc.index("-c:v")
+        cmd_reenc[idx + 1] = "libx264"
+        cmd_reenc.insert(idx + 2, "-pix_fmt")
+        cmd_reenc.insert(idx + 3, "yuv420p")
+        r2 = subprocess.run(cmd_reenc, capture_output=True, text=True)
+        if r2.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg mix_bgm failed (rc={r2.returncode}):\n"
+                f"  first attempt stderr tail: {r.stderr[-400:]}\n"
+                f"  re-encode stderr tail: {r2.stderr[-400:]}"
+            )
+    return out
+
+
 def concat(clips: list[Path], out: Path, *, crossfade_s: float = 0.0) -> Path:
     """Concatenate clips. If crossfade_s > 0, applies xfade between each pair.
 
@@ -81,20 +395,47 @@ def concat(clips: list[Path], out: Path, *, crossfade_s: float = 0.0) -> Path:
         raise ValueError("no clips to concat")
 
     if crossfade_s <= 0:
+        # Normalize audio streams so concat demuxer doesn't break on
+        # clips with different stream layouts (audio-less vs AAC-muxed).
+        norm_dir = out.parent / "_normalize_tmp"
+        norm_dir.mkdir(parents=True, exist_ok=True)
+        norm_clips: list[Path] = []
+        for c in clips:
+            norm_path = norm_dir / c.name
+            _normalize_audio(c, norm_path)
+            norm_clips.append(norm_path)
+
         listfile = out.with_suffix(".txt")
-        listfile.write_text("\n".join(f"file '{c.resolve()}'" for c in clips), encoding="utf-8")
+        listfile.write_text("\n".join(f"file '{c.resolve()}'" for c in norm_clips), encoding="utf-8")
         cmd = [
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
             "-i", str(listfile), "-c", "copy", str(out),
         ]
-        subprocess.run(cmd, check=True, capture_output=True)
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        # Clean up temp normalized clips regardless of success/failure.
+        for p in norm_dir.iterdir():
+            p.unlink(missing_ok=True)
+        norm_dir.rmdir()
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg concat failed (rc={r.returncode}):\n"
+                f"  stderr tail: {r.stderr[-800:]}"
+            )
         return out
 
-    # crossfade path — re-encodes
-    inputs: list[str] = []
+    # crossfade path — re-encodes; normalize audio first for same reason.
+    norm_dir = out.parent / "_normalize_tmp"
+    norm_dir.mkdir(parents=True, exist_ok=True)
+    norm_clips: list[Path] = []
     for c in clips:
+        norm_path = norm_dir / c.name
+        _normalize_audio(c, norm_path)
+        norm_clips.append(norm_path)
+
+    inputs: list[str] = []
+    for c in norm_clips:
         inputs += ["-i", str(c)]
-    n = len(clips)
+    n = len(norm_clips)
     filt_parts = []
     last = "[0:v]"
     last_a = "[0:a]"
@@ -117,4 +458,8 @@ def concat(clips: list[Path], out: Path, *, crossfade_s: float = 0.0) -> Path:
         "-c:v", "libx264", "-c:a", "aac", str(out),
     ]
     subprocess.run(cmd, check=True, capture_output=True)
+    # Clean up temp normalized clips.
+    for p in norm_dir.iterdir():
+        p.unlink(missing_ok=True)
+    norm_dir.rmdir()
     return out

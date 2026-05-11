@@ -31,6 +31,13 @@ class Settings:
     # own concrete model names. Per-episode overrides live in
     # ``Storyboard.provider``; ``--provider`` on the CLI beats both.
     video_provider: str
+    # Narration-mode TTS defaults. Per-episode override:
+    # ``Storyboard.narrator_voice``; per-shot: ``Shot.narrator_voice``.
+    narrator_voice: str
+    narrator_tts_model: str
+    narrator_language: str
+    # Post-process: ffmpeg atempo on TTS wav (1.0 = unchanged). Clamped 0.5–2.0.
+    narrator_speech_rate: float
 
     @classmethod
     def load(cls) -> "Settings":
@@ -41,6 +48,8 @@ class Settings:
             base = "https://dashscope.aliyuncs.com/api/v1"
 
         api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
+        _rate = float(os.getenv("VIDEOGEN_NARRATOR_SPEECH_RATE", "1.2"))
+        _rate = max(0.5, min(2.0, _rate))
         return cls(
             api_key=api_key,
             region=region,
@@ -57,6 +66,10 @@ class Settings:
             rewrite_model=os.getenv("VIDEOGEN_REWRITE_MODEL", "qwen-plus").strip(),
             max_retry=int(os.getenv("VIDEOGEN_MAX_RETRY", "3")),
             video_provider=os.getenv("VIDEOGEN_VIDEO_PROVIDER", "happyhorse").strip().lower(),
+            narrator_voice=os.getenv("VIDEOGEN_NARRATOR_VOICE", "Cherry").strip(),
+            narrator_tts_model=os.getenv("VIDEOGEN_NARRATOR_TTS_MODEL", "qwen3-tts-flash").strip(),
+            narrator_language=os.getenv("VIDEOGEN_NARRATOR_LANGUAGE", "Auto").strip(),
+            narrator_speech_rate=_rate,
         )
 
     def require_api_key(self) -> str:

@@ -20,7 +20,7 @@ from pathlib import Path
 
 from .config import SETTINGS
 from . import state
-from .storyboard import Scene, Shot, Storyboard
+from .storyboard import EpisodeMode, Scene, Shot, Storyboard
 
 SCENE_NUM_RE = re.compile(r"^scene-(\d{2,3})\.md$")
 SCENE_FRAGMENT_RE = re.compile(r"^scene-(\d{2,3})\.json$")
@@ -45,7 +45,7 @@ def scene_json_path(project_id: str, episode_id: str, num: int) -> Path:
     return scenes_dir(project_id, episode_id) / f"scene-{num:02d}.json"
 
 
-SCENE_TEMPLATE = """\
+SCENE_TEMPLATE_DRAMA = """\
 ## 场景 {n} — <location>（<time of day>）
 
 **人物**: <characters in this scene, names from cast.json only>
@@ -61,13 +61,46 @@ SCENE_TEMPLATE = """\
 - <角色B>: "<dialog>"
 """
 
+# Narration mode — beats are an ordered sequence of 旁白/对白 mixes.
+# Each 旁白 beat becomes ONE narration shot at render time (TTS replaces
+# audio). Each 对白 beat becomes a regular drama shot.
+SCENE_TEMPLATE_NARRATION = """\
+## 场景 {n} — <location>（<time of day>）
 
-def scaffold_scene(project_id: str, episode_id: str, num: int, *, force: bool = False) -> Path:
+**类型**: narration
+**人物**: <characters that appear in any beat — names from cast.json only>
+**预估时长**: <integer>s   # ≈ Σ节拍时长
+**前史**: <one sentence>
+
+**节拍**:
+1. **旁白**: "<≤2句、≤60字的解说词>"
+   **画面**: <一句话描述; 建议时长 4s>
+2. **旁白**: "<下一句解说>"
+   **画面**: <画面描述; 建议时长 4s>
+3. **对白**:
+   - <角色A>: "<dialog>"
+   - <角色B>: "<dialog>"
+   **画面**: <画面描述; 建议时长 12s>
+"""
+
+# Back-compat alias — old code path used SCENE_TEMPLATE.
+SCENE_TEMPLATE = SCENE_TEMPLATE_DRAMA
+
+
+def scaffold_scene(
+    project_id: str,
+    episode_id: str,
+    num: int,
+    *,
+    force: bool = False,
+    mode: EpisodeMode = "drama",
+) -> Path:
     """Create an empty scenes/scene-NN.md template. No-op if file exists unless --force."""
     out = scene_md_path(project_id, episode_id, num)
     if out.exists() and not force:
         return out
-    out.write_text(SCENE_TEMPLATE.format(n=num), encoding="utf-8")
+    template = SCENE_TEMPLATE_NARRATION if mode == "narration" else SCENE_TEMPLATE_DRAMA
+    out.write_text(template.format(n=num), encoding="utf-8")
     return out
 
 
@@ -129,6 +162,8 @@ def compile_episode(
     resolution: str | None = None,
     ratio: str | None = None,
     provider: str | None = None,
+    mode: EpisodeMode | None = None,
+    narrator_voice: str | None = None,
 ) -> CompileResult:
     """Merge scenes/scene-*.md + scenes/scene-*.json into script.md + storyboard.json.
 
@@ -193,7 +228,8 @@ def compile_episode(
     # Provider resolution: explicit arg → env default → leave None and let
     # render-time fallback fill it in.
     resolved_provider = provider or SETTINGS.video_provider or None
-    sb_dict = {
+    resolved_mode: EpisodeMode = mode or "drama"
+    sb_dict: dict = {
         "project_id": project_id,
         "title": title,
         "synopsis": synopsis,
@@ -201,9 +237,12 @@ def compile_episode(
         "resolution": resolution or SETTINGS.resolution,
         "ratio": ratio or SETTINGS.ratio,
         "provider": resolved_provider,
+        "mode": resolved_mode,
         "scenes": scenes,
         "shots": shots,
     }
+    if narrator_voice:
+        sb_dict["narrator_voice"] = narrator_voice
 
     # Validate via pydantic — this is the schema gate.
     sb = Storyboard.model_validate(sb_dict)

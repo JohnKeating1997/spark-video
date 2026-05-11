@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .. import bgm as bgm_mod
 from .base import BuildResult, Feature, ShotKind, VideoProvider
 
 
@@ -38,11 +39,16 @@ class WanProvider(VideoProvider):
         prompt: str,
         cast_data: dict,
         prev_last_frame_url: str | None,
+        scene=None,
+        movie_set_data: dict | None = None,
     ) -> BuildResult:
         kind: ShotKind = shot.kind
         warnings: list[str] = []
         media: list[dict] = []
         char_index = {c["name"]: c for c in cast_data["characters"]}
+        set_index = {
+            s["name"]: s for s in (movie_set_data or {}).get("sets", [])
+        }
 
         if kind == "r2v":
             for char_name in shot.characters:
@@ -58,6 +64,10 @@ class WanProvider(VideoProvider):
                 if c.get("audio_url"):
                     entry["reference_voice"] = c["audio_url"]
                 media.append(entry)
+            # Lock the location with a set reference image, after the cast.
+            set_url = _resolve_set_image_url(shot, scene, set_index, warnings)
+            if set_url:
+                media.append({"type": "reference_image", "url": set_url})
             if prev_last_frame_url and shot.use_prev_last_frame_as_first:
                 media.append({"type": "first_frame", "url": prev_last_frame_url})
 
@@ -72,9 +82,23 @@ class WanProvider(VideoProvider):
 
         # t2v: no media
 
-        input_obj: dict[str, Any] = {"prompt": prompt}
-        if shot.negative_prompt:
-            input_obj["negative_prompt"] = shot.negative_prompt
+        # If the episode forbids in-clip BGM, weave the directive into both
+        # the prompt (steers generation) and the negative_prompt (banlist).
+        effective_prompt = prompt
+        negative_prompt = shot.negative_prompt or ""
+        if getattr(storyboard, "bgm", None) and storyboard.bgm.forbid_model_bgm:
+            directive = bgm_mod.forbid_directive()
+            if directive not in effective_prompt:
+                effective_prompt = f"{effective_prompt} {directive}".strip()
+            neg_terms = bgm_mod.forbid_negative_terms()
+            if neg_terms not in negative_prompt:
+                negative_prompt = (
+                    f"{negative_prompt}, {neg_terms}" if negative_prompt else neg_terms
+                )
+
+        input_obj: dict[str, Any] = {"prompt": effective_prompt}
+        if negative_prompt:
+            input_obj["negative_prompt"] = negative_prompt
         if media:
             input_obj["media"] = media
 
@@ -95,3 +119,54 @@ class WanProvider(VideoProvider):
             effective_kind=kind,
             warnings=warnings,
         )
+
+
+def _resolve_set_image_url(
+    shot,
+    scene,
+    set_index: dict[str, dict],
+    warnings: list[str],
+) -> str | None:
+    """Resolve set_id → uploaded image_url.
+
+    Precedence (per-shot override beats scene-level default):
+      shot.set_id  (None = inherit; ""  = explicit "no set")
+        > scene.set_id
+
+    Warns (never raises) when the resolved name is not in movie_set.json.
+    """
+    set_id = _effective_set_id(shot, scene)
+    if not set_id:
+        return None
+    s = set_index.get(set_id)
+    if not s:
+        warnings.append(
+            f"{shot.id}: set_id={set_id!r} has no folder in movie_set.json "
+            f"— set reference image skipped. Add a folder under "
+            f"projects/<id>/movie-set/ or projects/<id>/<episode>/movie-set/ "
+            f"and re-run `videogen set init`."
+        )
+        return None
+    url = s.get("image_url")
+    if not url:
+        warnings.append(
+            f"{shot.id}: set {set_id!r} has no image_url (likely "
+            f"`set init --no-upload`); set reference image skipped."
+        )
+    return url
+
+
+def _effective_set_id(shot, scene) -> str | None:
+    """Resolve the active set_id for one shot, honouring the per-shot
+    override semantics:
+
+      - shot.set_id is None   → inherit scene.set_id
+      - shot.set_id == ""     → explicit opt-out, no set even if scene has one
+      - shot.set_id == "x"    → use 'x' regardless of scene.set_id
+    """
+    shot_set = getattr(shot, "set_id", None)
+    if shot_set is not None:
+        return shot_set or None  # "" → None
+    if scene is None:
+        return None
+    return getattr(scene, "set_id", None) or None

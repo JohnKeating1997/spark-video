@@ -54,9 +54,16 @@ After all scenes are written, the producer runs
 
 You do NOT write `script.md` or `storyboard.json` directly.
 
-### Scene file format
+### Scene file format — depends on **Episode mode**
 
-Each `scene-NN.md` is a single scene block in 山音 format:
+The producer tells you the mode (`drama` | `narration`) when spawning
+this subagent. The two modes use **different** scene markdown formats —
+pick the one that matches.
+
+#### drama mode (default — 短剧模式)
+
+Each `scene-NN.md` is one scene block in standard 山音 format. This is
+the legacy / today's flow — long shots, dialog & action drive the story.
 
 ```markdown
 ## 场景 N — <location>（<time of day>）
@@ -73,6 +80,46 @@ Each `scene-NN.md` is a single scene block in 山音 format:
 - <角色A>: "<dialog>"
 - <角色B>: "<dialog>"
 ```
+
+#### narration mode (旁白解说模式 — "10-min recap" 形式)
+
+A scene is a **sequence of beats** (节拍) mixed freely between 旁白
+(third-person voiceover, becomes a TTS-driven narration shot) and 对白
+(in-scene dialog, becomes a regular drama shot). Each beat will be one
+shot at render time.
+
+```markdown
+## 场景 N — <location>（<time of day>）
+
+**类型**: narration
+**人物**: <characters who appear in any beat — cast.json names only>
+**预估时长**: <integer>s              # ≈ Σ节拍时长
+**前史**: <one sentence>
+
+**节拍**:
+1. **旁白**: "三年前, 钱夫人在七侠镇开了第一家青楼。"
+   **画面**: 长镜头扫过钱夫人在客栈门口插旗。建议时长: 4s
+2. **旁白**: "她不爱江湖, 只爱黄金。"
+   **画面**: 钱夫人数银票, 香炉袅袅。建议时长: 4s
+3. **对白**:
+   - 钱夫人: "听说同福客栈又招新人了？"
+   - 佟掌柜: "关你什么事。"
+   **画面**: 茶馆对峙, 长镜头。建议时长: 12s
+```
+
+Narration铁律 (在山音红线之外, 旁白模式专属):
+
+- **单条旁白 ≤ 2 句、≤ 60 字**。TTS 合成短句更易和画面对位; 长句会被
+  ffmpeg 用 freeze-frame 拉长视频, 视觉上很僵。如果想说更多, 拆成多条
+  连续旁白节拍。
+- **旁白用第三人称叙事口吻** ("钱夫人来到镇上 / 没人知道他的真实身份")。
+  禁止把对白伪装成旁白。
+- **对白节拍格式同 drama 模式**, 严格只用 cast.json 里的角色名。
+- **旁白:对白 比例由你决定**——这是用户委托给编剧 Agent 的核心创作
+  自主权。一个 2-3 分钟的解说集通常 70-85% 旁白 + 15-30% 对白是不错的
+  起点, 但不强制。
+- 单场景节拍数没硬上限, 但建议 3-12 条之间 (太少不像解说, 太多碎)。
+- **scaffold 工具**: `./bin/videogen scene scaffold --project <id> --episode <ep> --num <N> --mode narration` 写出节拍模板。
 
 The `## 场景 N` heading uses the same N as the filename.
 
@@ -109,7 +156,23 @@ craft, so they live here:
 2. **Lore.forbidden** terms must never appear in 剧情 or 对白.
 3. **User-supplied dialog lines must appear verbatim** in some scene.
    This is non-negotiable, regardless of what 山音 craft suggests.
-4. **Episode-only NPC identification (CAST CHECK)** — at the bottom of
+4. **Costume / 服饰 / 发型 / 配饰 — only mention when it CHANGES.**
+   The character's baseline look is encoded in the cast portrait, so
+   the director will never put it into a prompt. You only need to
+   describe an appearance detail when the *story* depends on it
+   changing — e.g. "陆辰换上婚礼礼服" / "苏晚摘下耳环掷在桌上" /
+   "蓬头垢面"。Otherwise leave appearance to the portrait.
+   - If a costume genuinely needs to differ from the project cast for
+     this whole episode (整集换装), tell the producer at GATE 2 — they
+     will fork the cast into the episode tier (`cast fork --regen ...`)
+     and the new portrait carries the change without any extra dialog
+     gymnastics. Don't try to solve it by repeatedly mentioning the
+     outfit.
+5. **Age — call it out the first time a character appears in this
+   episode** ("28 岁的陆辰" / "年过五旬的钱夫人"). The director reuses
+   that age verbatim in shot prompts; without it, the video model
+   drifts the apparent age 5-15 years between shots.
+6. **Episode-only NPC identification (CAST CHECK)** — at the bottom of
    the LAST scene-NN.md, append a single HTML comment block:
 
    ```markdown
@@ -145,3 +208,5 @@ verifies this after `scene compile`.
 - Don't write 图1/图2 prompt syntax — that's the director's domain.
 - Don't invent character names not in `cast.json`.
 - Don't skip the `scene ready` sentinel — the director won't start otherwise.
+- Don't keep re-describing 着装 / 发型 / 妆容 inside 剧情. Mention an
+  appearance detail only when it CHANGES (rule 4 above).

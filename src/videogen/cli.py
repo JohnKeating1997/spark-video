@@ -28,20 +28,23 @@ from rich.console import Console
 from rich.table import Table
 
 from . import (
+    bgm as bgm_mod,
     cast as cast_mod,
     ffmpeg as ff,
     lore as lore_mod,
     model_log,
+    movie_set as movie_set_mod,
     npc as npc_mod,
     render as render_mod,
     review as review_mod,
     scene as scene_mod,
     soul as soul_mod,
     state,
+    tts as tts_mod,
 )
 from .config import SETTINGS
 from .providers import get_provider, list_providers
-from .storyboard import Storyboard
+from .storyboard import BGMConfig, Storyboard
 
 app = typer.Typer(
     add_completion=False,
@@ -238,6 +241,103 @@ dont: []
 """
 
 
+@cast_app.command("fork")
+def cast_fork(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+    name: str = typer.Option(..., "--name", help="character name in projects/<p>/cast/<NAME>/"),
+    overwrite: bool = typer.Option(
+        False, "--force",
+        help="overwrite the episode-tier folder if it already exists",
+    ),
+    drop_portraits: bool = typer.Option(
+        False, "--drop-portraits",
+        help="copy soul card + voice but NOT the portrait images "
+             "(use this when you plan to regenerate the portrait with "
+             "different clothing via `cast generate-npc`)",
+    ),
+    regen_desc: str | None = typer.Option(
+        None, "--regen",
+        help="after copying, regenerate the portrait via wan2.6-t2i with "
+             "this appearance description (e.g. for a costume change). "
+             "Implies --drop-portraits.",
+    ),
+    mood_anchor: str = typer.Option(
+        "", "--mood",
+        help="mood_anchor for portrait regen; default reads from project lore.md",
+    ),
+):
+    """Deep-copy a project-tier cast folder into the episode tier.
+
+    Use this when an episode genuinely needs a costume / appearance
+    override that the rest of the project shouldn't see. Workflow:
+
+    \b
+      1. ``cast fork --project p --episode e --name 钱夫人``
+         → projects/p/e/cast/钱夫人/  (copy of projects/p/cast/钱夫人/)
+      2. (Optional) Replace or regenerate the portrait inside the
+         episode folder. Either drop a new image manually, or run
+         ``cast generate-npc --episode e --name 钱夫人 --desc "..."``
+         (overwrites <name>.png inside the episode folder).
+      3. ``cast init --project p --episode e``
+         → cast.json now uses the episode portrait for this character.
+
+    The ``--regen`` flag bundles steps 1 + 2 + 3 in one call by also
+    invoking the t2i NPC pipeline with the new appearance description.
+    """
+    src = cast_mod.project_cast_dir(project_id) / name
+    if not src.is_dir():
+        _bail(
+            f"projects/{project_id}/cast/{name}/ does not exist. "
+            f"Fork only makes sense for existing project-tier cast members."
+        )
+    dst = cast_mod.episode_cast_dir(project_id, episode_id) / name
+    if dst.exists() and not overwrite:
+        _bail(
+            f"{dst} already exists. Use --force to overwrite, or just "
+            f"edit the existing episode-tier folder by hand."
+        )
+    if dst.exists():
+        import shutil as _sh
+        _sh.rmtree(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    # Copy everything; optionally drop portraits.
+    drop_portraits = drop_portraits or (regen_desc is not None)
+    import shutil as _sh
+    _sh.copytree(src, dst)
+    if drop_portraits:
+        for p in list(dst.iterdir()):
+            if p.suffix.lower() in cast_mod.IMAGE_EXTS:
+                p.unlink()
+                console.print(f"  [dim]· dropped {p.name}[/]")
+    console.print(f"[green]✓ forked → {dst}[/]")
+
+    if regen_desc:
+        if not mood_anchor:
+            lore = lore_mod.load(project_id, projects_dir=SETTINGS.projects_dir)
+            if lore and lore.front.mood_anchor:
+                mood_anchor = lore.front.mood_anchor
+        out = npc_mod.generate_portrait(
+            name, regen_desc,
+            project_id=project_id,
+            episode_id=episode_id,
+            mood_anchor=mood_anchor,
+        )
+        console.print(f"[green]✓ regenerated portrait → {out}[/]")
+    else:
+        console.print(
+            f"[dim]· next: drop a new portrait into {dst}/, OR run "
+            f"`./bin/videogen cast generate-npc --project {project_id} "
+            f"--episode {episode_id} --name {name} --desc \"<new appearance>\"`[/]"
+        )
+    console.print(
+        f"[dim]· then run "
+        f"`./bin/videogen cast init --project {project_id} --episode {episode_id}` "
+        f"to rebuild cast.json with the episode override.[/]"
+    )
+
+
 @cast_app.command("generate-npc")
 def cast_generate_npc(
     project_id: str = typer.Option(..., "--project", "-p"),
@@ -276,6 +376,361 @@ def cast_generate_npc(
             f"[dim]Run `./bin/videogen cast init --project {project_id} "
             f"--episode <EPISODE>` to pick this NPC up.[/]"
         )
+
+
+# ---------- movie-set ---------------------------------------------------------
+set_app = typer.Typer(
+    help="Manage 布景 / movie sets (folder-per-set, two-tier project↔episode)",
+)
+app.add_typer(set_app, name="set")
+
+
+@set_app.command("init")
+def set_init(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+    no_upload: bool = typer.Option(False, "--no-upload", help="skip OSS upload (dry run)"),
+):
+    """Scan project + episode movie-set folders, build composites, upload, write movie_set.json.
+
+    Two tiers (episode overrides project) — same model as cast:
+
+      • projects/<id>/movie-set/<name>/             ← shared (e.g. sitcom rooms)
+      • projects/<id>/<episode>/movie-set/<name>/   ← episode-only locations
+
+    Each set lives in its own folder. Multi-image sets get a 2/4/9-pane
+    grid (composed within ONE set's folder, never across sets).
+
+    A set is *optional* — episodes with no sets simply skip the set
+    reference image at render time. Scenes that name a ``set_id`` get
+    that set's image appended to every r2v shot's ``media[]``.
+    """
+    payload = movie_set_mod.init_episode(project_id, episode_id, do_upload=not no_upload)
+    sets = payload["sets"]
+    if not sets:
+        console.print(
+            f"[yellow](no movie sets found in {payload['project_set_dir']} "
+            f"or {payload['episode_set_dir']})[/]"
+        )
+        console.print(
+            f"  scaffold one with: ./bin/videogen set scaffold --project {project_id} "
+            f"--name \"<set name>\""
+        )
+        return
+    table = Table(title=f"Movie sets for {project_id}/{payload['episode_id']}")
+    table.add_column("Name")
+    table.add_column("Id")
+    table.add_column("Source")
+    table.add_column("Image")
+    table.add_column("Card")
+    table.add_column("Uploaded")
+    for s in sets:
+        n_img = len(s.get("images_local", []))
+        img_cell = Path(s["image_local"]).name + (
+            f" (×{n_img}→grid)" if s.get("composite_image") else ""
+        )
+        src = s.get("source", "project")
+        table.add_row(
+            s["name"],
+            s.get("id", "?"),
+            f"[bold magenta]{src}[/]" if src == "episode" else src,
+            img_cell,
+            "✓" if s.get("card") else "—",
+            "✓" if s.get("image_url") else "—",
+        )
+    console.print(table)
+
+
+@set_app.command("ls")
+def set_ls(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+):
+    """Print movie_set.json for the episode."""
+    typer.echo(json.dumps(
+        movie_set_mod.load(project_id, episode_id), ensure_ascii=False, indent=2,
+    ))
+
+
+@set_app.command("scaffold")
+def set_scaffold(
+    name: str = typer.Option(..., "--name", help="set display name, e.g. 同福客栈大堂"),
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str | None = typer.Option(
+        None, "--episode", "-e",
+        help="if set, scaffold under projects/<id>/<episode>/movie-set/<name>/ "
+             "(episode-only location). Default: project-shared set.",
+    ),
+    overwrite: bool = typer.Option(False, "--force"),
+):
+    """Scaffold ``<set_dir>/<name>/set.md`` with a fillable template.
+
+    Defaults to the **project** tier (shared across all episodes —
+    perfect for sitcom recurring rooms). Pass ``--episode`` for a
+    one-off location that lives only in this episode.
+    """
+    if episode_id:
+        root = movie_set_mod.episode_set_dir(project_id, episode_id)
+    else:
+        root = movie_set_mod.project_set_dir(project_id)
+    set_dir = root / name
+    set_dir.mkdir(parents=True, exist_ok=True)
+    out = set_dir / movie_set_mod.SET_FILENAME
+    if out.exists() and not overwrite:
+        console.print(f"[red]{out} exists; use --force to overwrite[/]")
+        raise typer.Exit(1)
+    out.write_text(movie_set_mod.SET_TEMPLATE.format(name=name), encoding="utf-8")
+    console.print(f"[green]✓ wrote {out}[/]")
+    console.print(
+        f"  drop a reference image into {set_dir}/, then re-run "
+        f"`./bin/videogen set init --project {project_id} "
+        f"--episode {episode_id or '<EPISODE>'}`."
+    )
+
+
+@set_app.command("generate")
+def set_generate(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str | None = typer.Option(
+        None, "--episode", "-e",
+        help="save into the episode's movie-set/ folder (episode-only). "
+             "Omit to save into the project's shared movie-set/.",
+    ),
+    name: str = typer.Option(..., "--name", help="set display name"),
+    description: str = typer.Option(
+        ..., "--desc",
+        help="Detailed description for portrait generation: 材质 / 布局 / 灯光 / 关键道具",
+    ),
+    mood_anchor: str = typer.Option(
+        "", "--mood",
+        help="project mood_anchor for style consistency (default: from lore.md)",
+    ),
+):
+    """Generate a reference image for a set via wan2.6-t2i.
+
+    Useful when you have no on-set reference photo handy and want the
+    model to invent a consistent location based on a textual brief.
+    Reuses the same t2i pipeline as `cast generate-npc`.
+    """
+    if not mood_anchor:
+        lore = lore_mod.load(project_id, projects_dir=SETTINGS.projects_dir)
+        if lore and lore.front.mood_anchor:
+            mood_anchor = lore.front.mood_anchor
+
+    if episode_id:
+        set_dir = movie_set_mod.episode_set_dir(project_id, episode_id) / name
+    else:
+        set_dir = movie_set_mod.project_set_dir(project_id) / name
+    set_dir.mkdir(parents=True, exist_ok=True)
+
+    # Re-use NPC generation but route the file into the set folder.
+    # We do this by pointing the NPC writer's project/episode at the
+    # right cast dir... but npc.py hard-codes `cast` paths, so just
+    # call the underlying t2i + download helpers directly here.
+    prompt = ", ".join(filter(None, [
+        f"场景照片, {name}",
+        description,
+        "广角空镜, 无人物, 自然光照, 高质量, 细腻光影, 真实质感",
+        mood_anchor,
+    ]))
+    log_token = model_log.set_context(project_id=project_id, episode_id=episode_id)
+    try:
+        console.print(f"[cyan]generating reference image for set {name}…[/]")
+        image_url = npc_mod._call_t2i(
+            prompt,
+            negative_prompt="低分辨率, 错误, 残缺, 透视错误, 多余物品, 现代乱杂, 人物",
+            size="1280*720",
+        )
+    finally:
+        model_log.reset_context(log_token)
+
+    out_path = set_dir / f"{name}.png"
+    npc_mod._download_image(image_url, out_path)
+    console.print(f"[green]✓ set reference → {out_path}[/]")
+    if episode_id:
+        console.print(
+            f"[dim]Run `./bin/videogen set init --project {project_id} "
+            f"--episode {episode_id}` to include this set in movie_set.json.[/]"
+        )
+    else:
+        console.print(
+            f"[dim]Run `./bin/videogen set init --project {project_id} "
+            f"--episode <EPISODE>` to pick this set up.[/]"
+        )
+
+
+# ---------- bgm ---------------------------------------------------------------
+bgm_app = typer.Typer(
+    help="Manage background music (folder-per-tier, two-tier project↔episode)",
+)
+app.add_typer(bgm_app, name="bgm")
+
+
+@bgm_app.command("ls")
+def bgm_ls(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+):
+    """List BGM tracks visible to the episode (project + episode tier merged)."""
+    tracks = bgm_mod.discover(project_id, episode_id)
+    if not tracks:
+        console.print(
+            f"[yellow](no bgm files under projects/{project_id}/bgm/ "
+            f"or projects/{project_id}/<episode>/bgm/)[/]"
+        )
+        return
+    table = Table(title=f"BGM for {project_id}/{state.normalize_episode_id(episode_id)}")
+    table.add_column("Name")
+    table.add_column("File")
+    table.add_column("Source")
+    table.add_column("Size")
+    for t in tracks:
+        src = t["source"]
+        table.add_row(
+            t["name"],
+            t["file"],
+            f"[bold magenta]{src}[/]" if src == "episode" else src,
+            f"{t['size_bytes']/1024/1024:.2f} MB",
+        )
+    console.print(table)
+
+
+@bgm_app.command("discover")
+def bgm_discover(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+    json_out: bool = typer.Option(True, "--json/--no-json", help="emit JSON for the producer agent"),
+):
+    """Producer entry point at GATE 0.5 — JSON-friendly BGM probe.
+
+    Exit code 0 if at least one track is detected (producer should ask
+    the user how to use BGM); exit code 2 if no BGM exists (skip GATE).
+    """
+    tracks = bgm_mod.discover(project_id, episode_id)
+    payload = {
+        "project_id": project_id,
+        "episode_id": state.normalize_episode_id(episode_id),
+        "project_bgm_dir": str(bgm_mod.project_bgm_dir(project_id)),
+        "episode_bgm_dir": str(bgm_mod.episode_bgm_dir(project_id, episode_id)),
+        "has_bgm": bool(tracks),
+        "tracks": tracks,
+    }
+    if json_out:
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        if not tracks:
+            console.print(
+                f"[yellow]no BGM detected[/] under "
+                f"{payload['project_bgm_dir']} or {payload['episode_bgm_dir']}"
+            )
+        else:
+            console.print(f"[green]{len(tracks)} BGM track(s) detected:[/]")
+            for t in tracks:
+                console.print(f"  · {t['name']} ({t['file']}, {t['source']})")
+    raise typer.Exit(code=0 if tracks else 2)
+
+
+@bgm_app.command("configure")
+def bgm_configure(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+    mode: str = typer.Option(
+        ..., "--mode",
+        help="off | global | scene. off = detected but skip; global = "
+             "one track for the whole video (use --track); scene = "
+             "per-scene via Scene.bgm_track (director assigns).",
+    ),
+    forbid_model_bgm: bool = typer.Option(
+        True, "--forbid-model-bgm/--allow-model-bgm",
+        help="Inject a 'no music in the clip' directive into every shot "
+             "prompt to prevent conflicts with the stitched BGM. "
+             "Recommended on whenever you stitch your own BGM.",
+    ),
+    track: str | None = typer.Option(
+        None, "--track",
+        help="Track name (filename stem) for --mode=global. Must exist "
+             "under projects/<id>/bgm/ or projects/<id>/<episode>/bgm/.",
+    ),
+    volume: float = typer.Option(0.25, "--volume", help="BGM gain 0.0..1.0 (default 0.25)"),
+    fade_in_s: float = typer.Option(0.5, "--fade-in", help="seconds"),
+    fade_out_s: float = typer.Option(1.0, "--fade-out", help="seconds"),
+    disable: bool = typer.Option(
+        False, "--disable",
+        help="Set enabled=False without changing mode/track. Useful when "
+             "you keep forbid_model_bgm=True for clean clips but ship "
+             "the video without mixed music.",
+    ),
+):
+    """Write storyboard.bgm into the existing storyboard.json.
+
+    Idempotent: re-run to switch modes or tweak volume. Validates the
+    track name against the bgm/ folder and against any per-scene tags.
+    """
+    if mode not in ("off", "global", "scene"):
+        _bail(f"unknown --mode {mode!r}; valid: off | global | scene")
+
+    raw = state.read_json(project_id, "storyboard.json", episode_id=episode_id)
+    if not raw:
+        _bail(
+            f"storyboard.json missing for {project_id}/"
+            f"{state.normalize_episode_id(episode_id)} — compile scenes first."
+        )
+
+    enabled = (not disable) and mode != "off"
+
+    if mode == "global" and enabled:
+        if not track:
+            _bail("--track is required when --mode=global")
+        if bgm_mod.resolve_track(project_id, episode_id, track) is None:
+            available = ", ".join(
+                t["name"] for t in bgm_mod.discover(project_id, episode_id)
+            ) or "(none)"
+            _bail(
+                f"track {track!r} not found under bgm/. Available: {available}"
+            )
+
+    if mode == "scene" and enabled:
+        sb_preview = Storyboard.model_validate(raw)
+        tagged = [s for s in sb_preview.scenes if s.bgm_track]
+        if not tagged:
+            console.print(
+                f"[yellow]⚠[/] mode=scene but no Scene.bgm_track is set yet. "
+                f"The director should assign per-scene tracks in "
+                f"scenes/scene-NN.json (then rerun `scene compile`)."
+            )
+        else:
+            unresolved: list[tuple[str, str]] = []
+            for sc in tagged:
+                if bgm_mod.resolve_track(project_id, episode_id, sc.bgm_track) is None:
+                    unresolved.append((sc.id, sc.bgm_track))
+            if unresolved:
+                available = ", ".join(
+                    t["name"] for t in bgm_mod.discover(project_id, episode_id)
+                ) or "(none)"
+                console.print("[yellow]unresolved scene BGM tracks:[/]")
+                for sid, tname in unresolved:
+                    console.print(f"  {sid} → {tname!r}")
+                console.print(f"  available: {available}")
+
+    cfg = BGMConfig(
+        enabled=enabled,
+        mode=mode,  # type: ignore[arg-type]
+        forbid_model_bgm=forbid_model_bgm,
+        track=track if mode == "global" else None,
+        volume=volume,
+        fade_in_s=fade_in_s,
+        fade_out_s=fade_out_s,
+    )
+    raw["bgm"] = cfg.model_dump()
+
+    sb = Storyboard.model_validate(raw)
+    state.write_json(project_id, "storyboard.json", sb.model_dump(), episode_id=episode_id)
+    console.print(
+        f"[green]✓ storyboard.bgm written: mode={cfg.mode} "
+        f"enabled={cfg.enabled} forbid_model_bgm={cfg.forbid_model_bgm}"
+        + (f" track={cfg.track}" if cfg.track else "")
+        + f" volume={cfg.volume}[/]"
+    )
 
 
 # ---------- lore --------------------------------------------------------------
@@ -397,6 +852,27 @@ def sb_validate(
             console.print(f"  {sid} → {ch}")
         raise typer.Exit(code=2)
 
+    # Cross-check scene.set_id against movie_set.json (soft warning).
+    set_data = movie_set_mod.load(project_id, episode_id)
+    known_sets = {s["name"] for s in set_data.get("sets", [])}
+    unknown_sets: list[tuple[str, str]] = []
+    for sc in sb.scenes:
+        if sc.set_id and sc.set_id not in known_sets:
+            unknown_sets.append((sc.id, sc.set_id))
+    if unknown_sets:
+        console.print(
+            "[yellow]scenes referencing unknown movie sets "
+            "(set reference image won't attach):[/]"
+        )
+        for sid, set_id in unknown_sets:
+            console.print(f"  {sid} → set_id={set_id!r}")
+        console.print(
+            f"  fix: add a folder under projects/{project_id}/movie-set/{set_id}/ "
+            f"or projects/{project_id}/<episode>/movie-set/{set_id}/, then "
+            f"run `./bin/videogen set init --project {project_id} "
+            f"--episode {episode_id}`."
+        )
+
     warnings = sb.lint()
     if warnings:
         console.print("[yellow]continuity warnings (won't block render):[/]")
@@ -499,14 +975,16 @@ def sb_show(
         scene_table = Table(title="Scenes")
         scene_table.add_column("ID")
         scene_table.add_column("Name")
-        scene_table.add_column("Description(80)")
+        scene_table.add_column("Description(60)")
         scene_table.add_column("Characters")
+        scene_table.add_column("Set")
         scene_table.add_column("Seed")
         for sc in sb.scenes:
             scene_table.add_row(
                 sc.id, sc.name,
-                (sc.description[:80] + "…") if len(sc.description) > 80 else sc.description,
+                (sc.description[:60] + "…") if len(sc.description) > 60 else sc.description,
                 ",".join(sc.characters_present) or "—",
+                sc.set_id or "—",
                 str(sc.seed) if sc.seed else "—",
             )
         console.print(scene_table)
@@ -522,21 +1000,51 @@ def sb_show(
     except ValueError:
         provider_label = f"{provider_name} (unknown!)"
     console.print(f"[dim]video provider: {provider_label}[/]")
+    mode_label = sb.mode
+    if sb.mode == "narration":
+        nv = sb.narrator_voice or SETTINGS.narrator_voice
+        n_narr = sum(1 for s in sb.shots if s.role == "narration")
+        n_drama = len(sb.shots) - n_narr
+        mode_label = (
+            f"narration (旁白解说) · {n_narr} narration shots / {n_drama} drama shots · "
+            f"voice={nv}"
+        )
+    console.print(f"[dim]episode mode: {mode_label}[/]")
+    if sb.bgm is not None:
+        bgm_label = (
+            f"mode={sb.bgm.mode} enabled={sb.bgm.enabled} "
+            f"forbid_model_bgm={sb.bgm.forbid_model_bgm}"
+            + (f" track={sb.bgm.track}" if sb.bgm.track else "")
+            + f" volume={sb.bgm.volume}"
+        )
+        console.print(f"[dim]bgm: {bgm_label}[/]")
 
     table = Table(title=sb.title)
     table.add_column("ID"); table.add_column("Scene"); table.add_column("Dur")
-    table.add_column("Kind"); table.add_column("Cast")
-    table.add_column("Purpose(40)"); table.add_column("Prompt(50)")
-    table.add_column("Anchor")
+    table.add_column("Kind"); table.add_column("Role"); table.add_column("Cast")
+    table.add_column("Set"); table.add_column("Purpose(40)")
+    table.add_column("Prompt(50)"); table.add_column("Anchor")
     anchor = (lore.front.mood_anchor if lore else None) or ""
+    scene_lookup = sb.scene_map()
     for s in sb.shots:
         anchor_hit = "✓" if (anchor and anchor in s.prompt) else ("—" if anchor else " ")
         np = s.narrative_purpose or ""
         np_cell = (np[:40] + "…") if len(np) > 40 else (np or "[red]—[/]")
+        role_cell = (
+            f"[magenta]{s.role}[/]" if s.role == "narration" else s.role
+        )
+        # Show the *effective* set_id (per-shot override > scene default).
+        from .storyboard import _effective_set
+        eff_set = _effective_set(s, scene_lookup.get(s.scene))
+        if s.set_id is not None and s.set_id != (scene_lookup.get(s.scene).set_id if scene_lookup.get(s.scene) else None):
+            set_cell = f"[yellow]{eff_set or '(none)'}*[/]"  # * = per-shot override
+        else:
+            set_cell = eff_set or "—"
         table.add_row(
             s.id, s.scene, f"{s.duration}s",
-            s.kind,
+            s.kind, role_cell,
             ",".join(s.characters) or "—",
+            set_cell,
             np_cell,
             (s.prompt[:50] + "…") if len(s.prompt) > 50 else s.prompt,
             anchor_hit,
@@ -568,9 +1076,15 @@ def scene_scaffold(
     episode_id: str = typer.Option(..., "--episode", "-e"),
     num: int = typer.Option(..., "--num", "-n", help="scene number (1, 2, 3, ...)"),
     force: bool = typer.Option(False, "--force"),
+    mode: str = typer.Option(
+        "drama", "--mode",
+        help="drama (default) | narration. narration emits a 节拍式 template.",
+    ),
 ):
     """Create empty scenes/scene-NN.md template for the screenwriter."""
-    out = scene_mod.scaffold_scene(project_id, episode_id, num, force=force)
+    if mode not in ("drama", "narration"):
+        _bail(f"unknown --mode {mode!r}; valid: drama | narration")
+    out = scene_mod.scaffold_scene(project_id, episode_id, num, force=force, mode=mode)
     if out.exists() and not force:
         # scaffold_scene returns the path either way; figure out if we wrote.
         pass
@@ -637,15 +1151,26 @@ def scene_compile_cmd(
         help="Pin the video model family in storyboard.provider "
              "(wan | happyhorse). Default: VIDEOGEN_VIDEO_PROVIDER env var.",
     ),
+    mode: str = typer.Option(
+        "drama", "--mode",
+        help="Pin the episode mode in storyboard.mode "
+             "(drama | narration). drama = 短剧, narration = 旁白解说.",
+    ),
+    narrator_voice: str | None = typer.Option(
+        None, "--narrator-voice",
+        help="Default TTS voice for narration mode. Falls back to VIDEOGEN_NARRATOR_VOICE.",
+    ),
 ):
     """Merge scenes/scene-*.md → script.md and scenes/scene-*.json → storyboard.json."""
     if provider is not None and provider not in list_providers():
         _bail(f"unknown --provider {provider!r}; valid: {list_providers()}")
+    if mode not in ("drama", "narration"):
+        _bail(f"unknown --mode {mode!r}; valid: drama | narration")
     try:
         result = scene_mod.compile_episode(
             project_id, episode_id,
             title=title, synopsis=synopsis, target_duration_s=target,
-            provider=provider,
+            provider=provider, mode=mode, narrator_voice=narrator_voice,
         )
     except (FileNotFoundError, ValueError) as e:
         _bail(str(e))
@@ -898,7 +1423,85 @@ def stitch_cmd(
         raise typer.Exit(code=3)
 
     out = edir / "final" / f"{project_id}-{ep_norm}.mp4"
-    ff.concat(clips, out, crossfade_s=crossfade)
+
+    # If the storyboard configures per-scene BGM, mix each scene's chunk
+    # individually BEFORE concat so each scene gets its own underscore.
+    # For global BGM (or no BGM) we concat first and mix once at the end.
+    bgm_cfg = sb.bgm
+    mixing_per_scene = (
+        bgm_cfg is not None
+        and bgm_cfg.enabled
+        and bgm_cfg.mode == "scene"
+    )
+
+    if mixing_per_scene:
+        # Group the resolved winner clips by scene id, preserving order.
+        scene_id_for_shot = {s.id: s.scene for s in sb.shots}
+        scene_chunks: list[tuple[str, list[Path]]] = []
+        for clip in clips:
+            shot_id = clip.stem  # winner clip is named S01-001.mp4 or .../S01-001-verN.mp4
+            base = shot_id.split("-ver")[0]
+            scid = scene_id_for_shot.get(base, "")
+            if not scene_chunks or scene_chunks[-1][0] != scid:
+                scene_chunks.append((scid, []))
+            scene_chunks[-1][1].append(clip)
+
+        mixed_dir = edir / "final" / "_bgm_tmp"
+        mixed_dir.mkdir(parents=True, exist_ok=True)
+        mixed_chunks: list[Path] = []
+        scene_lookup = sb.scene_map()
+        for idx, (scid, scene_clips) in enumerate(scene_chunks):
+            chunk_out = mixed_dir / f"scene-{idx:02d}.mp4"
+            ff.concat(scene_clips, chunk_out, crossfade_s=0.0)
+            scene = scene_lookup.get(scid)
+            track_name = scene.bgm_track if scene else None
+            if track_name:
+                track_path = bgm_mod.resolve_track(project_id, episode_id, track_name)
+                if track_path is None:
+                    console.print(
+                        f"[yellow]· scene {scid} bgm_track={track_name!r} "
+                        f"could not be resolved — leaving scene without BGM[/]"
+                    )
+                else:
+                    mixed = mixed_dir / f"scene-{idx:02d}-bgm.mp4"
+                    ff.mix_bgm(
+                        chunk_out, track_path, mixed,
+                        volume=bgm_cfg.volume,
+                        fade_in_s=bgm_cfg.fade_in_s,
+                        fade_out_s=bgm_cfg.fade_out_s,
+                    )
+                    chunk_out.unlink(missing_ok=True)
+                    chunk_out = mixed
+            mixed_chunks.append(chunk_out)
+
+        ff.concat(mixed_chunks, out, crossfade_s=crossfade)
+        for p in mixed_dir.iterdir():
+            p.unlink(missing_ok=True)
+        mixed_dir.rmdir()
+    else:
+        ff.concat(clips, out, crossfade_s=crossfade)
+        if bgm_cfg and bgm_cfg.enabled and bgm_cfg.mode == "global" and bgm_cfg.track:
+            track_path = bgm_mod.resolve_track(project_id, episode_id, bgm_cfg.track)
+            if track_path is None:
+                console.print(
+                    f"[yellow]· bgm.track={bgm_cfg.track!r} could not be "
+                    f"resolved — final video shipped without BGM[/]"
+                )
+            else:
+                premix = out.with_name(out.stem + ".premix.mp4")
+                out.rename(premix)
+                ff.mix_bgm(
+                    premix, track_path, out,
+                    volume=bgm_cfg.volume,
+                    fade_in_s=bgm_cfg.fade_in_s,
+                    fade_out_s=bgm_cfg.fade_out_s,
+                )
+                premix.unlink(missing_ok=True)
+                console.print(
+                    f"[dim]· mixed global BGM {bgm_cfg.track!r} "
+                    f"@ volume={bgm_cfg.volume}[/]"
+                )
+
     console.print(f"[green]✓ final video → {out}[/]")
 
     # Time-coded shot map for the GATE 4 review.
@@ -912,6 +1515,39 @@ def stitch_cmd(
             "[red]rewrite[/]" if sid in set(flagged) else "",
         )
     console.print(table)
+
+
+# ---------- tts ---------------------------------------------------------------
+tts_app = typer.Typer(help="Narration TTS (qwen3-tts-flash) — used by narration-mode render")
+app.add_typer(tts_app, name="tts")
+
+
+@tts_app.command("synth")
+def tts_synth(
+    text: str = typer.Option(..., "--text", help="text to synthesize"),
+    out: Path = typer.Option(..., "--out", help="output .wav path"),
+    voice: str | None = typer.Option(None, "--voice", help="default: VIDEOGEN_NARRATOR_VOICE"),
+    language: str | None = typer.Option(None, "--language", help="default: VIDEOGEN_NARRATOR_LANGUAGE"),
+    model: str | None = typer.Option(None, "--model", help="default: VIDEOGEN_NARRATOR_TTS_MODEL"),
+    speech_rate: float | None = typer.Option(
+        None,
+        "--speech-rate",
+        help="ffmpeg atempo after synthesis; default VIDEOGEN_NARRATOR_SPEECH_RATE (1.2)",
+    ),
+):
+    """Manually synthesize a narration line. Useful for previewing voices."""
+    try:
+        path = tts_mod.synth(
+            text,
+            out_path=out,
+            voice=voice,
+            language=language,
+            model=model,
+            speech_rate=speech_rate,
+        )
+    except Exception as e:  # noqa: BLE001
+        _bail(str(e))
+    console.print(f"[green]✓ wrote {path}[/]")
 
 
 # ---------- task --------------------------------------------------------------

@@ -98,8 +98,16 @@ class VideoProvider:
         prompt: str,
         cast_data: dict,
         prev_last_frame_url: str | None,
+        scene=None,                            # videogen.storyboard.Scene | None
+        movie_set_data: dict | None = None,    # videogen.movie_set.load() shape
     ) -> BuildResult:
-        """Subclasses implement. Returns BuildResult dict."""
+        """Subclasses implement. Returns BuildResult dict.
+
+        ``scene`` and ``movie_set_data`` together let providers append
+        the scene's set reference image to r2v shots when applicable.
+        Both are optional — t2v shots and scenes without ``set_id``
+        ignore them.
+        """
         raise NotImplementedError
 
     # ── async lifecycle (shared) ──────────────────────────────────────────

@@ -26,6 +26,7 @@ from typing import Any
 
 from rich.console import Console
 
+from .. import bgm as bgm_mod
 from .base import BuildResult, Feature, ShotKind, VideoProvider
 
 console = Console()
@@ -54,6 +55,8 @@ class HappyHorseProvider(VideoProvider):
         prompt: str,
         cast_data: dict,
         prev_last_frame_url: str | None,
+        scene=None,
+        movie_set_data: dict | None = None,
     ) -> BuildResult:
         kind: ShotKind = shot.kind
         warnings: list[str] = []
@@ -77,6 +80,9 @@ class HappyHorseProvider(VideoProvider):
 
         media: list[dict] = []
         char_index = {c["name"]: c for c in cast_data["characters"]}
+        set_index = {
+            s["name"]: s for s in (movie_set_data or {}).get("sets", [])
+        }
         skipped_voice: list[str] = []
 
         if kind == "r2v":
@@ -92,6 +98,18 @@ class HappyHorseProvider(VideoProvider):
                 })
                 if c.get("audio_url"):
                     skipped_voice.append(char_name)
+            # Lock the location with a set reference image (after the cast).
+            # HappyHorse r2v accepts up to 9 reference images; we cap below
+            # if cast already filled the slots.
+            set_url = _resolve_set_image_url(shot, scene, set_index, warnings)
+            if set_url:
+                if len(media) >= 9:
+                    warnings.append(
+                        f"{shot.id}: 9 cast portraits already in media[], "
+                        f"set reference image dropped (HappyHorse r2v cap)."
+                    )
+                else:
+                    media.append({"type": "reference_image", "url": set_url})
             if not media:
                 raise ValueError(
                     f"r2v shot {shot.id} needs at least one character with a "
@@ -121,7 +139,15 @@ class HappyHorseProvider(VideoProvider):
                 f"shot.negative_prompt is ignored."
             )
 
-        input_obj: dict[str, Any] = {"prompt": prompt}
+        # If the episode forbids in-clip BGM, append a textual directive
+        # to the prompt (HappyHorse has no negative_prompt support).
+        effective_prompt = prompt
+        if getattr(storyboard, "bgm", None) and storyboard.bgm.forbid_model_bgm:
+            directive = bgm_mod.forbid_directive()
+            if directive not in effective_prompt:
+                effective_prompt = f"{effective_prompt} {directive}".strip()
+
+        input_obj: dict[str, Any] = {"prompt": effective_prompt}
         if media:
             input_obj["media"] = media
 
@@ -154,3 +180,40 @@ class HappyHorseProvider(VideoProvider):
             effective_kind=kind,
             warnings=warnings,
         )
+
+
+def _resolve_set_image_url(
+    shot,
+    scene,
+    set_index: dict[str, dict],
+    warnings: list[str],
+) -> str | None:
+    """Resolve set_id → uploaded image_url.
+
+    Precedence: shot.set_id (None=inherit, ''=opt-out) > scene.set_id.
+    """
+    set_id = _effective_set_id(shot, scene)
+    if not set_id:
+        return None
+    s = set_index.get(set_id)
+    if not s:
+        warnings.append(
+            f"{shot.id}: set_id={set_id!r} has no folder in movie_set.json "
+            f"— set reference image skipped. Run `videogen set init`."
+        )
+        return None
+    url = s.get("image_url")
+    if not url:
+        warnings.append(
+            f"{shot.id}: set {set_id!r} has no image_url; reference skipped."
+        )
+    return url
+
+
+def _effective_set_id(shot, scene) -> str | None:
+    shot_set = getattr(shot, "set_id", None)
+    if shot_set is not None:
+        return shot_set or None
+    if scene is None:
+        return None
+    return getattr(scene, "set_id", None) or None

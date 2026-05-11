@@ -1,6 +1,6 @@
 ---
-description: One-shot autopilot — orchestrate screenwriter ↔ director (per-scene parallel) → render (chain-DAG parallel + per-clip review) → stitch. VFX review is opt-in. User confirms at 4 gates.
-argument-hint: <project_id> <episode_id> "<premise>" [--vfx] [--provider=happyhorse|wan]
+description: One-shot autopilot — orchestrate screenwriter ↔ director (per-scene parallel) → render (chain-DAG parallel + per-clip review) → stitch. VFX review is opt-in. User confirms at 4 gates (+ 1 mode gate at start + 1 BGM gate when bgm/ folder detected).
+argument-hint: <project_id> <episode_id> "<premise>" [--vfx] [--provider=happyhorse|wan] [--mode=drama|narration]
 ---
 
 Project: $1
@@ -10,18 +10,22 @@ Optional flags: $4
 
 You are the **PRODUCER**. You orchestrate a multi-agent team. You do NOT
 write narrative, storyboard, or review — you coordinate. You stop at
-exactly **4 gates**. Between gates, drive everything via shell + Task
-subagents.
+**5–6 gates** (mode select + optional BGM probe + 4 production gates).
+Between gates, drive everything via shell + Task subagents.
 
-### Flag parsing — provider + vfx (Phase 0 prerequisite)
+### Flag parsing — provider + vfx + mode (Phase 0 prerequisite)
 
-Parse `$4` for two optional flags. Defaults if absent:
+Parse `$4` for three optional flags. Defaults if absent:
 
 - `--vfx` → run pre-render VFX review. Default: skipped.
 - `--provider=<name>` → pin video model family for this episode.
   Valid: `happyhorse` (default) | `wan`. Determines what the director
   selects for `Storyboard.provider` and which DashScope models the
   renderer submits to.
+- `--mode=<name>` → pin episode mode. Valid: `drama` (默认 — 短剧模式) |
+  `narration` (旁白解说 / "10-min recap" 模式).
+  When the flag is **absent**, the producer **MUST** stop at GATE 0 and
+  ask the user before doing anything else.
 
 Resolve the provider in this order: `--provider=...` flag → existing
 `projects/$1/$2/storyboard.json:provider` (only on rerun) →
@@ -37,7 +41,110 @@ case "$PROVIDER" in
   wan|happyhorse) ;;
   *) echo "unknown provider: $PROVIDER"; exit 2 ;;
 esac
+
+MODE=$(echo "$4" | grep -oE -- '--mode=[a-z]+' | sed 's/--mode=//')
+# MODE may stay empty here — the GATE 0 step below will fill it in.
 ```
+
+---
+
+## GATE 0 · mode select (NEW — runs before everything else)
+
+If `--mode` was passed in `$4`, **skip GATE 0** and use that value.
+Otherwise stop and ask the user — exactly one question, one gate:
+
+> 这一集要拍 **短剧模式 (drama, 默认)** 还是 **旁白解说模式 (narration)**?
+>
+> | 模式 | 适合场景 | 工作流差异 |
+> |------|----------|------------|
+> | drama | 完整的剧情短片 (2-5min)，对白和肢体动作驱动 | 今天的流程：长 r2v shot, 模型自带音频 |
+> | narration | "10 分钟带你看完 XX" 解说式 | 编剧写节拍 (旁白/对白混排), 旁白 shot 短 (3-6s)、画面碎、并发高，渲染后 TTS 替换音轨 |
+>
+> 默认 `drama`。回复 `narration` 切换。
+
+After the user answers, normalise the value and persist it:
+
+```bash
+MODE=${MODE:-drama}
+case "$MODE" in
+  drama|narration) ;;
+  *) echo "unknown mode: $MODE"; exit 2 ;;
+esac
+```
+
+`$MODE` MUST be passed to every screenwriter / director subagent prompt
+AND to `scene compile --mode "$MODE"`.
+
+---
+
+## GATE 0.5 · BGM probe (conditional — only when a `bgm/` folder exists)
+
+Detect background music. The producer reads two tiers — project-shared
+and episode-only — and asks the user **only when at least one BGM file
+is present**. When the probe returns no tracks, skip this gate entirely.
+
+```bash
+BGM_JSON=$(./bin/videogen bgm discover --project $1 --episode $2)
+HAS_BGM=$?   # exit 0 = at least one track; exit 2 = none
+```
+
+If `HAS_BGM != 0` → skip the rest of this gate and go to Phase 0.
+
+If `HAS_BGM == 0`, parse `BGM_JSON` (it's a single JSON object with a
+`tracks: [{name, file, source}]` array) and surface a table:
+
+> 检测到以下 BGM 文件 — 这一集要怎么用?
+>
+> | 名称 | 来源 |
+> |------|------|
+> | `<track name>` | project / episode |
+> | ... | ... |
+>
+> **问 1（使用方式 / mode）**
+>
+> | 模式 | 说明 |
+> |------|------|
+> | `off` | 检测到但这一集不用 |
+> | `global` | 整段视频铺一首 BGM（适合统一情绪的短剧 / 解说） |
+> | `scene` | 分场景上 BGM (煽情 / 惊悚 / 轻喜 等)。需要导演在 `scenes/scene-NN.json` 的 `Scene.bgm_track` 里指定每场的曲目；未指定的场景静音。 |
+>
+> **问 2（禁止模型内置 BGM）**
+>
+> 视频大模型偶尔会自己加 BGM, 和我们手动混的 BGM 撞车 →
+> 建议默认 `--forbid-model-bgm`（在 prompt / negative_prompt 加上
+> 「不要生成任何背景音乐」的指令）。**回复 `allow` 才会放开。**
+>
+> 默认: `mode=global` (if exactly 1 track) / `mode=scene` (≥2 tracks)
+> · `--forbid-model-bgm` 默认开启 · `volume=0.25`。
+
+Persist the answers into shell vars. Defaults if user just confirms:
+
+```bash
+BGM_MODE=${BGM_MODE:-global}              # off | global | scene
+BGM_FORBID_FLAG=${BGM_FORBID_FLAG:---forbid-model-bgm}  # or --allow-model-bgm
+BGM_TRACK=${BGM_TRACK:-}                  # name (filename stem) for mode=global
+BGM_VOLUME=${BGM_VOLUME:-0.25}
+```
+
+The actual `storyboard.bgm` write happens AFTER `scene compile` (the
+config lives on the storyboard so it can be validated against
+`Scene.bgm_track`). See § "Phase 1.4 — merge + validate" below.
+
+**Why ask now, not later:** the answer to question 2 affects every shot
+prompt the director writes. If the user wants `--forbid-model-bgm`, the
+director SKILL must NOT bake "悲伤的小提琴音乐" or similar into prompts;
+that information has to flow into Phase 1 immediately.
+
+When you brief the screenwriter / director subagents in Phase 1, append
+this line to their prompt verbatim:
+
+> 本集 BGM 决策: `mode=$BGM_MODE`, `forbid_model_bgm=$BGM_FORBID_FLAG`.
+> 若 `forbid_model_bgm` 开启, 分镜 prompt 严禁出现"音乐 / 配乐 / BGM /
+> soundtrack / 旋律"字样, 让混音流程统一处理。若 `mode=scene`, 请在
+> 每个 `Scene.bgm_track` 字段里写明这场该用哪首 (按情绪挑曲: 煽情 →
+> 钢琴慢板, 惊悚 → 低频持续音, 轻喜 → 拨弦小调)。可选曲目: $BGM_TRACK_LIST.
+
+---
 
 **Your team:**
 
@@ -56,8 +163,13 @@ esac
 ```bash
 ./bin/videogen doctor
 ./bin/videogen episode init --project $1 --episode $2
-test -f projects/$1/$2/cast.json || ./bin/videogen cast init --project $1 --episode $2
+test -f projects/$1/$2/cast.json      || ./bin/videogen cast init --project $1 --episode $2
+test -f projects/$1/$2/movie_set.json || ./bin/videogen set  init --project $1 --episode $2
 ```
+
+`set init` is a no-op when neither tier has any 布景 folders — sets are
+optional. If the storyboard ever wires `Scene.set_id` you'll be glad
+this file exists; if not, it stays empty and costs nothing.
 
 Lore handling — 3-case rule (lore is project-tier, shared across episodes):
 
@@ -79,17 +191,29 @@ test -d .claude/skills/screenwriter/references/shanyin-screenwriting \
 
 ---
 
-## GATE 1 · cast confirm
+## GATE 1 · cast + 布景 confirm
 
-Show `projects/$1/$2/cast.json` as a table. Call out characters from
-the premise that aren't in cast yet. Ask the user: keep going, add
-files (project mains → `projects/$1/cast/<name>/`; episode-only NPCs →
-`projects/$1/$2/cast/<name>/`), or adjust the premise?
+Show `projects/$1/$2/cast.json` AND `projects/$1/$2/movie_set.json` as
+two tables. Call out:
+
+- Characters from the premise that aren't in cast yet.
+- Locations from the premise that should be locked as movie sets but
+  aren't (recurring rooms, hero locations).
+- Any cast member whose project-tier portrait visibly contradicts the
+  premise's required look (sleeping in 婚纱 vs everyday 白领). For those
+  the user has three options:
+    1. Keep the project portrait and let the dialog/action absorb it.
+    2. Override for this episode only:
+       `./bin/videogen cast fork --project $1 --episode $2 --name "<NAME>" --regen "<new appearance>"`
+       (see § "Costume change" in the director SKILL).
+    3. Replace the project-tier portrait outright (if the new look is
+       canonical going forward).
 
 After user confirms / adds:
 
 ```bash
 ./bin/videogen cast init --project $1 --episode $2
+./bin/videogen set  init --project $1 --episode $2
 ```
 
 ---
@@ -113,8 +237,11 @@ enough context to define `direction.json` (the per-episode 导演定调).
 
 Spawn one screenwriter Task subagent (subagent_type=`generalPurpose`):
 
-> Read `.claude/skills/screenwriter/SKILL.md` and follow it. Write only
-> scene 1 of project `$1`, episode `$2`, from this premise: $3.
+> Read `.claude/skills/screenwriter/SKILL.md` and follow it.
+> **Episode mode: $MODE** (drama | narration) — see the SKILL's
+> "Episode mode" section for the per-mode markdown format. If mode is
+> `narration`, scaffold with `./bin/videogen scene scaffold --project $1 --episode $2 --num 1 --mode narration` to get the 节拍 template.
+> Write only scene 1 of project `$1`, episode `$2`, from this premise: $3.
 > Output to `projects/$1/$2/scenes/scene-01.md`. After writing, run
 > `./bin/videogen scene ready --project $1 --episode $2 --num 1`.
 > Do not draft scene 2 — the producer will fan out from here.
@@ -125,12 +252,16 @@ For scene N = 2, 3, … until both editor and director are done, send
 **one message with two Task tool calls in parallel**:
 
 - Screenwriter Task → write `scene-N.md`, then `scene ready --num N`.
-  Provide the same premise + the prior scenes' `.md` for continuity
-  context. If N is the LAST scene, also remind it to append the
-  `<!-- CAST CHECK -->` block.
+  Always include `**Episode mode: $MODE**` in the prompt so the SKILL
+  picks the right markdown format. Provide the same premise + the prior
+  scenes' `.md` for continuity context. If N is the LAST scene, also
+  remind it to append the `<!-- CAST CHECK -->` block.
 - Director Task → process `scene-(N-1).md`. It must:
   1. Wait until `scenes/scene-(N-1).ready` exists (poll briefly if needed).
   2. Read `.claude/skills/video-director/SKILL.md` and follow it.
+     Include `**Episode mode: $MODE**` in the prompt — the director
+     SKILL's "Mode-aware shot generation" section maps narration 节拍
+     to `role: "narration"` shots and 对白 节拍 to drama shots.
   3. If `direction.json` doesn't exist (only true on N=2), produce it first.
   4. Read `scenes/scene-(N-1).md` and emit `scenes/scene-(N-1).json`.
 
@@ -141,18 +272,31 @@ in its own batch to process the last scene.
 
 ### Step 1.4 — merge + validate
 
-`scene compile` writes the resolved provider into `storyboard.provider`,
-so the rest of the pipeline (render, validate, escalation) is locked
-to the same family without re-passing the flag.
+`scene compile` writes the resolved provider AND mode into the
+storyboard, so the rest of the pipeline (render, validate, escalation,
+TTS post-pass) is locked without re-passing flags.
 
 ```bash
 ./bin/videogen scene status   --project $1 --episode $2
-./bin/videogen scene compile  --project $1 --episode $2 --provider "$PROVIDER"
+./bin/videogen scene compile  --project $1 --episode $2 \
+    --provider "$PROVIDER" --mode "$MODE"
+
+# If GATE 0.5 produced a BGM decision, persist it onto storyboard.json
+# so render + stitch + validate all see the same config.
+if [ -n "${BGM_MODE:-}" ]; then
+  ./bin/videogen bgm configure --project $1 --episode $2 \
+      --mode "$BGM_MODE" $BGM_FORBID_FLAG \
+      ${BGM_TRACK:+--track "$BGM_TRACK"} \
+      --volume "$BGM_VOLUME"
+fi
+
 ./bin/videogen storyboard validate --project $1 --episode $2
 ```
 
 If validate fails → switch to director role, fix the offending
-`scenes/scene-NN.json`, re-compile.
+`scenes/scene-NN.json`, re-compile. Common BGM-related failure: user
+chose `mode=scene` but no `Scene.bgm_track` was tagged — re-spawn the
+director subagent with the BGM brief and re-compile.
 
 ---
 
@@ -169,6 +313,18 @@ generate them now (default to episode tier):
     --name "<NPC>" --desc "<desc>" --mood "<anchor>"
 ./bin/videogen cast soul template --project $1 --episode $2 --name "<NPC>"
 ./bin/videogen cast init --project $1 --episode $2
+```
+
+Same beat for new 布景: if the screenplay names recurring locations
+that aren't in `movie_set.json`, scaffold them now (project-tier for
+sitcom-style recurring rooms; episode-tier for one-offs). The director
+SKILL's § "Movie sets" walks through the workflow:
+
+```bash
+./bin/videogen set scaffold --project $1 [--episode $2] --name "<set name>"
+./bin/videogen set generate --project $1 [--episode $2] \
+    --name "<set name>" --desc "<材质/布局/灯光/关键道具>"
+./bin/videogen set init --project $1 --episode $2
 ```
 
 If user requested narrative changes, re-spawn the affected

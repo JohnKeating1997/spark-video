@@ -53,9 +53,11 @@ from . import (
     ffmpeg as ff,
     lore as lore_mod,
     model_log,
+    movie_set as movie_set_mod,
     review as review_mod,
     rewrite as rewrite_mod,
     state,
+    tts as tts_mod,
 )
 from .config import SETTINGS
 from .providers import VideoProvider, get_provider
@@ -160,6 +162,15 @@ def _versioned_clip_path(edir: Path, shot_id: str, version: int) -> Path:
     return edir / "clips" / f"{shot_id}-ver{version}.mp4"
 
 
+def _versioned_narration_audio_path(edir: Path, shot_id: str, version: int) -> Path:
+    return edir / "audio" / f"{shot_id}-ver{version}.wav"
+
+
+def _versioned_raw_clip_path(edir: Path, shot_id: str, version: int) -> Path:
+    """Pre-mux clip kept for debugging — same name as clip with .raw.mp4 suffix."""
+    return edir / "clips" / f"{shot_id}-ver{version}.raw.mp4"
+
+
 def _versioned_frame_path(edir: Path, shot_id: str, version: int) -> Path:
     return edir / "frames" / f"{shot_id}-ver{version}_last.png"
 
@@ -202,6 +213,8 @@ def _render_one_attempt(
     version: int,
     prev_last_frame_url: str | None,
     cast_data: dict,
+    movie_set_data: dict | None = None,
+    scene: Scene | None = None,
 ) -> dict:
     """One DashScope submission → wait → download → extract last frame.
 
@@ -223,6 +236,8 @@ def _render_one_attempt(
             prompt=prompt, version=version,
             prev_last_frame_url=prev_last_frame_url,
             cast_data=cast_data,
+            movie_set_data=movie_set_data,
+            scene=scene,
             clip_path=clip_path, last_frame_path=last_frame_path,
         )
     finally:
@@ -240,6 +255,8 @@ def _do_render_attempt(
     version: int,
     prev_last_frame_url: str | None,
     cast_data: dict,
+    movie_set_data: dict | None,
+    scene: Scene | None,
     clip_path: Path,
     last_frame_path: Path,
 ) -> dict:
@@ -251,6 +268,8 @@ def _do_render_attempt(
             prompt=prompt,
             cast_data=cast_data,
             prev_last_frame_url=prev_last_frame_url,
+            scene=scene,
+            movie_set_data=movie_set_data,
         )
     except ValueError as e:
         return {
@@ -309,6 +328,58 @@ def _do_render_attempt(
     ff.download(video_url, clip_path)
     ff.extract_last_frame(clip_path, last_frame_path)
     console.print(f"[green]✓ {shot.id} ver{version} → {clip_path.name}[/]")
+
+    narration_audio_path: str | None = None
+    raw_clip_path_str: str | None = None
+    narration_error: str | None = None
+
+    # Narration post-pass: synthesize voiceover, swap original audio.
+    # Failures here do NOT mark the attempt FAILED — we keep the rendered
+    # clip and surface the error so the reviewer / agent can decide what
+    # to do (often the next retry's TTS will succeed).
+    if shot.role == "narration" and shot.narration_text:
+        edir = state.episode_dir(project_id, episode_id)
+        raw_clip = _versioned_raw_clip_path(edir, shot.id, version)
+        audio_out = _versioned_narration_audio_path(edir, shot.id, version)
+        voice = (
+            shot.narrator_voice
+            or storyboard.narrator_voice
+            or None  # tts.synth falls back to env default
+        )
+        try:
+            v_before = ff.probe_duration(clip_path)
+            tts_mod.synth(shot.narration_text, out_path=audio_out, voice=voice)
+            a_dur = ff.probe_duration(audio_out)
+            if v_before > 0 and a_dur > 0 and (a_dur - v_before) > 0.35:
+                console.print(
+                    f"  [yellow]narration A/V skew[/] {shot.id}: video {v_before:.1f}s vs "
+                    f"TTS {a_dur:.1f}s — mux will freeze the last frame for "
+                    f"{a_dur - v_before:.1f}s"
+                )
+            # Rename original render to .raw.mp4, then mux into the clip path.
+            if clip_path.exists():
+                if raw_clip.exists():
+                    raw_clip.unlink()
+                clip_path.rename(raw_clip)
+            ff.mux_audio(raw_clip, audio_out, clip_path, fit="audio")
+            # Video may have been freeze-padded or trimmed — re-extract last frame.
+            ff.extract_last_frame(clip_path, last_frame_path)
+            narration_audio_path = str(audio_out)
+            raw_clip_path_str = str(raw_clip)
+            console.print(
+                f"  [magenta]narration[/] {shot.id} ver{version} muxed "
+                f"({len(shot.narration_text)} chars, voice={voice or 'env-default'})"
+            )
+        except Exception as e:  # noqa: BLE001
+            narration_error = f"{type(e).__name__}: {e}"
+            console.print(
+                f"  [red]narration TTS failed[/] for {shot.id} ver{version}: {e}"
+            )
+            # If we already moved the raw clip but mux failed, restore it so
+            # the clip_path still points at a playable file.
+            if raw_clip.exists() and not clip_path.exists():
+                raw_clip.rename(clip_path)
+
     return {
         "version": version,
         "status": "SUCCEEDED",
@@ -320,6 +391,9 @@ def _do_render_attempt(
         "prompt": prompt,
         "review": None,
         "error": None,
+        "narration_audio_path": narration_audio_path,
+        "raw_clip_path": raw_clip_path_str,
+        "narration_error": narration_error,
     }
 
 
@@ -396,6 +470,7 @@ def render_shot_with_review(
     provider: VideoProvider,
     prev_last_frame_url: str | None,
     cast_data: dict,
+    movie_set_data: dict | None,
     scene: Scene | None,
     lore_obj: Any | None,
     cfg: RenderConfig,
@@ -412,6 +487,8 @@ def render_shot_with_review(
         if reset:
             rec = _empty_shot_record(shot.id)
         rec["needs_director_rewrite"] = False
+        all_state[shot.id] = rec
+        state.write_json(project_id, "shots_state.json", all_state, episode_id=episode_id)
 
     current_prompt = shot.prompt
     last_review: dict | None = None
@@ -422,6 +499,7 @@ def render_shot_with_review(
             storyboard=storyboard, provider=provider,
             prompt=current_prompt, version=ver,
             prev_last_frame_url=prev_last_frame_url, cast_data=cast_data,
+            movie_set_data=movie_set_data, scene=scene,
         )
 
         if cfg.do_review and attempt["status"] == "SUCCEEDED":
@@ -467,6 +545,7 @@ def render_shot_with_review(
 
         if not cfg.do_review:
             # No review → first success wins.
+            rec["needs_director_rewrite"] = False
             with state_lock:
                 _set_winner(rec, edir, attempt)
                 state.write_json(project_id, "shots_state.json", _persist_record(rec, project_id, episode_id), episode_id=episode_id)
@@ -474,6 +553,7 @@ def render_shot_with_review(
 
         review = attempt["review"]
         if review and review.get("verdict") == "ACCEPT":
+            rec["needs_director_rewrite"] = False
             with state_lock:
                 _set_winner(rec, edir, attempt)
                 all_state = load_shots_state(project_id, episode_id)
@@ -557,6 +637,7 @@ def _run_chain_group(
     storyboard: Storyboard,
     provider: VideoProvider,
     cast_data: dict,
+    movie_set_data: dict | None,
     scenes_index: dict[str, Scene],
     lore_obj: Any | None,
     cfg: RenderConfig,
@@ -593,6 +674,7 @@ def _run_chain_group(
             provider=provider,
             prev_last_frame_url=prev_last_frame_url,
             cast_data=cast_data,
+            movie_set_data=movie_set_data,
             scene=scenes_index.get(shot.scene),
             lore_obj=lore_obj,
             cfg=cfg, state_lock=state_lock, reset=reset,
@@ -681,6 +763,7 @@ def _render_all_inner(
 ) -> dict:
     """Body of render_all — split out so the caller manages log context."""
     cast_data = cast_mod.load(project_id, episode_id)
+    movie_set_data = movie_set_mod.load(project_id, episode_id)
     scenes_index = storyboard.scene_map()
     lore_obj = lore_mod.load(project_id, projects_dir=SETTINGS.projects_dir)
     provider = get_provider(provider_override or storyboard.provider)
@@ -689,6 +772,18 @@ def _render_all_inner(
         f"(t2v={provider.model_for('t2v')}, i2v={provider.model_for('i2v')}, "
         f"r2v={provider.model_for('r2v')})"
     )
+    n_sets = len(movie_set_data.get("sets", []))
+    n_scenes_with_set = sum(1 for sc in storyboard.scenes if sc.set_id)
+    if n_sets:
+        console.print(
+            f"[bold]movie sets:[/] {n_sets} loaded · "
+            f"{n_scenes_with_set} scene(s) reference a set_id"
+        )
+    elif n_scenes_with_set:
+        console.print(
+            f"[yellow]·[/] {n_scenes_with_set} scene(s) declare set_id but "
+            f"no movie_set.json — run `videogen set init` to lock locations."
+        )
 
     # Filter by --shot if requested (single-shot retry).
     if shot_ids:
@@ -725,6 +820,7 @@ def _render_all_inner(
                 project_id, episode_id, g,
                 storyboard=storyboard, provider=provider,
                 cast_data=cast_data,
+                movie_set_data=movie_set_data,
                 scenes_index=scenes_index, lore_obj=lore_obj,
                 cfg=cfg, state_lock=state_lock,
                 only_missing=only_missing, reset=reset,

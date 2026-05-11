@@ -12,6 +12,17 @@ Pick the family per workspace (`VIDEOGEN_VIDEO_PROVIDER` in `.env`),
 per episode (`scene compile --provider`), or per render
 (`videogen render --provider`).
 
+Two **production modes** are available — chosen at the very start of
+`/episode`:
+
+- **drama** (短剧, default) — 2–5 min original short. Long, dialog-driven
+  shots. Today's flow.
+- **narration** (旁白解说, "10 分钟带你看完 XX") — short visual beats
+  whose original audio is stripped and replaced by `qwen3-tts-flash`
+  voiceover via `ffmpeg.mux_audio`. Sidesteps the video models'
+  long-form weakness (faces drift, no continuity, no music) by leaning
+  on TTS to carry the story. Drama beats can still be mixed in.
+
 > "像抽卡一样写视频" — type a premise, get a screenplay → storyboard → 35-shot
 > finished mp4. Re-roll any shot, retry any scene, swap any actor.
 
@@ -37,7 +48,8 @@ per episode (`scene compile --provider`), or per render
 │  render   →  chain-DAG slicing, ThreadPoolExecutor parallel, │
 │             versioned attempts, qwen3-vl-plus review,        │
 │             qwen-text auto-rewrite, escalation               │
-│  ffmpeg   →  last-frame extraction, concat, crossfade        │
+│  ffmpeg   →  last-frame extraction, concat, audio mux        │
+│  tts      →  qwen3-tts-flash narration (used in narration mode)│
 │  state    →  per-episode JSON, attempts[] + winner_version   │
 └──────────────┬──────────────────────────────────────────────┘
                ▼
@@ -124,10 +136,20 @@ Episode-specific NPCs live under `projects/wulin/episode-001/cast/`.
 > /episode wulin 001 "明朝架空背景的搞笑武侠情景喜剧, 3 分钟. 佟掌柜和钱夫人结怨已深, 莫小贝要参加衡山派接任仪式..."
 ```
 
+`/episode` first asks you to pick a **mode** (`drama` default vs
+`narration`). You can pre-pick via flag:
+
+```text
+> /episode wulin 001 "..." --mode=narration       # 10-min recap style
+> /episode wulin 001 "..." --mode=drama --vfx     # full short with VFX gate
+```
+
 The director skill writes
 `projects/wulin/episode-001/{script.md, storyboard.json}`, shows you the
 storyboard table for sign-off, then renders + stitches into
-`projects/wulin/episode-001/final/wulin-episode-001.mp4`.
+`projects/wulin/episode-001/final/wulin-episode-001.mp4`. In narration
+mode each `role: "narration"` shot also gets a TTS voiceover muxed onto
+its clip before stitching.
 
 ### 4. Re-roll a shot
 
@@ -186,7 +208,8 @@ videoGen/
 │   ├── review.py              # qwen3-vl-plus per-clip scoring
 │   ├── rewrite.py             # qwen-text auto prompt rewrite
 │   ├── scene.py               # per-scene scaffold / ready / compile
-│   ├── ffmpeg.py              # frame extraction + concat
+│   ├── ffmpeg.py              # frame extraction + concat + audio mux
+│   ├── tts.py                 # qwen3-tts-flash narration (narration mode)
 │   ├── storyboard.py          # Pydantic schema (single source of truth)
 │   ├── render.py              # chain-DAG parallel render + review loop
 │   └── state.py               # per-episode JSON
