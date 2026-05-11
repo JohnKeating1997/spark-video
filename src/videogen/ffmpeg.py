@@ -293,22 +293,33 @@ def mix_bgm(
     bgm: Path,
     out: Path,
     *,
-    volume: float = 0.25,
+    voice_lufs: float = -16.0,
+    bgm_delta_lu: float = -14.0,
     fade_in_s: float = 0.5,
     fade_out_s: float = 1.0,
 ) -> Path:
     """Mix a BGM audio file underneath the existing audio of ``video``.
 
-    The video's original audio is preserved (dialog / sfx / TTS narration).
-    The BGM is attenuated by ``volume`` (linear gain 0.0–1.0), fitted to
-    the video duration (loops if shorter, trims if longer), then crossfaded
-    in/out and mixed in with ``amix`` using ``duration=first`` so the
-    final clip length matches the video exactly.
+    Uses EBU R128 ``loudnorm`` to guarantee consistent relative levels
+    regardless of input loudness:
 
-    If the input video has no audio stream, a silent AAC track is created
-    on the fly and the BGM becomes the sole audio.
+    - Voice / narration / dialog is normalized to ``voice_lufs`` LUFS
+      (broadcast standard: -16 LUFS for streaming content).
+    - BGM is normalized to ``voice_lufs + bgm_delta_lu`` LUFS, i.e. a
+      fixed offset below the voice. Default ``bgm_delta_lu = -14`` means
+      BGM targets -30 LUFS — comfortably underneath speech without
+      competing for attention.
 
-    Always re-encodes (libx264 + aac). Output is mp4 with AAC audio.
+    The BGM loops (if shorter) or trims (if longer) to match the video
+    duration, then crossfades in/out. ``amix`` with ``duration=first``
+    ensures the final clip length matches the video exactly.
+
+    If the input video has no audio stream, a silent track is created
+    on the fly and the BGM becomes the sole audio (normalized to
+    ``voice_lufs`` since there is no voice to duck under).
+
+    Always re-encodes (aac for audio; video is ``-c:v copy`` unless that
+    fails, then falls back to libx264 re-encode). Output is mp4.
     """
     _ensure_ffmpeg()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -319,15 +330,22 @@ def mix_bgm(
     if v_dur <= 0:
         raise RuntimeError(f"mix_bgm: cannot probe video duration: {video}")
 
-    vol = max(0.0, min(1.0, float(volume)))
+    bgm_target = voice_lufs + bgm_delta_lu
     fade_in = max(0.0, float(fade_in_s))
     fade_out = max(0.0, float(fade_out_s))
     fade_out_start = max(0.0, v_dur - fade_out)
 
+    # Voice chain: normalize to voice_lufs using EBU R128 loudnorm.
+    # TP=-1.5 prevents true peaks above -1.5 dBFS; LRA=11 limits range.
+    voice_chain = (
+        f"[0:a]loudnorm=I={voice_lufs:.1f}:TP=-1.5:LRA=11[voice]"
+    )
+
+    # BGM chain: loop → trim → normalize to bgm_target → fade in/out.
     bgm_chain = (
         f"[1:a]aloop=loop=-1:size=2e9,"
         f"atrim=0:{v_dur:.3f},asetpts=PTS-STARTPTS,"
-        f"volume={vol:.4f},"
+        f"loudnorm=I={bgm_target:.1f}:TP=-1.5:LRA=6,"
         f"afade=t=in:st=0:d={fade_in:.3f},"
         f"afade=t=out:st={fade_out_start:.3f}:d={fade_out:.3f}"
         f"[bgm]"
@@ -336,22 +354,50 @@ def mix_bgm(
     has_audio = _has_audio_stream(video)
     if has_audio:
         filt = (
+            f"{voice_chain};"
             f"{bgm_chain};"
-            f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+            f"[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout]"
         )
         inputs = ["-i", str(video), "-i", str(bgm)]
     else:
-        # No source audio — pad a silent track to match video, then mix.
-        filt = (
-            f"[2:a]atrim=0:{v_dur:.3f},asetpts=PTS-STARTPTS[src];"
-            f"{bgm_chain};"
-            f"[src][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+        # No source audio — BGM becomes the sole audio, normalized to
+        # voice_lufs (no ducking needed).
+        bgm_solo_chain = (
+            f"[1:a]aloop=loop=-1:size=2e9,"
+            f"atrim=0:{v_dur:.3f},asetpts=PTS-STARTPTS,"
+            f"loudnorm=I={voice_lufs:.1f}:TP=-1.5:LRA=6,"
+            f"afade=t=in:st=0:d={fade_in:.3f},"
+            f"afade=t=out:st={fade_out_start:.3f}:d={fade_out:.3f}"
+            f"[bgm]"
         )
-        inputs = [
-            "-i", str(video),
-            "-i", str(bgm),
-            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+        filt = bgm_solo_chain
+        inputs = ["-i", str(video), "-i", str(bgm)]
+        # Map BGM directly as output audio.
+        cmd = [
+            "ffmpeg", "-y", *inputs,
+            "-filter_complex", filt,
+            "-map", "0:v", "-map", "[bgm]",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "192k",
+            "-ar", "24000", "-ac", "2",
+            "-shortest",
+            "-movflags", "+faststart",
+            str(out),
         ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            cmd_reenc = list(cmd)
+            idx = cmd_reenc.index("-c:v")
+            cmd_reenc[idx + 1] = "libx264"
+            cmd_reenc.insert(idx + 2, "-pix_fmt")
+            cmd_reenc.insert(idx + 3, "yuv420p")
+            r2 = subprocess.run(cmd_reenc, capture_output=True, text=True)
+            if r2.returncode != 0:
+                raise RuntimeError(
+                    f"ffmpeg mix_bgm (no audio) failed:\n"
+                    f"  stderr tail: {r2.stderr[-400:]}"
+                )
+        return out
 
     cmd = [
         "ffmpeg", "-y", *inputs,
@@ -360,6 +406,7 @@ def mix_bgm(
         "-map", "[aout]",
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k",
+        "-ar", "24000", "-ac", "2",
         "-shortest",
         "-movflags", "+faststart",
         str(out),
