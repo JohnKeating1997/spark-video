@@ -66,8 +66,8 @@ class Settings:
             rewrite_model=os.getenv("VIDEOGEN_REWRITE_MODEL", "qwen-plus").strip(),
             max_retry=int(os.getenv("VIDEOGEN_MAX_RETRY", "3")),
             video_provider=os.getenv("VIDEOGEN_VIDEO_PROVIDER", "happyhorse").strip().lower(),
-            narrator_voice=os.getenv("VIDEOGEN_NARRATOR_VOICE", "Cherry").strip(),
-            narrator_tts_model=os.getenv("VIDEOGEN_NARRATOR_TTS_MODEL", "qwen3-tts-flash").strip(),
+            narrator_voice=os.getenv("VIDEOGEN_NARRATOR_VOICE", "longanyang").strip(),
+            narrator_tts_model=os.getenv("VIDEOGEN_NARRATOR_TTS_MODEL", "cosyvoice-v3-flash").strip(),
             narrator_language=os.getenv("VIDEOGEN_NARRATOR_LANGUAGE", "Auto").strip(),
             narrator_speech_rate=_rate,
         )

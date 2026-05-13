@@ -18,7 +18,7 @@ at the very start of `/episode`):
  shorts.
 - **narration** (旁白解说, "10 分钟带你看完 XX") — screenwriter writes
  节拍 (mixed 旁白 + 对白); 旁白 beats become short (3–6s) shots whose
- audio is **stripped and replaced** by `qwen3-tts-flash` voiceover via
+ audio is **stripped and replaced** by `cosyvoice-v3-flash` voiceover via
  `ffmpeg.mux_audio`. 对白 beats stay as today's drama shots. Maximises
  parallelism (every 旁白 shot is its own chain group) and works around
  the video models' lack of long-form cohesion.
@@ -333,11 +333,14 @@ agent-spawned shells unless you have first verified it's on PATH.
 ./bin/videogen scene compile  --project <p> --episode <e> \
         [--provider happyhorse|wan] \
         [--mode drama|narration] \
-        [--narrator-voice Cherry]                                        # merge → script.md + storyboard.json (writes provider+mode+narrator_voice)
+        [--narrator-voice longanyang]                                    # merge → script.md + storyboard.json (writes provider+mode+narrator_voice)
 
-# Narration TTS (auto-invoked by render when storyboard.mode=narration; CLI is for previews)
+# Narration TTS (auto-invoked by render when storyboard.mode=narration; CLI is for previews).
+# Backend is picked by model name prefix:
+#   cosyvoice-* (default) → /services/audio/tts/SpeechSynthesizer, native rate, 仅北京
+#   qwen*-tts*           → /services/aigc/multimodal-generation/generation, ffmpeg atempo
 ./bin/videogen tts synth --text "..." --out path.wav \
-        [--voice Cherry] [--language Chinese] [--model qwen3-tts-flash]
+        [--voice longanyang] [--language Chinese] [--model cosyvoice-v3-flash]
 
 # Storyboard (per episode)
 ./bin/videogen storyboard validate --project <p> --episode <e>
@@ -380,8 +383,14 @@ production mode; narration-mode storyboards may carry shots with
 those at validate-time). Per-shot review state: see
 `src/videogen/render.py` (`_empty_shot_record` for the `attempts[]` +
 `winner_version` schema). Provider implementations:
-`src/videogen/providers/{base,wan,happyhorse}.py`. Narration TTS
-(`qwen3-tts-flash`): `src/videogen/tts.py`.
+`src/videogen/providers/{base,wan,happyhorse}.py`. Narration TTS lives
+in `src/videogen/tts.py` and supports two backends, dispatched by model
+name prefix: `cosyvoice-*` (default, `/services/audio/tts/SpeechSynthesizer`,
+native `rate`, **仅北京地域**) and `qwen*-tts*` (legacy,
+`/services/aigc/multimodal-generation/generation`, ffmpeg `atempo`
+post-process). Switch by setting `VIDEOGEN_NARRATOR_TTS_MODEL` (and a
+matching `VIDEOGEN_NARRATOR_VOICE` — voice taxonomy differs between
+backends).
 
 `Scene.set_id` (optional string) — references a movie-set folder name.
 At render time, the active provider appends that set's reference image
@@ -436,6 +445,7 @@ Narration mode TTS (only used when `Storyboard.mode == "narration"`):
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `VIDEOGEN_NARRATOR_VOICE` | `Cherry` | Default voice. Per-episode override: `Storyboard.narrator_voice` (set by `scene compile --narrator-voice`). Per-shot override: `Shot.narrator_voice`. See [qwen-tts voice list](https://help.aliyun.com/zh/model-studio/qwen-tts#bac280ddf5a1u). |
-| `VIDEOGEN_NARRATOR_TTS_MODEL` | `qwen3-tts-flash` | TTS model name. |
-| `VIDEOGEN_NARRATOR_LANGUAGE` | `Auto` | `Auto` or one of Chinese/English/German/Italian/Portuguese/Spanish/Japanese/Korean/French/Russian. Specifying improves pronunciation when content is single-language. |
+| `VIDEOGEN_NARRATOR_TTS_MODEL` | `cosyvoice-v3-flash` | TTS model name. Backend is auto-picked by prefix: `cosyvoice-*` → CosyVoice (native `rate`, **仅北京地域**); `qwen*-tts*` → Qwen-TTS (ffmpeg `atempo` post-process). |
+| `VIDEOGEN_NARRATOR_VOICE` | `longanyang` | Default voice — must match the chosen backend. CosyVoice voices e.g. `longanyang`/`longwan`/`longxiang` ([list](https://help.aliyun.com/zh/model-studio/cosyvoice-voice-list)); Qwen-TTS voices e.g. `Cherry`/`Ethan` ([list](https://help.aliyun.com/zh/model-studio/qwen-tts#bac280ddf5a1u)). Per-episode override: `Storyboard.narrator_voice` (set by `scene compile --narrator-voice`). Per-shot override: `Shot.narrator_voice`. |
+| `VIDEOGEN_NARRATOR_SPEECH_RATE` | `1.2` | Speech speed (0.5–2.0). CosyVoice consumes natively; Qwen-TTS applies via ffmpeg `atempo`. |
+| `VIDEOGEN_NARRATOR_LANGUAGE` | `Auto` | `Auto` or one of Chinese/English/German/Italian/Portuguese/Spanish/Japanese/Korean/French/Russian. Specifying improves pronunciation when content is single-language. On CosyVoice, mapped to `language_hints` (zh/en/...); `Italian`/`Spanish` are not in CosyVoice's hint list and fall back to auto-detect. |

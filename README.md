@@ -18,8 +18,9 @@ Two **production modes** are available — chosen at the very start of
 - **drama** (短剧, default) — 2–5 min original short. Long, dialog-driven
   shots. Today's flow.
 - **narration** (旁白解说, "10 分钟带你看完 XX") — short visual beats
-  whose original audio is stripped and replaced by `qwen3-tts-flash`
-  voiceover via `ffmpeg.mux_audio`. Sidesteps the video models'
+  whose original audio is stripped and replaced by `cosyvoice-v3-flash`
+  voiceover (Qwen-TTS still selectable via `VIDEOGEN_NARRATOR_TTS_MODEL`)
+  via `ffmpeg.mux_audio`. Sidesteps the video models'
   long-form weakness (faces drift, no continuity, no music) by leaning
   on TTS to carry the story. Drama beats can still be mixed in.
 
@@ -49,7 +50,7 @@ Two **production modes** are available — chosen at the very start of
 │             versioned attempts, qwen3-vl-plus review,        │
 │             qwen-text auto-rewrite, escalation               │
 │  ffmpeg   →  last-frame extraction, concat, audio mux        │
-│  tts      →  qwen3-tts-flash narration (used in narration mode)│
+│  tts      →  cosyvoice / qwen-tts narration (narration mode)  │
 │  state    →  per-episode JSON, attempts[] + winner_version   │
 └──────────────┬──────────────────────────────────────────────┘
                ▼
@@ -209,7 +210,7 @@ videoGen/
 │   ├── rewrite.py             # qwen-text auto prompt rewrite
 │   ├── scene.py               # per-scene scaffold / ready / compile
 │   ├── ffmpeg.py              # frame extraction + concat + audio mux
-│   ├── tts.py                 # qwen3-tts-flash narration (narration mode)
+│   ├── tts.py                 # cosyvoice / qwen-tts narration (narration mode)
 │   ├── storyboard.py          # Pydantic schema (single source of truth)
 │   ├── render.py              # chain-DAG parallel render + review loop
 │   └── state.py               # per-episode JSON
