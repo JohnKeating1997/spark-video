@@ -222,19 +222,25 @@ def mux_audio(
     audio: Path,
     out: Path,
     *,
-    fit: Literal["audio", "video"] = "audio",
+    fit: Literal["audio", "video", "narration"] = "audio",
 ) -> Path:
     """Drop the video's original audio, replace it with ``audio``.
 
     ``fit`` controls how the two timelines are reconciled:
 
-    * ``audio`` (narration default): final clip length == audio length.
+    * ``audio``: final clip length == audio length.
       If audio is longer than video → freeze the video's last frame for
       the gap (``tpad=stop_mode=clone``). If audio is shorter → trim
       the video to the audio length.
 
+    * ``narration`` (旁白模式默认): final length is ``audio`` plus up to
+      1 s of trailing picture when the source video is longer — the tail
+      is silent so the beat gets a brief pause. If audio runs longer than
+      video, freeze at most 1 s then trim excess audio so the clip never
+      exceeds ``video + 1 s`` of hold-frame.
+
     * ``video``: final clip length == video length. Audio is padded with
-      silence (``apad``) or trimmed to match. Not used by narration mode.
+      silence (``apad``) or trimmed to match.
 
     Always re-encodes (libx264 + aac) — ``-c copy`` cannot satisfy the
     pad/trim semantics. Output is mp4 with AAC audio.
@@ -249,7 +255,23 @@ def mux_audio(
             f"mux_audio: cannot probe durations (video={v_dur}s, audio={a_dur}s)"
         )
 
-    if fit == "audio":
+    _NARRATION_TAIL_S = 1.0
+
+    if fit == "narration":
+        target = min(max(a_dur, v_dur), a_dur + _NARRATION_TAIL_S)
+        v_pad = target - v_dur
+        a_pad = target - a_dur
+        vf = (
+            f"tpad=stop_mode=clone:stop_duration={v_pad:.3f}"
+            if v_pad > 0.05
+            else "null"
+        )
+        af = (
+            f"apad=pad_dur={a_pad:.3f}"
+            if a_pad > 0.05
+            else "anull"
+        )
+    elif fit == "audio":
         target = a_dur
         delta = a_dur - v_dur
         if delta > 0.05:
@@ -257,12 +279,12 @@ def mux_audio(
             vf = f"tpad=stop_mode=clone:stop_duration={delta:.3f}"
         else:
             vf = "null"
+        af = "anull"
     else:
         target = v_dur
         # Pad audio with silence if shorter; ffmpeg trims when longer via -t.
         vf = "null"
-
-    af = "anull" if fit == "audio" else "apad"
+        af = "apad"
 
     cmd = [
         "ffmpeg", "-y",

@@ -35,6 +35,7 @@ from . import (
     model_log,
     movie_set as movie_set_mod,
     npc as npc_mod,
+    prop as prop_mod,
     render as render_mod,
     review as review_mod,
     scene as scene_mod,
@@ -559,6 +560,188 @@ def set_generate(
         )
 
 
+# ---------- key props (关键道具) ----------------------------------------------
+prop_app = typer.Typer(
+    help="Manage 关键道具 / key props (folder-per-prop, two-tier project↔episode)",
+)
+app.add_typer(prop_app, name="prop")
+
+
+@prop_app.command("init")
+def prop_init(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+    no_upload: bool = typer.Option(False, "--no-upload", help="skip OSS upload (dry run)"),
+):
+    """Scan project + episode prop folders, build composites, upload, write props.json.
+
+    Two tiers (episode overrides project) — same model as cast / movie-set:
+
+      • projects/<id>/props/<name>/             ← shared props
+      • projects/<id>/<episode>/props/<name>/   ← episode-only props
+
+    Each prop lives in its own folder. Multi-image folders represent the
+    *same* state from different angles and get composed into a 2/4/9-pane
+    grid. Different narrative states (完整 / 起皱 / 撕碎) **must** be
+    separate folders — never multiple state images in one folder.
+
+    Props are *optional* — episodes with zero props are a no-op.
+    """
+    payload = prop_mod.init_episode(project_id, episode_id, do_upload=not no_upload)
+    props = payload["props"]
+    if not props:
+        console.print(
+            f"[yellow](no props found in {payload['project_props_dir']} "
+            f"or {payload['episode_props_dir']})[/]"
+        )
+        console.print(
+            f"  scaffold one with: ./bin/videogen prop scaffold --project {project_id} "
+            f"--name \"<prop name>\""
+        )
+        return
+    table = Table(title=f"Key props for {project_id}/{payload['episode_id']}")
+    table.add_column("Name")
+    table.add_column("Id")
+    table.add_column("State")
+    table.add_column("Source")
+    table.add_column("Image")
+    table.add_column("Card")
+    table.add_column("Uploaded")
+    for p in props:
+        n_img = len(p.get("images_local", []))
+        img_cell = Path(p["image_local"]).name + (
+            f" (×{n_img}→grid)" if p.get("composite_image") else ""
+        )
+        src = p.get("source", "project")
+        state_lbl = (p.get("card") or {}).get("front", {}).get("state") or "—"
+        table.add_row(
+            p["name"],
+            p.get("id", "?"),
+            state_lbl,
+            f"[bold magenta]{src}[/]" if src == "episode" else src,
+            img_cell,
+            "✓" if p.get("card") else "—",
+            "✓" if p.get("image_url") else "—",
+        )
+    console.print(table)
+
+
+@prop_app.command("ls")
+def prop_ls(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str = typer.Option(..., "--episode", "-e"),
+):
+    """Print props.json for the episode."""
+    typer.echo(json.dumps(
+        prop_mod.load(project_id, episode_id), ensure_ascii=False, indent=2,
+    ))
+
+
+@prop_app.command("scaffold")
+def prop_scaffold(
+    name: str = typer.Option(..., "--name", help="prop display name, e.g. 红包-完整"),
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str | None = typer.Option(
+        None, "--episode", "-e",
+        help="if set, scaffold under projects/<id>/<episode>/props/<name>/ "
+             "(episode-only prop). Default: project-shared prop.",
+    ),
+    overwrite: bool = typer.Option(False, "--force"),
+):
+    """Scaffold ``<props_dir>/<name>/prop.md`` with a fillable template.
+
+    Defaults to the **project** tier (shared across all episodes). Pass
+    ``--episode`` for a one-off prop. If the prop has multiple narrative
+    states (e.g. 红包 → 完整 / 起皱 / 撕碎), scaffold each state as a
+    separate folder with the ``<name>-<state>`` naming convention.
+    """
+    if episode_id:
+        root = prop_mod.episode_props_dir(project_id, episode_id)
+    else:
+        root = prop_mod.project_props_dir(project_id)
+    prop_dir = root / name
+    prop_dir.mkdir(parents=True, exist_ok=True)
+    out = prop_dir / prop_mod.PROP_FILENAME
+    if out.exists() and not overwrite:
+        console.print(f"[red]{out} exists; use --force to overwrite[/]")
+        raise typer.Exit(1)
+    out.write_text(prop_mod.PROP_TEMPLATE.format(name=name), encoding="utf-8")
+    console.print(f"[green]✓ wrote {out}[/]")
+    console.print(
+        f"  drop a reference image into {prop_dir}/, then re-run "
+        f"`./bin/videogen prop init --project {project_id} "
+        f"--episode {episode_id or '<EPISODE>'}`."
+    )
+
+
+@prop_app.command("generate")
+def prop_generate(
+    project_id: str = typer.Option(..., "--project", "-p"),
+    episode_id: str | None = typer.Option(
+        None, "--episode", "-e",
+        help="save into the episode's props/ folder (episode-only). "
+             "Omit to save into the project's shared props/.",
+    ),
+    name: str = typer.Option(..., "--name", help="prop display name"),
+    description: str = typer.Option(
+        ..., "--desc",
+        help="Detailed description for image generation: 材质 / 颜色 / 形状 / 关键细节",
+    ),
+    mood_anchor: str = typer.Option(
+        "", "--mood",
+        help="project mood_anchor for style consistency (default: from lore.md)",
+    ),
+):
+    """Generate a reference image for a prop via wan2.6-t2i.
+
+    Useful when you have no on-set photo and want the model to invent a
+    consistent prop based on a textual brief. The generated image is a
+    clean, centred product-style shot ideal for r2v reference.
+    """
+    if not mood_anchor:
+        lore = lore_mod.load(project_id, projects_dir=SETTINGS.projects_dir)
+        if lore and lore.front.mood_anchor:
+            mood_anchor = lore.front.mood_anchor
+
+    if episode_id:
+        prop_dir = prop_mod.episode_props_dir(project_id, episode_id) / name
+    else:
+        prop_dir = prop_mod.project_props_dir(project_id) / name
+    prop_dir.mkdir(parents=True, exist_ok=True)
+
+    prompt = ", ".join(filter(None, [
+        f"道具实拍照, {name}",
+        description,
+        # Product-style framing makes the prop unambiguous as a reference.
+        "居中构图, 简洁背景, 柔和光照, 无人物, 无干扰元素, 高清细节, 真实质感",
+        mood_anchor,
+    ]))
+    log_token = model_log.set_context(project_id=project_id, episode_id=episode_id)
+    try:
+        console.print(f"[cyan]generating reference image for prop {name}…[/]")
+        image_url = npc_mod._call_t2i(
+            prompt,
+            negative_prompt="低分辨率, 错误, 残缺, 透视错误, 多余物品, 人物, 文字, 水印",
+            size="1024*1024",
+        )
+    finally:
+        model_log.reset_context(log_token)
+
+    out_path = prop_dir / f"{name}.png"
+    npc_mod._download_image(image_url, out_path)
+    console.print(f"[green]✓ prop reference → {out_path}[/]")
+    if episode_id:
+        console.print(
+            f"[dim]Run `./bin/videogen prop init --project {project_id} "
+            f"--episode {episode_id}` to include this prop in props.json.[/]"
+        )
+    else:
+        console.print(
+            f"[dim]Run `./bin/videogen prop init --project {project_id} "
+            f"--episode <EPISODE>` to pick this prop up.[/]"
+        )
+
+
 # ---------- bgm ---------------------------------------------------------------
 bgm_app = typer.Typer(
     help="Manage background music (folder-per-tier, two-tier project↔episode)",
@@ -873,6 +1056,28 @@ def sb_validate(
             f"--episode {episode_id}`."
         )
 
+    # Cross-check shot.props against props.json (soft warning).
+    prop_data = prop_mod.load(project_id, episode_id)
+    known_props = {p["name"] for p in prop_data.get("props", [])}
+    unknown_props: list[tuple[str, str]] = []
+    for s in sb.shots:
+        for pname in s.props:
+            if pname not in known_props:
+                unknown_props.append((s.id, pname))
+    if unknown_props:
+        console.print(
+            "[yellow]shots referencing unknown key props "
+            "(prop reference image won't attach):[/]"
+        )
+        for sid, pname in unknown_props:
+            console.print(f"  {sid} → prop={pname!r}")
+        console.print(
+            f"  fix: add a folder under projects/{project_id}/props/<name>/ "
+            f"(or projects/{project_id}/<episode>/props/<name>/), then "
+            f"run `./bin/videogen prop init --project {project_id} "
+            f"--episode {episode_id}`."
+        )
+
     warnings = sb.lint()
     if warnings:
         console.print("[yellow]continuity warnings (won't block render):[/]")
@@ -1022,7 +1227,7 @@ def sb_show(
     table = Table(title=sb.title)
     table.add_column("ID"); table.add_column("Scene"); table.add_column("Dur")
     table.add_column("Kind"); table.add_column("Role"); table.add_column("Cast")
-    table.add_column("Set"); table.add_column("Purpose(40)")
+    table.add_column("Set"); table.add_column("Props"); table.add_column("Purpose(40)")
     table.add_column("Prompt(50)"); table.add_column("Anchor")
     anchor = (lore.front.mood_anchor if lore else None) or ""
     scene_lookup = sb.scene_map()
@@ -1040,11 +1245,13 @@ def sb_show(
             set_cell = f"[yellow]{eff_set or '(none)'}*[/]"  # * = per-shot override
         else:
             set_cell = eff_set or "—"
+        props_cell = ",".join(s.props) if s.props else "—"
         table.add_row(
             s.id, s.scene, f"{s.duration}s",
             s.kind, role_cell,
             ",".join(s.characters) or "—",
             set_cell,
+            props_cell,
             np_cell,
             (s.prompt[:50] + "…") if len(s.prompt) > 50 else s.prompt,
             anchor_hit,
@@ -1490,16 +1697,18 @@ def stitch_cmd(
             else:
                 premix = out.with_name(out.stem + ".premix.mp4")
                 out.rename(premix)
+                import math
+                bgm_delta_lu = -14.0 + 20.0 * math.log10(max(bgm_cfg.volume, 0.01) / 0.25)
                 ff.mix_bgm(
                     premix, track_path, out,
-                    volume=bgm_cfg.volume,
+                    bgm_delta_lu=bgm_delta_lu,
                     fade_in_s=bgm_cfg.fade_in_s,
                     fade_out_s=bgm_cfg.fade_out_s,
                 )
                 premix.unlink(missing_ok=True)
                 console.print(
                     f"[dim]· mixed global BGM {bgm_cfg.track!r} "
-                    f"@ volume={bgm_cfg.volume}[/]"
+                    f"@ volume={bgm_cfg.volume} (bgm_delta={bgm_delta_lu:+.1f} LU)[/]"
                 )
 
     console.print(f"[green]✓ final video → {out}[/]")

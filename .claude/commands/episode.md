@@ -165,11 +165,13 @@ this line to their prompt verbatim:
 ./bin/videogen episode init --project $1 --episode $2
 test -f projects/$1/$2/cast.json      || ./bin/videogen cast init --project $1 --episode $2
 test -f projects/$1/$2/movie_set.json || ./bin/videogen set  init --project $1 --episode $2
+test -f projects/$1/$2/props.json     || ./bin/videogen prop init --project $1 --episode $2
 ```
 
-`set init` is a no-op when neither tier has any 布景 folders — sets are
-optional. If the storyboard ever wires `Scene.set_id` you'll be glad
-this file exists; if not, it stays empty and costs nothing.
+`set init` and `prop init` are no-ops when neither tier has any folders
+— both 布景 and 关键道具 are optional. If the storyboard ever wires
+`Scene.set_id` or `Shot.props` you'll be glad these files exist; if not,
+they stay empty and cost nothing.
 
 Lore handling — 3-case rule (lore is project-tier, shared across episodes):
 
@@ -191,14 +193,22 @@ test -d .claude/skills/screenwriter/references/shanyin-screenwriting \
 
 ---
 
-## GATE 1 · cast + 布景 confirm
+## GATE 1 · cast + 布景 + 关键道具 confirm
 
-Show `projects/$1/$2/cast.json` AND `projects/$1/$2/movie_set.json` as
-two tables. Call out:
+Show `projects/$1/$2/cast.json`, `projects/$1/$2/movie_set.json`, AND
+`projects/$1/$2/props.json` as three tables. Call out:
 
-- Characters from the premise that aren't in cast yet.
-- Locations from the premise that should be locked as movie sets but
-  aren't (recurring rooms, hero locations).
+- **Characters** from the premise that aren't in cast yet.
+- **Locations** from the premise that should be locked as movie sets but
+  aren't (recurring rooms, hero locations). Also flag any location whose
+  premise mentions multiple lighting / time-of-day states (白天 客栈 +
+  夜晚 客栈) — those need **separate folders** (`<location>-<时段>`),
+  per the 灯光统一铁律.
+- **Key props** the premise hints at (any object that recurs across
+  shots OR is a story-critical hero item — 红包, 戒指, 钥匙, 玩具熊,
+  笔记本, 凶器, 信件…). Flag any prop with multiple narrative states
+  (完整 → 起皱 → 撕碎) — those need **separate folders** too
+  (`<prop>-<state>` naming).
 - Any cast member whose project-tier portrait visibly contradicts the
   premise's required look (sleeping in 婚纱 vs everyday 白领). For those
   the user has three options:
@@ -209,11 +219,21 @@ two tables. Call out:
     3. Replace the project-tier portrait outright (if the new look is
        canonical going forward).
 
+For props the user wants pinned, scaffold + (optionally) generate now —
+better to land them BEFORE storyboarding than to retrofit later:
+
+```bash
+./bin/videogen prop scaffold --project $1 [--episode $2] --name "<prop>[-<state>]"
+./bin/videogen prop generate --project $1 [--episode $2] \
+    --name "<prop>[-<state>]" --desc "<材质/颜色/形状/关键细节>"
+```
+
 After user confirms / adds:
 
 ```bash
 ./bin/videogen cast init --project $1 --episode $2
 ./bin/videogen set  init --project $1 --episode $2
+./bin/videogen prop init --project $1 --episode $2
 ```
 
 ---
@@ -326,6 +346,21 @@ SKILL's § "Movie sets" walks through the workflow:
     --name "<set name>" --desc "<材质/布局/灯光/关键道具>"
 ./bin/videogen set init --project $1 --episode $2
 ```
+
+Same beat for new 关键道具: scan the LAST scene's `<!-- PROP CHECK -->`
+block (per the screenwriter SKILL). Scaffold + (optionally) generate
+each pinned prop. The director SKILL's § "Key props" walks through it:
+
+```bash
+./bin/videogen prop scaffold --project $1 [--episode $2] --name "<prop>[-<state>]"
+./bin/videogen prop generate --project $1 [--episode $2] \
+    --name "<prop>[-<state>]" --desc "<材质/颜色/形状/关键细节>"
+./bin/videogen prop init --project $1 --episode $2
+```
+
+Reminder: state changes (完整 → 起皱 → 撕碎) are **separate folders**,
+named `<prop>-<state>`. The director will assign each shot its
+specific state via `Shot.props`.
 
 If user requested narrative changes, re-spawn the affected
 `scene-NN.md` editor subagent + the matching director subagent + recompile.

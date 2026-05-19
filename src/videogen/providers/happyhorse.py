@@ -57,6 +57,7 @@ class HappyHorseProvider(VideoProvider):
         prev_last_frame_url: str | None,
         scene=None,
         movie_set_data: dict | None = None,
+        prop_data: dict | None = None,
     ) -> BuildResult:
         kind: ShotKind = shot.kind
         warnings: list[str] = []
@@ -83,6 +84,9 @@ class HappyHorseProvider(VideoProvider):
         set_index = {
             s["name"]: s for s in (movie_set_data or {}).get("sets", [])
         }
+        prop_index = {
+            p["name"]: p for p in (prop_data or {}).get("props", [])
+        }
         skipped_voice: list[str] = []
 
         if kind == "r2v":
@@ -100,16 +104,32 @@ class HappyHorseProvider(VideoProvider):
                     skipped_voice.append(char_name)
             # Lock the location with a set reference image (after the cast).
             # HappyHorse r2v accepts up to 9 reference images; we cap below
-            # if cast already filled the slots.
+            # when slots run out (cast → set → props priority).
             set_url = _resolve_set_image_url(shot, scene, set_index, warnings)
             if set_url:
                 if len(media) >= 9:
                     warnings.append(
-                        f"{shot.id}: 9 cast portraits already in media[], "
+                        f"{shot.id}: 9 reference slots filled by cast, "
                         f"set reference image dropped (HappyHorse r2v cap)."
                     )
                 else:
                     media.append({"type": "reference_image", "url": set_url})
+            # Lock key props (lowest priority — drop first when capped).
+            dropped_props: list[str] = []
+            for prop_name in shot.props:
+                purl = _resolve_prop_image_url(shot, prop_name, prop_index, warnings)
+                if not purl:
+                    continue
+                if len(media) >= 9:
+                    dropped_props.append(prop_name)
+                    continue
+                media.append({"type": "reference_image", "url": purl})
+            if dropped_props:
+                warnings.append(
+                    f"{shot.id}: 9-slot cap hit; dropped prop reference "
+                    f"images for {dropped_props}. Reduce shot.characters / "
+                    f"props or split the shot."
+                )
             if not media:
                 raise ValueError(
                     f"r2v shot {shot.id} needs at least one character with a "
@@ -206,6 +226,27 @@ def _resolve_set_image_url(
     if not url:
         warnings.append(
             f"{shot.id}: set {set_id!r} has no image_url; reference skipped."
+        )
+    return url
+
+
+def _resolve_prop_image_url(
+    shot,
+    prop_name: str,
+    prop_index: dict[str, dict],
+    warnings: list[str],
+) -> str | None:
+    p = prop_index.get(prop_name)
+    if not p:
+        warnings.append(
+            f"{shot.id}: prop {prop_name!r} has no folder in props.json — "
+            f"reference image skipped. Run `videogen prop init`."
+        )
+        return None
+    url = p.get("image_url")
+    if not url:
+        warnings.append(
+            f"{shot.id}: prop {prop_name!r} has no image_url; reference skipped."
         )
     return url
 

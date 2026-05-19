@@ -100,13 +100,21 @@ class VideoProvider:
         prev_last_frame_url: str | None,
         scene=None,                            # videogen.storyboard.Scene | None
         movie_set_data: dict | None = None,    # videogen.movie_set.load() shape
+        prop_data: dict | None = None,         # videogen.prop.load() shape
     ) -> BuildResult:
         """Subclasses implement. Returns BuildResult dict.
 
-        ``scene`` and ``movie_set_data`` together let providers append
-        the scene's set reference image to r2v shots when applicable.
-        Both are optional — t2v shots and scenes without ``set_id``
-        ignore them.
+        ``scene`` + ``movie_set_data`` let providers append the scene's
+        set reference image to r2v shots; ``prop_data`` does the same
+        for each name in ``shot.props``. All three are optional —
+        t2v / i2v shots and shots without props/set_id ignore them.
+
+        Reference-image priority order in r2v media[]:
+          1. cast portraits (one per shot.characters)
+          2. scene/shot effective set image (one)
+          3. shot.props reference images (one per prop)
+          4. (Wan only) chained first_frame for use_prev_last_frame_as_first
+        Providers with a media-slot cap drop later items first.
         """
         raise NotImplementedError
 

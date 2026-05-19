@@ -36,6 +36,10 @@ surface** (`t2v` / `i2v` / `r2v`).
    (布景) bundle, built by `./bin/videogen set init`. Read this BEFORE
    you decide which scenes get a `set_id`. Sets are folder-per-location
    with a reference image, exactly like cast (see § "Movie sets" below).
+9. `projects/<id>/<episode>/props.json` — the per-episode key-prop
+   (关键道具) bundle, built by `./bin/videogen prop init`. Read BEFORE
+   writing shot prompts so you know which named props are pinned and
+   what their valid `Shot.props` names are (see § "Key props" below).
 
 ## Your contract with the videogen pipeline
 
@@ -68,6 +72,7 @@ Schema:
     "name": "...",
     "description": "...",
     "characters_present": ["..."],
+    "props_present": ["..."],
     "set_id": "<set name from movie_set.json, or null>",
     "seed": <int|null>
   },
@@ -80,6 +85,8 @@ Schema:
       "duration": 15,
       "kind": "r2v",
       "characters": ["..."],
+      "props": ["..."],
+      "set_id": "<override scene.set_id, or null to inherit>",
       "use_prev_last_frame_as_first": true,
       "shot_group_id": "G01",
       "shot_group_role": "建立",
@@ -158,10 +165,18 @@ Rules that matter for narration shots:
 - **Default `kind: "t2v"`**. Lock a face only when the 画面 description
   explicitly names a cast member visible in this beat — in that case
   use `r2v` and put just that one character in `characters`.
-- **Default `duration: 4`s.** TTS length drives the final clip duration
-  (the renderer freeze-pads or trims the video to fit). Picking 4s and
-  letting freeze-pad cover slightly longer narration is the cheap path.
+- **Default `duration: 4`s.** TTS length drives the final clip duration.
   Only go higher (5-6s) when the 画面 needs noticeable motion.
+- **旁白-视频对齐规则 (narration alignment)**:
+  - 渲染管线 (`mux_audio fit=narration`) 会让成片时长落在
+    `[TTS时长, TTS时长+1s]`：视频比旁白长时保留最多 **1s** 无声尾画面
+    （停顿感）；旁白比视频长时最多 **1s** 静帧补齐，超出部分裁掉旁白。
+  - **视频 < 旁白** (差距 ≤ 20%): 优先微调 TTS speech rate 加速旁白对齐
+    视频。比如 4s 视频 + 4.6s 旁白 → rate × 1.15。
+  - **视频 ≪ 旁白** (差距 > 20% 或 >1s): 说明 `duration` 估错了——导演应把
+    该 beat 的 `duration` 上调到 ≈ TTS 时长, 否则会裁掉旁白尾部。
+  - 核心原则: **单镜静帧 hold 不超过 1s**；需要更长停顿时用下一句旁白前的
+    无声尾画面, 而不是无限 freeze。
 - **Do NOT set `narration_text` on `role: "drama"` shots.** The schema
   rejects it.
 - **`narration_text` value** is the screenwriter's 旁白原文, verbatim.
@@ -182,9 +197,24 @@ sequential numbering, no special prefix.
 | Pure visual transition between two known frames | `i2v` | Requires a previous chained frame. Never the first shot of a chain group. |
 | Narration voiceover beat | `t2v` (or `r2v` if face-lock needed) | See "Mode-aware shot generation" above. |
 
-**Defaults**: pick the provider's maximum duration (15s for both Wan
-and HappyHorse) unless the script genuinely needs a quick beat. Long
-shots = fewer cuts = better identity continuity = lower cost.
+**Defaults**: shot duration should **match the scene's narrative
+tempo**, NOT blindly hit the model ceiling. The provider ceiling
+(15s for both Wan and HappyHorse) is a *cap*, not a target.
+
+| Situation | Recommended duration | Why |
+|-----------|---------------------|-----|
+| Long dialog exchange, 2+ characters acting | 12–15s | Needs time for dialog + reaction beats |
+| Single character action / emotional beat | 8–12s | Enough for one clear action arc |
+| Quick reaction shot / insert / cutaway | 4–6s | Tight pacing, avoid dead air at the tail |
+| Narration beat (voiceover) | 3–6s | TTS drives the length; see § narration alignment |
+| Establishing / transition shot (no dialog) | 5–8s | Lingers long enough to set mood, not so long it drags |
+
+**Why not always 15s?** A 15s shot that only has 5s of meaningful
+action fills the remaining 10s with idle characters / frozen poses —
+when two such shots are stitched back-to-back, the result is a hard
+freeze-then-jump (硬切) that breaks immersion. **Trim the fat at the
+storyboard level, not in post.** Shorter, tighter shots also produce
+better review scores (less chance for the model to drift mid-clip).
 
 **Mix target**: ~70% `r2v`, ~25% `t2v`, ~5% `i2v` (i2v should be rare —
 only when you really want a dissolve/transition feel within one chain
@@ -421,6 +451,126 @@ Skip a set for:
 - **Chain groups whose r2v shots resolve to mixed `set_id`** — the
   灯光统一铁律 above.
 
+## Key props (关键道具) — third pin for visual continuity
+
+Cast pins faces, movie-set pins rooms, **prop pins the *thing*** that
+moves between shots. Without it, the same 红包 / 钥匙 / 戒指 /
+玩具熊 / 笔记本 will render as visually different objects every time
+the camera comes back to it. The fix is the same pattern: folder per
+prop, reference image, and `Shot.props` to attach it.
+
+### When a thing must be a prop
+
+Promote any object to a key prop when it satisfies **either**:
+
+- It appears in 2+ shots and the audience would notice if it changed
+  shape/material/color/wear (the 红包 in S01-003 → S01-007 → S04-002).
+- It's a story-critical hero object even in a single shot (the 戒指
+  proposal close-up; the 钥匙 reveal).
+
+Skip a prop for:
+
+- Background dressing (a generic teacup, a generic phone in the
+  pocket — the model invents these fine).
+- Non-recurring objects whose look doesn't matter to the plot.
+
+A reasonable budget: **3–6 named props per episode**, more is a smell.
+
+### ⚠ ONE FOLDER = ONE NARRATIVE STATE (hard rule, like sets)
+
+Same physical prop, different visible state = **different folder**:
+
+| Same prop, different… | Action |
+|-----------------------|--------|
+| Story state (完整 → 起皱 → 撕碎 / 关闭 → 打开 / 全新 → 旧) | Separate folders |
+| Damage / blood / dirt visible | Separate folders |
+| Camera angle of the *same* state | Same folder, multiple images → CLI grids them |
+
+Naming convention: `<prop_name>-<state>` —
+`红包-完整`, `红包-起皱`, `红包-撕碎`. State changes belong to the
+storyboard chain, not to a single reference image. The renderer can't
+average two states into a coherent intermediate; it just produces a
+muddy mid-prop. Each state is its own pin.
+
+### How to use a prop in a storyboard
+
+1. **List the prop in the scene's `props_present`** for recall (mirrors
+   `characters_present`). The validator warns when a shot references a
+   prop the scene didn't declare.
+
+2. **Set `Shot.props: ["<prop name>", ...]`** on every r2v shot where
+   the prop is on screen and matters. Names must match a folder
+   (project tier or episode tier) — case-sensitive, exact match.
+
+3. **State transitions**: when the prop changes state mid-scene, swap
+   the prop name across shots:
+
+   ```json
+   "shots": [
+     {"id": "S03-001", "kind": "r2v", "characters": ["陆辰"],
+      "props": ["红包-完整"], "prompt": "陆辰把现金塞进红包内层"},
+     {"id": "S03-002", "kind": "r2v", "characters": ["陆辰"],
+      "props": ["红包-起皱"], "prompt": "陆辰紧攥红包, 边角微皱",
+      "use_prev_last_frame_as_first": false},
+     {"id": "S03-003", "kind": "r2v", "characters": ["陆辰","钱夫人"],
+      "props": ["红包-撕碎"], "prompt": "钱夫人当面撕碎红包",
+      "use_prev_last_frame_as_first": false}
+   ]
+   ```
+
+   Note `use_prev_last_frame_as_first: false` on the state-change
+   shots — chaining through a state transition tries to interpolate the
+   transition frame-by-frame and produces flicker. Use a hard cut.
+
+4. **The renderer auto-appends each prop's reference image to the r2v
+   shot's `media[]`** after cast portraits and after the set image. You
+   do NOT mention "[Image N] 红包" in the prompt — it's automatic.
+
+5. **DON'T re-describe the prop's appearance in the prompt.** Same rule
+   as cast: 材质 / 颜色 / 形状 / 磨损 belongs to the reference image,
+   not to text. The prompt should describe the *action* the character
+   does WITH the prop ("塞钱进去 / 揉皱 / 撕碎 / 抛向桌面"), the
+   *景别*, and (only if the model is confusing it) the prop's
+   narrative state in one short word ("起皱的红包" — never "印有囍字的
+   大红色烫金红包").
+
+6. **HappyHorse 9-image cap**: r2v media[] has a hard ceiling of 9.
+   Priority order is cast → set → props. If a shot has 6 cast + 1 set,
+   only 2 prop slots remain; the renderer drops the rest with a warning.
+   Mitigation:
+   - Lower `Shot.characters` to who's actually visible in this beat
+     (off-screen voices don't need a portrait slot).
+   - Split crowd shots into a wide t2v (no cast/set/props) + a tight r2v
+     (locked face + hero prop).
+
+7. **`t2v` shots ignore `Shot.props`**. The validator warns. Either
+   change `kind` to `r2v` (set `characters: []` if no faces) or weave
+   the prop's textual description into the t2v prompt manually.
+
+### Scaffolding a prop
+
+```bash
+# Project-tier: a recurring prop across episodes (e.g. the family heirloom)
+./bin/videogen prop scaffold --project <id> --name "戒指-完整"
+
+# Episode-tier: a one-off prop, or a different state of a project prop
+./bin/videogen prop scaffold --project <id> --episode <ep> --name "红包-起皱"
+
+# Generate a clean product-style reference image when no photo exists
+./bin/videogen prop generate --project <id> --episode <ep> \
+    --name "红包-完整" \
+    --desc "标准中式红包, 大红色烫金底纹, 印有'囍'字, 平整无折痕"
+
+./bin/videogen prop init --project <id> --episode <ep>
+```
+
+### `storyboard validate` prop checks
+
+- Shots naming a prop not present in `props.json` (warns; reference
+  image won't attach).
+- Shots whose props aren't declared in `scene.props_present`.
+- Props attached to a `t2v` / `i2v` shot (kind has no media slot).
+
 ## NPC generation (before writing the storyboard)
 
 If the screenplay's `<!-- CAST CHECK -->` block lists 有名 NPC who are
@@ -479,7 +629,9 @@ get called for the third escalation, when nuanced judgment is needed.
 - Don't set `use_prev_last_frame_as_first: true` on the first shot of a
   scene unless you actually want a cross-scene chain (you almost
   never do).
-- Don't pick `duration < 15` without a reason.
+- Don't blindly set `duration: 15` on every shot. Match duration to the
+  scene's narrative tempo — see § "Shot kind selection" duration table.
+  Dead air at the end of a 15s shot causes hard freezes when stitched.
 - Don't call `render` before `storyboard validate` passes.
 - Don't call the DashScope HTTP API directly — use the CLI.
 - Don't assume a feature is available across all providers. Cross-check
@@ -506,3 +658,20 @@ get called for the third escalation, when nuanced judgment is needed.
   `use_prev_last_frame_as_first: false` on the boundary shot to split
   it into two parallel chain groups (this also unlocks more parallel
   rendering — pure win).
+- Don't describe a key prop's appearance (材质 / 颜色 / 形状 / 磨损 / 装饰)
+  in the prompt when you've listed it in `Shot.props`. The reference
+  image owns the look. The prompt describes the *action* on the prop
+  ("塞钱进去 / 揉皱 / 抛向桌面") and at most a single state word
+  ("起皱的红包").
+- Don't reuse one prop folder across narrative states. 完整 / 起皱 /
+  撕碎 are three folders, not three images in one folder. The model
+  averages images in a folder; mixing states gives you a muddy
+  intermediate.
+- Don't bolt on `Shot.props` to `t2v` / `i2v` shots — they have no
+  `media[]` slot for reference images. Either change the kind to `r2v`
+  (set `characters: []` if there's no face on screen) or weave the
+  prop's textual description into the prompt manually.
+- Don't blow past the HappyHorse 9-image cap. Cast + set + props all
+  share one media[] (max 9). Trim `Shot.characters` to who's actually
+  visible, or split a crowded "all hero objects in one shot" beat into
+  two shots.

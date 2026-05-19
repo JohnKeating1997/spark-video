@@ -103,6 +103,22 @@ class Shot(BaseModel):
     # Character references — names must match cast.json
     characters: list[str] = Field(default_factory=list, description="cast names featured")
 
+    # Key-prop references — names must match props.json. Each prop's
+    # reference_image is appended to media[] for r2v shots, after cast
+    # portraits and after the scene's set image. Empty list = no prop
+    # locking for this shot. The director SKILL forbids re-mentioning
+    # the prop's appearance in the prompt — the reference image owns it.
+    props: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Key-prop names featured in this shot. Names must match a "
+            "folder under projects/<id>/props/<name>/ or "
+            "projects/<id>/<episode>/props/<name>/. The renderer "
+            "appends each prop's reference image to r2v shots; t2v / "
+            "i2v shots ignore this field (no media slot)."
+        ),
+    )
+
     # Continuity
     use_prev_last_frame_as_first: bool = Field(
         default=True,
@@ -246,6 +262,14 @@ class Scene(BaseModel):
     characters_present: list[str] = Field(
         default_factory=list,
         description="All characters who appear at some point in this scene (for recall).",
+    )
+    props_present: list[str] = Field(
+        default_factory=list,
+        description=(
+            "All key props that appear at some point in this scene "
+            "(for recall — mirrors characters_present). The validate "
+            "step warns when shots reference props not listed here."
+        ),
     )
     bgm_track: str | None = Field(
         default=None,
@@ -684,6 +708,24 @@ class Storyboard(BaseModel):
                             f"{s.id}: characters {missing} appear in shot but not in "
                             f"scene {sc.id}.characters_present — add them for recall."
                         )
+                if sc and s.props:
+                    missing_props = set(s.props) - set(sc.props_present)
+                    if missing_props:
+                        warnings.append(
+                            f"{s.id}: props {missing_props} appear in shot but not in "
+                            f"scene {sc.id}.props_present — add them for recall."
+                        )
+
+        # Props on non-r2v shots have no effect — the renderer can't
+        # attach reference_image to t2v/i2v media[]. Soft warn.
+        for s in self.shots:
+            if s.props and s.kind != "r2v":
+                warnings.append(
+                    f"{s.id}: kind={s.kind} cannot accept prop reference "
+                    f"images (only r2v has media[reference_image]). Either "
+                    f"change kind to r2v or move the prop description into "
+                    f"the prompt manually."
+                )
 
         return warnings
 

@@ -41,6 +41,7 @@ class WanProvider(VideoProvider):
         prev_last_frame_url: str | None,
         scene=None,
         movie_set_data: dict | None = None,
+        prop_data: dict | None = None,
     ) -> BuildResult:
         kind: ShotKind = shot.kind
         warnings: list[str] = []
@@ -48,6 +49,9 @@ class WanProvider(VideoProvider):
         char_index = {c["name"]: c for c in cast_data["characters"]}
         set_index = {
             s["name"]: s for s in (movie_set_data or {}).get("sets", [])
+        }
+        prop_index = {
+            p["name"]: p for p in (prop_data or {}).get("props", [])
         }
 
         if kind == "r2v":
@@ -68,6 +72,11 @@ class WanProvider(VideoProvider):
             set_url = _resolve_set_image_url(shot, scene, set_index, warnings)
             if set_url:
                 media.append({"type": "reference_image", "url": set_url})
+            # Lock key props after cast + set.
+            for prop_name in shot.props:
+                purl = _resolve_prop_image_url(shot, prop_name, prop_index, warnings)
+                if purl:
+                    media.append({"type": "reference_image", "url": purl})
             if prev_last_frame_url and shot.use_prev_last_frame_as_first:
                 media.append({"type": "first_frame", "url": prev_last_frame_url})
 
@@ -152,6 +161,34 @@ def _resolve_set_image_url(
         warnings.append(
             f"{shot.id}: set {set_id!r} has no image_url (likely "
             f"`set init --no-upload`); set reference image skipped."
+        )
+    return url
+
+
+def _resolve_prop_image_url(
+    shot,
+    prop_name: str,
+    prop_index: dict[str, dict],
+    warnings: list[str],
+) -> str | None:
+    """Resolve a single prop name → uploaded image_url.
+
+    Warns (never raises) when the prop name isn't in props.json.
+    """
+    p = prop_index.get(prop_name)
+    if not p:
+        warnings.append(
+            f"{shot.id}: prop {prop_name!r} has no folder in props.json — "
+            f"reference image skipped. Add a folder under "
+            f"projects/<id>/props/ or projects/<id>/<episode>/props/ and "
+            f"re-run `videogen prop init`."
+        )
+        return None
+    url = p.get("image_url")
+    if not url:
+        warnings.append(
+            f"{shot.id}: prop {prop_name!r} has no image_url (likely "
+            f"`prop init --no-upload`); reference image skipped."
         )
     return url
 

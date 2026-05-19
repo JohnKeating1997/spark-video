@@ -54,6 +54,7 @@ from . import (
     lore as lore_mod,
     model_log,
     movie_set as movie_set_mod,
+    prop as prop_mod,
     review as review_mod,
     rewrite as rewrite_mod,
     state,
@@ -214,6 +215,7 @@ def _render_one_attempt(
     prev_last_frame_url: str | None,
     cast_data: dict,
     movie_set_data: dict | None = None,
+    prop_data: dict | None = None,
     scene: Scene | None = None,
 ) -> dict:
     """One DashScope submission → wait → download → extract last frame.
@@ -237,6 +239,7 @@ def _render_one_attempt(
             prev_last_frame_url=prev_last_frame_url,
             cast_data=cast_data,
             movie_set_data=movie_set_data,
+            prop_data=prop_data,
             scene=scene,
             clip_path=clip_path, last_frame_path=last_frame_path,
         )
@@ -256,6 +259,7 @@ def _do_render_attempt(
     prev_last_frame_url: str | None,
     cast_data: dict,
     movie_set_data: dict | None,
+    prop_data: dict | None,
     scene: Scene | None,
     clip_path: Path,
     last_frame_path: Path,
@@ -270,6 +274,7 @@ def _do_render_attempt(
             prev_last_frame_url=prev_last_frame_url,
             scene=scene,
             movie_set_data=movie_set_data,
+            prop_data=prop_data,
         )
     except ValueError as e:
         return {
@@ -350,18 +355,24 @@ def _do_render_attempt(
             v_before = ff.probe_duration(clip_path)
             tts_mod.synth(shot.narration_text, out_path=audio_out, voice=voice)
             a_dur = ff.probe_duration(audio_out)
-            if v_before > 0 and a_dur > 0 and (a_dur - v_before) > 0.35:
+            if v_before > 0 and a_dur > 0 and (a_dur - v_before) > 1.05:
                 console.print(
                     f"  [yellow]narration A/V skew[/] {shot.id}: video {v_before:.1f}s vs "
-                    f"TTS {a_dur:.1f}s — mux will freeze the last frame for "
-                    f"{a_dur - v_before:.1f}s"
+                    f"TTS {a_dur:.1f}s — mux caps hold-frame to 1s and trims excess "
+                    f"audio ({a_dur - v_before - 1.0:.1f}s lost); raise shot duration "
+                    f"or shorten narration_text"
+                )
+            elif v_before > 0 and a_dur > 0 and (v_before - a_dur) > 1.05:
+                console.print(
+                    f"  [dim]narration tail[/] {shot.id}: video {v_before:.1f}s vs "
+                    f"TTS {a_dur:.1f}s — keeping ≤1s silent picture after voiceover"
                 )
             # Rename original render to .raw.mp4, then mux into the clip path.
             if clip_path.exists():
                 if raw_clip.exists():
                     raw_clip.unlink()
                 clip_path.rename(raw_clip)
-            ff.mux_audio(raw_clip, audio_out, clip_path, fit="audio")
+            ff.mux_audio(raw_clip, audio_out, clip_path, fit="narration")
             # Video may have been freeze-padded or trimmed — re-extract last frame.
             ff.extract_last_frame(clip_path, last_frame_path)
             narration_audio_path = str(audio_out)
@@ -471,6 +482,7 @@ def render_shot_with_review(
     prev_last_frame_url: str | None,
     cast_data: dict,
     movie_set_data: dict | None,
+    prop_data: dict | None,
     scene: Scene | None,
     lore_obj: Any | None,
     cfg: RenderConfig,
@@ -499,7 +511,7 @@ def render_shot_with_review(
             storyboard=storyboard, provider=provider,
             prompt=current_prompt, version=ver,
             prev_last_frame_url=prev_last_frame_url, cast_data=cast_data,
-            movie_set_data=movie_set_data, scene=scene,
+            movie_set_data=movie_set_data, prop_data=prop_data, scene=scene,
         )
 
         if cfg.do_review and attempt["status"] == "SUCCEEDED":
@@ -638,6 +650,7 @@ def _run_chain_group(
     provider: VideoProvider,
     cast_data: dict,
     movie_set_data: dict | None,
+    prop_data: dict | None,
     scenes_index: dict[str, Scene],
     lore_obj: Any | None,
     cfg: RenderConfig,
@@ -675,6 +688,7 @@ def _run_chain_group(
             prev_last_frame_url=prev_last_frame_url,
             cast_data=cast_data,
             movie_set_data=movie_set_data,
+            prop_data=prop_data,
             scene=scenes_index.get(shot.scene),
             lore_obj=lore_obj,
             cfg=cfg, state_lock=state_lock, reset=reset,
@@ -764,6 +778,7 @@ def _render_all_inner(
     """Body of render_all — split out so the caller manages log context."""
     cast_data = cast_mod.load(project_id, episode_id)
     movie_set_data = movie_set_mod.load(project_id, episode_id)
+    prop_data = prop_mod.load(project_id, episode_id)
     scenes_index = storyboard.scene_map()
     lore_obj = lore_mod.load(project_id, projects_dir=SETTINGS.projects_dir)
     provider = get_provider(provider_override or storyboard.provider)
@@ -783,6 +798,18 @@ def _render_all_inner(
         console.print(
             f"[yellow]·[/] {n_scenes_with_set} scene(s) declare set_id but "
             f"no movie_set.json — run `videogen set init` to lock locations."
+        )
+    n_props = len(prop_data.get("props", []))
+    n_shots_with_props = sum(1 for s in storyboard.shots if s.props)
+    if n_props:
+        console.print(
+            f"[bold]key props:[/] {n_props} loaded · "
+            f"{n_shots_with_props} shot(s) reference one or more props"
+        )
+    elif n_shots_with_props:
+        console.print(
+            f"[yellow]·[/] {n_shots_with_props} shot(s) declare props but "
+            f"no props.json — run `videogen prop init` to lock key items."
         )
 
     # Filter by --shot if requested (single-shot retry).
@@ -821,6 +848,7 @@ def _render_all_inner(
                 storyboard=storyboard, provider=provider,
                 cast_data=cast_data,
                 movie_set_data=movie_set_data,
+                prop_data=prop_data,
                 scenes_index=scenes_index, lore_obj=lore_obj,
                 cfg=cfg, state_lock=state_lock,
                 only_missing=only_missing, reset=reset,

@@ -188,6 +188,45 @@ craft, so they live here:
 
    The director uses this to generate NPC portraits before storyboarding.
 
+7. **Key props (关键道具) — call them out as proper nouns the moment they
+   appear, and flag every state change.** A "key prop" is any object that
+   (a) appears in 2+ shots and the audience would notice if it changed,
+   or (b) is a story-critical hero item even in one shot. Examples: 红包,
+   钥匙, 戒指, 玩具熊, 笔记本, 信件, 凶器。 Generic 茶杯 / 手机 / 雨伞
+   are NOT key props unless the plot turns on them.
+
+   Use a stable proper-noun in 剧情 ("陆辰把现金塞进 **红包**…"), so
+   the director can pin it. When the prop visibly **changes state**
+   (完整 → 起皱 → 撕碎 / 关闭 → 打开 / 全新 → 旧了 / 干净 → 染血),
+   make the change explicit in 剧情:
+
+   > 陆辰握紧 **红包**, 边角已被攥出折痕 (起皱). 后景钱夫人冷笑。
+
+   The state word in parentheses tells the director to swap the prop's
+   reference image (`红包-完整` → `红包-起皱` is two folders). Never
+   describe the prop's *visual properties* (材质 / 颜色 / 印花 / 厚度) —
+   the reference image owns those, the same way the cast portrait owns
+   面容. Only mention the *narrative state* and the *action* on the prop.
+
+8. **Prop check (PROP CHECK) — append below CAST CHECK in the last
+   scene-NN.md**:
+
+   ```markdown
+   <!-- PROP CHECK
+   关键道具 (need props/<name> folder):
+     - 红包-完整: 标准中式红包, 平整无折痕  (出现在 S01-003 / S01-007)
+     - 红包-起皱: 同一红包被攥出折痕         (S03-002)
+     - 红包-撕碎: 同一红包被当面撕成两半     (S03-003)
+     - 戒指-完整: 母亲遗物, 旧式金戒, 内圈刻字 (S02-005 / S05-001)
+   -->
+   ```
+
+   Each entry is `<prop_name>-<state>: <短描述>  (<出现的 shot 范围>)`.
+   The director reads this BEFORE storyboarding and runs
+   `./bin/videogen prop scaffold` + `prop generate` for each entry, then
+   sets `Shot.props` accordingly. Skip the block if the episode has no
+   key props.
+
 ## Pacing target
 
 Read `lore.duration_target_s` if present. The sum of all scene
@@ -210,3 +249,12 @@ verifies this after `scene compile`.
 - Don't skip the `scene ready` sentinel — the director won't start otherwise.
 - Don't keep re-describing 着装 / 发型 / 妆容 inside 剧情. Mention an
   appearance detail only when it CHANGES (rule 4 above).
+- Don't keep re-describing a key prop's visual properties (材质 / 颜色 /
+  形状 / 印花) once you've named it. The reference image owns those.
+  Mention the prop's *narrative state* (完整 / 起皱 / 撕碎) only when
+  it CHANGES — that's the trigger for the director to swap reference
+  folders. Same rule, applied to objects.
+- Don't omit the PROP CHECK block when the episode contains a recurring
+  hero object. Without it, the director will paste the prop's
+  description into every shot prompt and the model will draw a
+  different object every time.

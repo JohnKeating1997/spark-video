@@ -113,6 +113,8 @@ projects/<project_id>/
 │   └── <character_name>/{cast.md,*.png,*.mp3}
 ├── movie-set/                         ← project-shared 布景 (sitcom rooms etc.)
 │   └── <set_name>/{set.md,*.png}
+├── props/                             ← project-shared 关键道具 (recurring hero items)
+│   └── <prop_name>/{prop.md,*.png}    (one folder per state: 红包-完整 / 红包-起皱 …)
 ├── bgm/                               ← project-shared BGM library (optional)
 │   └── <track-name>.{mp3,wav,m4a,flac,ogg,aac}
 └── <episode_id>/                      ← e.g. episode-001
@@ -133,6 +135,10 @@ projects/<project_id>/
     ├── movie-set/                     ← episode-only locations (one-off sets)
     │   └── <set_name>/{set.md,*.png}
     ├── movie_set_built/               ← ASCII-renamed singletons + grids (sets)
+    ├── props.json                     ← built per episode (project + episode props merged)
+    ├── props/                         ← episode-only props (one-off OR state override)
+    │   └── <prop_name>/{prop.md,*.png}
+    ├── props_built/                   ← ASCII-renamed singletons + grids (props)
     ├── bgm/                           ← episode-only BGM (optional; overrides
     │   └── <track-name>.{mp3,wav,...}    project tier on name collision)
     ├── clips/
@@ -214,7 +220,21 @@ projects/<project_id>/
     states (common in narration mode); the storyboard linter enforces
     "every r2v shot in one chain group resolves to the same set" — if
     you see that warning, split the chain at the boundary.
-17. **BGM lives outside the model.** Drop audio files into
+17. **Key-prop consistency is the prop reference image's job.** Recurring
+    objects (红包, 戒指, 钥匙, 玩具熊, 笔记本…) drift exactly like cast
+    and locations do. For any object that appears in 2+ shots OR is a
+    story-critical hero item, scaffold a folder
+    (`projects/<id>/props/<name>/` for project-shared, `<ep>/props/<name>/`
+    for episode-only) with one reference image, then list it in
+    `Shot.props: ["<name>", ...]` on every r2v shot it appears in. The
+    renderer auto-attaches the prop's image to media[] after cast and set.
+    The director SKILL forbids re-describing the prop's 材质 / 颜色 /
+    形状 in the prompt — only the *action* and at most a single state
+    word ("起皱的红包"). State changes (完整 → 起皱 → 撕碎) are
+    SEPARATE folders (`<prop>-<state>` naming convention), never multiple
+    state images in one folder. Skip props on `t2v` / `i2v` shots — they
+    have no media[] slot and the linter warns.
+18. **BGM lives outside the model.** Drop audio files into
     `projects/<id>/bgm/` (project-shared) or
     `projects/<id>/<ep>/bgm/` (episode-only). When such a folder is
     present, `/episode` stops at **GATE 0.5** and asks the user:
@@ -316,6 +336,14 @@ agent-spawned shells unless you have first verified it's on PATH.
 ./bin/videogen set generate    --project <p> [--episode <e>] \
         --name "<set name>" --desc "<材质/布局/灯光/关键道具>" [--mood "<anchor>"]
 
+# Key props / 关键道具 (per episode — same two-tier model as cast / set)
+# State changes = separate folders: 红包-完整, 红包-起皱, 红包-撕碎
+./bin/videogen prop init       --project <p> --episode <e>
+./bin/videogen prop ls         --project <p> --episode <e>
+./bin/videogen prop scaffold   --project <p> [--episode <e>] --name "<prop_name>[-<state>]"
+./bin/videogen prop generate   --project <p> [--episode <e>] \
+        --name "<prop name>" --desc "<材质/颜色/形状/关键细节>" [--mood "<anchor>"]
+
 # BGM / 配乐 (drop audio files into projects/<p>/bgm/ or projects/<p>/<e>/bgm/)
 ./bin/videogen bgm ls          --project <p> --episode <e>                # list tracks
 ./bin/videogen bgm discover    --project <p> --episode <e> [--json]       # producer probe (exit 2 = no bgm)
@@ -404,6 +432,20 @@ resolve to the same set_id" (灯光统一铁律). Movie-set schema +
 discovery: `src/videogen/movie_set.py`. **One folder = one lighting
 state**: split same-location-different-time into separate folders
 (`同福客栈大堂-白天`, `同福客栈大堂-夜晚`).
+
+`Shot.props` (`list[str]`, default `[]`) — names of key props
+(关键道具) featured in the shot. Each name must match a folder under
+`projects/<id>/props/<name>/` or `projects/<id>/<ep>/props/<name>/`
+(case-sensitive). At render time the active provider appends each
+prop's reference image to the r2v shot's `media[]` *after* cast
+portraits and *after* the set image; HappyHorse drops props first
+when its 9-image cap is hit (warns). `Scene.props_present` mirrors
+`characters_present` for recall — the linter warns when a shot
+references a prop the scene didn't declare. **One folder = one
+narrative state** (完整 / 起皱 / 撕碎 → three folders, named
+`<prop>-<state>`). Props on `t2v` / `i2v` shots are a no-op (linter
+warns) — the kind has no `media[reference_image]` slot. Prop schema +
+discovery: `src/videogen/prop.py`.
 
 `Storyboard.bgm` (`BGMConfig`, optional) — background music config.
 Fields: `enabled` (master switch), `mode` (`off` | `global` | `scene`),
