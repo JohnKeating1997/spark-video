@@ -56,6 +56,21 @@ projects/<project>/
 - 角色服装/发型/妆容**不写在 prompt 里**,靠立绘锁定;prompt 只写动作 + 表情,
   首次出场加年龄(如 "28 岁的陆辰")
 
+## 首次安装(用户说"帮我装好 / 装依赖 / 体检")
+
+按这个顺序处理:
+
+1. **跑 `./scripts/doctor.sh`** —— 输出哪些依赖缺失。
+2. **逐项装缺失的依赖**(请求用户确认每条命令再执行):
+   - `bl: command not found` → `npm i -g @alibaba/bailian-cli && bl auth login`
+   - `bl auth NOT logged in` → `bl auth login`
+   - `ffmpeg / ffprobe not found` → macOS `brew install ffmpeg` · Ubuntu/Debian `sudo apt install -y ffmpeg`
+   - `uv not found` → `curl -LsSf https://astral.sh/uv/install.sh | sh`
+   - `python3 too old` → 让用户装 Python 3.10+(常见: `brew install python@3.11` 或 `apt install python3.11`)
+   - `scripts/bl missing or not executable` → `chmod +x scripts/bl scripts/*.sh`
+3. **可选装 山音 craft 引用** —— `./scripts/install-deps.sh`(失败不影响,只是少了 craft 纹理)。问用户要不要装,不要默认装。
+4. **再跑一次 `./scripts/doctor.sh` 确认全绿**,然后告知用户可以开始用了。
+
 ## 子 skill 路由表
 
 | 我要…… | 去读 | 职责 |
