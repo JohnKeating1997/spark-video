@@ -63,7 +63,7 @@ def estimate_narration_audio_seconds(
 
 
 ShotKind = Literal["t2v", "i2v", "r2v"]
-ProviderName = Literal["wan", "happyhorse"]
+ProviderName = Literal["bl", "wan27"]
 
 # Episode-level mode. ``drama`` (default) is the legacy behaviour: every
 # shot is a self-contained video that already carries its own dialog/audio
@@ -87,12 +87,12 @@ DURATION_FLOOR = 2
 # ``storyboard.json`` files. Mapped to (kind, provider) on read so the
 # whole pipeline keeps working without manual migration.
 LEGACY_MODEL_TO_KIND: dict[str, tuple[ShotKind, ProviderName]] = {
-    "wan2.7-r2v":              ("r2v", "wan"),
-    "wan2.7-i2v-2026-04-25":   ("i2v", "wan"),
-    "wan2.7-t2v-2026-04-25":   ("t2v", "wan"),
-    "happyhorse-1.0-r2v":      ("r2v", "happyhorse"),
-    "happyhorse-1.0-i2v":      ("i2v", "happyhorse"),
-    "happyhorse-1.0-t2v":      ("t2v", "happyhorse"),
+    "wan2.7-r2v":              ("r2v", "wan27"),
+    "wan2.7-i2v-2026-04-25":   ("i2v", "wan27"),
+    "wan2.7-t2v-2026-04-25":   ("t2v", "wan27"),
+    "happyhorse-1.0-r2v":      ("r2v", "bl"),
+    "happyhorse-1.0-i2v":      ("i2v", "bl"),
+    "happyhorse-1.0-t2v":      ("t2v", "bl"),
 }
 
 
@@ -430,18 +430,18 @@ class BGMConfig(BaseModel):
 
 
 class Storyboard(BaseModel):
-    project_id: str
+    project_id: str | None = None
     title: str
-    synopsis: str
+    synopsis: str | None = None
     target_duration_s: int = Field(default=180, ge=2, description="user's intended target; informational only")
     resolution: str = "720P"
     ratio: str = "16:9"
     provider: ProviderName | None = Field(
         default=None,
         description=(
-            "Video model family for this episode (wan | happyhorse). When "
-            "absent, the renderer falls back to the VIDEOGEN_VIDEO_PROVIDER "
-            "env var, then the built-in default (happyhorse)."
+            "Video model family for this episode (bl | wan27). When absent, "
+            "the renderer falls back to the SPARK_VIDEO_PROVIDER env var, then "
+            "the built-in default (bl)."
         ),
     )
     mode: EpisodeMode = Field(

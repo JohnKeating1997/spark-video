@@ -14,12 +14,15 @@
 
 set -o pipefail
 
-# Locate the real bl binary (avoid recursing into ourselves)
-self_path="$(readlink -f "$0" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0")"
-self_dir="$(dirname "$self_path")"
+# Locate the real bl binary, skipping our own wrapper if it's earlier in PATH.
+self_path="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0")"
 real_bl=""
-for candidate in $(command -v -a bl 2>/dev/null); do
-  resolved="$(readlink -f "$candidate" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$candidate")"
+# Split PATH and look for each `bl` candidate; pick the first one that isn't us.
+IFS=':' read -r -a _path_arr <<< "$PATH"
+for _dir in "${_path_arr[@]}"; do
+  candidate="$_dir/bl"
+  [ -x "$candidate" ] || continue
+  resolved="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$candidate")"
   if [ "$resolved" != "$self_path" ]; then
     real_bl="$candidate"
     break
@@ -40,9 +43,9 @@ else
 fi
 mkdir -p "$log_dir/raw"
 
-ts_iso="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+ts_iso="$(python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.")+f"{datetime.datetime.now(datetime.timezone.utc).microsecond//1000:03d}Z")')"
 ts_stamp="$(date -u +%Y%m%dT%H%M%S)"
-shot_label="${SPARK_VIDEO_SHOT:-_unattributed}"
+shot_label="${SPARK_VIDEO_SHOT:-noshot}"
 
 raw_stdout="$log_dir/raw/${ts_stamp}-${shot_label}.stdout"
 raw_stderr="$log_dir/raw/${ts_stamp}-${shot_label}.stderr"
