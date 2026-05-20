@@ -106,12 +106,13 @@ def render(
     else:
         raise ValueError(f"unknown kind: {kind}")
 
-    # Common flags
+    # Common flags (skip Nones — argparse defaults pass them through)
     cmd += ["--download", str(out_path)]
-    cmd += ["--resolution", extra.get("resolution", "1080P")]
-    if "ratio" in extra:
+    if extra.get("resolution"):
+        cmd += ["--resolution", str(extra["resolution"])]
+    if extra.get("ratio"):
         cmd += ["--ratio", str(extra["ratio"])]
-    if "seed" in extra and extra["seed"] is not None:
+    if extra.get("seed") is not None:
         cmd += ["--seed", str(extra["seed"])]
     if extra.get("model"):
         cmd += ["--model", str(extra["model"])]

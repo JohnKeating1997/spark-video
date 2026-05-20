@@ -75,12 +75,16 @@ def _next_version(state: dict, shot_id: str, *, reset: bool) -> int:
 
 
 def _extract_last_frame(video_path: Path, frame_path: Path) -> bool:
-    """Extract last frame via ffmpeg. Returns True on success."""
+    """Extract last frame via ffmpeg. Returns True on success.
+
+    Uses -sseof -1 (1s before EOF) + -update 1 because shorter -sseof
+    values like -0.05 fail on some encoders ("Output file is empty").
+    """
     frame_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run(
-            ["ffmpeg", "-y", "-sseof", "-0.05", "-i", str(video_path),
-             "-frames:v", "1", "-q:v", "2", str(frame_path)],
+            ["ffmpeg", "-y", "-sseof", "-1", "-i", str(video_path),
+             "-update", "1", "-frames:v", "1", "-q:v", "2", str(frame_path)],
             capture_output=True, timeout=60, check=True,
         )
         return frame_path.exists()
