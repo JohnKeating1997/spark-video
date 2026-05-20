@@ -505,21 +505,30 @@ def concat(clips: list[Path], out: Path, *, crossfade_s: float = 0.0) -> Path:
     for c in norm_clips:
         inputs += ["-i", str(c)]
     n = len(norm_clips)
+    # Probe actual durations so xfade offset matches each clip, not a guess.
+    durations = [probe_duration(c) for c in norm_clips]
+    if any(d <= crossfade_s for d in durations):
+        raise ValueError(
+            f"crossfade_s={crossfade_s} >= shortest clip duration "
+            f"({min(durations):.2f}s); reduce crossfade or omit short clips"
+        )
     filt_parts = []
     last = "[0:v]"
     last_a = "[0:a]"
-    offset = 0.0
-    # Naive cumulative xfade. Caller should keep clips short to avoid drift.
+    # offset_i = (sum of running output length up to clip i-1) - crossfade_s
+    # Running output length after concatenating k clips with crossfade = sum(d[0..k-1]) - (k-1)*crossfade_s
+    running = durations[0]
     for i in range(1, n):
-        offset += 8.0 - crossfade_s  # assumes ~8s clips; tune in caller
+        offset = running - crossfade_s
         filt_parts.append(
-            f"{last}[{i}:v]xfade=transition=fade:duration={crossfade_s}:offset={offset:.2f}[v{i}]"
+            f"{last}[{i}:v]xfade=transition=fade:duration={crossfade_s}:offset={offset:.3f}[v{i}]"
         )
         filt_parts.append(
             f"{last_a}[{i}:a]acrossfade=d={crossfade_s}[a{i}]"
         )
         last = f"[v{i}]"
         last_a = f"[a{i}]"
+        running += durations[i] - crossfade_s
     filt = ";".join(filt_parts)
     cmd = [
         "ffmpeg", "-y", *inputs, "-filter_complex", filt,
