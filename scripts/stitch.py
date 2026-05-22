@@ -222,6 +222,16 @@ def main() -> int:
             "shots_count": len(sb.shots),
             "size_bytes": out_path.stat().st_size,
         }, ensure_ascii=False))
+
+        # Build viewer.html + auto-open. Best-effort: never fail stitch.
+        try:
+            subprocess.run(
+                ["uv", "run", str(_HERE / "build_viewer.py")],
+                check=False,
+            )
+        except Exception as e:
+            print(f"[viewer] skipped: {e}", file=sys.stderr)
+
         return 0
 
 
