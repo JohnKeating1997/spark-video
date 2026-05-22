@@ -42,6 +42,10 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
 
+def _projects_root() -> Path:
+    return Path(os.environ.get("VIDEOGEN_PROJECTS_DIR", "./projects")).resolve()
+
+
 def _episode_dir() -> Path:
     proj = os.environ.get("SPARK_VIDEO_PROJECT")
     ep = os.environ.get("SPARK_VIDEO_EPISODE")
@@ -50,7 +54,7 @@ def _episode_dir() -> Path:
               file=sys.stderr)
         sys.exit(2)
     ep_id = ep if ep.startswith("episode-") else f"episode-{ep}"
-    return Path("projects") / proj / ep_id
+    return _projects_root() / proj / ep_id
 
 
 def _load_state(state_path: Path) -> dict:

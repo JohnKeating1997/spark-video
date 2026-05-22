@@ -40,6 +40,10 @@ from lib.ffmpeg_helpers import (              # noqa: E402
 from lib.bgm import resolve_track             # noqa: E402
 
 
+def _projects_root() -> Path:
+    return Path(os.environ.get("VIDEOGEN_PROJECTS_DIR", "./projects")).resolve()
+
+
 def _episode_dir() -> Path:
     proj = os.environ.get("SPARK_VIDEO_PROJECT")
     ep = os.environ.get("SPARK_VIDEO_EPISODE")
@@ -48,7 +52,7 @@ def _episode_dir() -> Path:
               file=sys.stderr)
         sys.exit(2)
     ep_id = ep if ep.startswith("episode-") else f"episode-{ep}"
-    return Path("projects") / proj / ep_id
+    return _projects_root() / proj / ep_id
 
 
 def _synth_narration(shot, out_wav: Path, voice: str, rate: float, model: str) -> None:
