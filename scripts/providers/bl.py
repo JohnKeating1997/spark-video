@@ -41,21 +41,60 @@ def _bl_cmd() -> list[str]:
     return [str(_BL_WRAPPER)]
 
 
+# bl stderr substrings that indicate a transient network/socket hiccup the
+# caller can safely retry. Keep narrow — model-side validation errors must
+# NOT retry (they'll fail identically and waste quota).
+_TRANSIENT_PATTERNS = (
+    "EBADF",
+    "Connection reset",
+    "ConnectionError",
+    "ConnectionResetError",
+    "ConnectionAbortedError",
+    "RemoteDisconnected",
+    "Temporary failure in name resolution",
+    "timed out",
+    "Read timed out",
+    "502 Bad Gateway",
+    "503 Service Unavailable",
+    "504 Gateway Time-out",
+)
+
+
+def _is_transient(stderr: str) -> bool:
+    return any(p in stderr for p in _TRANSIENT_PATTERNS)
+
+
 def _run(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess:
-    """Run a subprocess, raise on non-zero, return CompletedProcess."""
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        cwd=str(_REPO_ROOT),
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(
+    """Run bl, retry up to 2 times on transient network errors, raise on others."""
+    max_attempts = 3
+    last_err: RuntimeError | None = None
+    for attempt in range(max_attempts):
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(_REPO_ROOT),
+        )
+        if proc.returncode == 0:
+            return proc
+        err = RuntimeError(
             f"bl exited {proc.returncode}\nCMD: {' '.join(cmd)}\n"
             f"STDERR:\n{proc.stderr[-2000:]}"
         )
-    return proc
+        if attempt + 1 < max_attempts and _is_transient(proc.stderr):
+            backoff = 2 ** attempt  # 1s, 2s
+            print(
+                f"bl transient error (attempt {attempt + 1}/{max_attempts}), "
+                f"retrying in {backoff}s",
+                file=sys.stderr,
+            )
+            time.sleep(backoff)
+            last_err = err
+            continue
+        raise err
+    assert last_err is not None  # unreachable: loop either returns or raises
+    raise last_err
 
 
 def render(
@@ -108,7 +147,9 @@ def render(
 
     # Common flags (skip Nones — argparse defaults pass them through)
     cmd += ["--download", str(out_path)]
-    if extra.get("resolution"):
+    # happyhorse-1.0-t2v rejects `parameters.resolution`. Skip it for t2v —
+    # the model picks a default. Keep --resolution for i2v/r2v which do accept it.
+    if extra.get("resolution") and kind != "t2v":
         cmd += ["--resolution", str(extra["resolution"])]
     if extra.get("ratio"):
         cmd += ["--ratio", str(extra["ratio"])]

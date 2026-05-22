@@ -35,6 +35,7 @@ from lib.ffmpeg_helpers import (              # noqa: E402
     mux_audio as mux_audio_to_video,
     mix_bgm,
     probe_duration,
+    audio_atempo,
 )
 from lib.bgm import resolve_track             # noqa: E402
 
@@ -73,6 +74,35 @@ def _synth_narration(shot, out_wav: Path, voice: str, rate: float, model: str) -
         )
         return
     subprocess.run(cmd, check=True, timeout=120)
+
+
+def _fit_tts_to_video(
+    tts_wav: Path,
+    video_clip: Path,
+    *,
+    max_tempo: float = 1.8,
+    tolerance_s: float = 0.05,
+) -> tuple[Path, float, float, float]:
+    """Compress TTS via ffmpeg atempo so it fits inside the video clip.
+
+    Implements the director SKILL's narration alignment rule:
+        视频 < 旁白 → 用 atempo 加速旁白对齐视频, 避免画面冻结。
+
+    Returns (final_wav_path, applied_tempo, audio_dur_before, video_dur).
+    applied_tempo == 1.0 means audio already fit; the original wav is returned.
+    When the required tempo exceeds max_tempo, applies max_tempo (a small tail
+    freeze may remain — caller can warn).
+    """
+    v_dur = probe_duration(video_clip)
+    a_dur = probe_duration(tts_wav)
+    if v_dur <= 0 or a_dur <= 0:
+        return tts_wav, 1.0, a_dur, v_dur
+    if a_dur <= v_dur + tolerance_s:
+        return tts_wav, 1.0, a_dur, v_dur
+    tempo = min(max_tempo, a_dur / v_dur)
+    dest = tts_wav.with_name(f"{tts_wav.stem}-fit.wav")
+    audio_atempo(tts_wav, dest, tempo)
+    return dest, tempo, a_dur, v_dur
 
 
 def main() -> int:
@@ -125,6 +155,15 @@ def main() -> int:
                 except Exception as e:
                     print(f"ERROR: TTS for {shot.id} failed: {e}", file=sys.stderr)
                     return 1
+                # 1.5 retime TTS so it fits within the video (no frame freeze)
+                tts_wav, tempo, a_dur, v_dur = _fit_tts_to_video(tts_wav, clip)
+                if tempo > 1.0:
+                    residual = max(0.0, (a_dur / tempo) - v_dur)
+                    msg = (f"[fit] {shot.id}: a={a_dur:.2f}s v={v_dur:.2f}s "
+                           f"→ atempo×{tempo:.3f}")
+                    if residual > 0.05:
+                        msg += f" (residual freeze ~{residual:.2f}s — consider bumping shot.duration)"
+                    print(msg, file=sys.stderr)
                 # 2. mux into clip (replace audio, fit duration)
                 muxed = tmp_dir / f"{shot.id}-muxed.mp4"
                 mux_audio_to_video(
@@ -145,9 +184,9 @@ def main() -> int:
             tracks: dict[str, Path] = {}
             if sb.bgm.mode == "global" and sb.bgm.track:
                 path = resolve_track(
-                    sb.bgm.track,
                     project_id=os.environ["SPARK_VIDEO_PROJECT"],
                     episode_id=os.environ["SPARK_VIDEO_EPISODE"],
+                    name=sb.bgm.track,
                 )
                 if path:
                     tracks["__global__"] = path
@@ -157,9 +196,8 @@ def main() -> int:
                 bgm_out = tmp_dir / "with-bgm.mp4"
                 mix_bgm(
                     video=concat_out,
-                    bgm_path=next(iter(tracks.values())),
+                    bgm=next(iter(tracks.values())),
                     out=bgm_out,
-                    volume=sb.bgm.volume,
                     fade_in_s=sb.bgm.fade_in_s,
                     fade_out_s=sb.bgm.fade_out_s,
                 )
