@@ -70,6 +70,26 @@ def extract_first_frame(video: Path, out: Path) -> Path:
     return out
 
 
+def probe_video_dimensions(media: Path) -> tuple[int, int] | None:
+    """Return (width, height) of the first video stream, or None if unprobeable."""
+    _ensure_ffmpeg()
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=p=0:s=x", str(media),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    txt = r.stdout.strip()
+    if "x" not in txt:
+        return None
+    try:
+        w_s, h_s = txt.split("x", 1)
+        return int(w_s), int(h_s)
+    except ValueError:
+        return None
+
+
 def probe_duration(media: Path) -> float:
     """Return media duration in seconds via ffprobe. 0.0 if unknown."""
     _ensure_ffmpeg()
@@ -124,23 +144,45 @@ def _has_audio_stream(video: Path) -> bool:
     return r.stdout.strip() != ""
 
 
-def _normalize_audio(video: Path, out: Path, *, ar: int = 24000, ac: int = 2) -> Path:
-    """Ensure every clip has a video + AAC audio stream before concat.
+def _scale_pad_filter(target_w: int, target_h: int) -> str:
+    """Scale-and-pad filter that fits any source into target_w×target_h.
+
+    Letterboxes (preserves aspect ratio; pads with black). Also resets SAR
+    to 1 so concat / xfade don't fail on mismatched pixel aspect ratios.
+    """
+    return (
+        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,"
+        f"setsar=1"
+    )
+
+
+def _normalize_audio(
+    video: Path,
+    out: Path,
+    *,
+    ar: int = 24000,
+    ac: int = 2,
+    target_w: int | None = None,
+    target_h: int | None = None,
+) -> Path:
+    """Ensure every clip has homogeneous video + AAC audio streams before concat.
 
     ffmpeg's concat demuxer with ``-c copy`` requires homogeneous stream
-    layouts across all clips.  This function re-encodes every clip so it
-    has exactly:
+    layouts across all clips, and xfade requires identical video dimensions.
+    This function re-encodes every clip so it has:
 
-    - video: libx264 / yuv420p
+    - video: libx264 / yuv420p, optionally scale+padded to ``target_w × target_h``
     - audio: AAC 192k, ``ar`` Hz, ``ac`` channels
 
-    Clips without an audio stream get a silent AAC track added
-    (``-f lavfi -i anullsrc``) padded to match the video duration.
-    Clips with mono audio are upmixed to ``ac`` channels.
+    When ``target_w`` and ``target_h`` are provided, the video is letterboxed
+    to that exact canvas — required when mixing resolutions (e.g. t2v shots
+    at 1080P with r2v shots whose dims match the 720P cast portraits).
+    Without it, the concat demuxer silently drops streams with mismatched
+    layouts.
 
-    Defaults (ar=24000, ac=2) match DashScope video model output params.
-
-    Returns the normalized clip path.
+    Clips without an audio stream get a silent AAC track. Mono → stereo when
+    ``ac=2``. Defaults match DashScope video model output params.
     """
     _ensure_ffmpeg()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -150,13 +192,14 @@ def _normalize_audio(video: Path, out: Path, *, ar: int = 24000, ac: int = 2) ->
         shutil.copy2(video, out)
         return out
 
+    video_args: list[str] = ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    if target_w and target_h:
+        video_args = ["-vf", _scale_pad_filter(target_w, target_h)] + video_args
+
     if _has_audio_stream(video):
-        # Re-encode to ensure consistent codec params (AAC 192k, same
-        # sample rate and channel layout).  ffmpeg automatically upmixes
-        # mono→stereo when -ac 2 is specified.
         cmd = [
             "ffmpeg", "-y", "-i", str(video),
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            *video_args,
             "-c:a", "aac", "-b:a", "192k",
             "-ar", str(ar), "-ac", str(ac),
             "-movflags", "+faststart",
@@ -169,14 +212,11 @@ def _normalize_audio(video: Path, out: Path, *, ar: int = 24000, ac: int = 2) ->
                 f"  stderr tail: {r.stderr[-800:]}"
             )
     else:
-        # No audio stream — add a silent AAC track padded to video length.
-        # Use same sample rate and channel layout as the target to avoid
-        # pops/clicks at boundaries with real audio clips.
         cmd = [
             "ffmpeg", "-y",
             "-i", str(video),
             "-f", "lavfi", "-i", f"anullsrc=r={ar}:cl={('stereo' if ac == 2 else 'mono')}",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            *video_args,
             "-c:a", "aac", "-b:a", "192k",
             "-ar", str(ar), "-ac", str(ac),
             "-shortest",
@@ -190,6 +230,29 @@ def _normalize_audio(video: Path, out: Path, *, ar: int = 24000, ac: int = 2) ->
                 f"  stderr tail: {r.stderr[-800:]}"
             )
     return out
+
+
+def _pick_canvas(clips: list[Path]) -> tuple[int, int] | None:
+    """Pick a common canvas (w, h) that fits every clip with no downscale.
+
+    Strategy: componentwise max of probed widths and heights. Any clip
+    that's already this size passes through unchanged; smaller clips get
+    letterboxed. Returns None if no clip has a probeable video stream
+    (caller skips the scale+pad step in that case).
+
+    Even dimensions are required by libx264 (yuv420p chroma subsampling);
+    we round up if needed.
+    """
+    dims = [d for d in (probe_video_dimensions(c) for c in clips) if d]
+    if not dims:
+        return None
+    w = max(d[0] for d in dims)
+    h = max(d[1] for d in dims)
+    if w % 2:
+        w += 1
+    if h % 2:
+        h += 1
+    return w, h
 
 
 def strip_audio(video: Path, out: Path) -> Path:
@@ -463,6 +526,12 @@ def concat(clips: list[Path], out: Path, *, crossfade_s: float = 0.0) -> Path:
     if not clips:
         raise ValueError("no clips to concat")
 
+    # Pick a common canvas so mixed-resolution clips (e.g. 1080P t2v +
+    # 720P r2v) don't get silently dropped by the concat demuxer or
+    # rejected by xfade. None = all clips identical or unprobeable; skip.
+    canvas = _pick_canvas(clips)
+    tw, th = canvas if canvas else (None, None)
+
     if crossfade_s <= 0:
         # Normalize audio streams so concat demuxer doesn't break on
         # clips with different stream layouts (audio-less vs AAC-muxed).
@@ -471,7 +540,7 @@ def concat(clips: list[Path], out: Path, *, crossfade_s: float = 0.0) -> Path:
         norm_clips: list[Path] = []
         for c in clips:
             norm_path = norm_dir / c.name
-            _normalize_audio(c, norm_path)
+            _normalize_audio(c, norm_path, target_w=tw, target_h=th)
             norm_clips.append(norm_path)
 
         listfile = out.with_suffix(".txt")
@@ -492,13 +561,13 @@ def concat(clips: list[Path], out: Path, *, crossfade_s: float = 0.0) -> Path:
             )
         return out
 
-    # crossfade path — re-encodes; normalize audio first for same reason.
+    # crossfade path — re-encodes; normalize audio + canvas for same reason.
     norm_dir = out.parent / "_normalize_tmp"
     norm_dir.mkdir(parents=True, exist_ok=True)
     norm_clips: list[Path] = []
     for c in clips:
         norm_path = norm_dir / c.name
-        _normalize_audio(c, norm_path)
+        _normalize_audio(c, norm_path, target_w=tw, target_h=th)
         norm_clips.append(norm_path)
 
     inputs: list[str] = []

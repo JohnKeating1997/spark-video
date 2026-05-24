@@ -34,9 +34,11 @@ if [ -z "$real_bl" ]; then
   exit 127
 fi
 
-# Determine log directory
+# Determine log directory. Project root honors VIDEOGEN_PROJECTS_DIR
+# (matches lib/config.py); defaults to ./projects relative to cwd.
+projects_root="${VIDEOGEN_PROJECTS_DIR:-./projects}"
 if [ -n "$SPARK_VIDEO_PROJECT" ] && [ -n "$SPARK_VIDEO_EPISODE" ]; then
-  ep_dir="projects/${SPARK_VIDEO_PROJECT}/episode-$(printf %s "$SPARK_VIDEO_EPISODE" | sed 's/^episode-//')"
+  ep_dir="${projects_root}/${SPARK_VIDEO_PROJECT}/episode-$(printf %s "$SPARK_VIDEO_EPISODE" | sed 's/^episode-//')"
   log_dir="${SPARK_VIDEO_LOG_DIR:-${ep_dir}/logs}"
 else
   log_dir="${SPARK_VIDEO_LOG_DIR:-logs}"

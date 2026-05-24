@@ -36,8 +36,14 @@ export SPARK_VIDEO_PROVIDER=bl              # 默认,覆盖 90% 用例
 ```
 
 ### 4. 项目目录结构
+
+工程文件**写在用户当前工作目录**(`<cwd>/projects/<project>/`),不要写到 skill 仓库内。
+- 默认根目录: `<cwd>/projects/`
+- 覆盖: `export VIDEOGEN_PROJECTS_DIR=/abs/path/to/projects`(绝对路径)
+- 调用 `uv run <skill-path>/scripts/*.py` 或 `<skill-path>/scripts/bl` 时,**先 `cd` 到你的工作目录**;脚本自身定位用的是 `__file__`,跟 cwd 无关。
+
 ```
-projects/<project>/
+<cwd>/projects/<project>/
 ├── lore.md                              ← 世界设定(项目共享)
 ├── cast/<name>/{cast.md,*.png,*.mp3}    ← 主演
 ├── movie-set/<name>/{set.md,*.png}      ← 布景

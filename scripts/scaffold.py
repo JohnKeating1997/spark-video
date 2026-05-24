@@ -35,12 +35,16 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
 
+def _projects_root() -> Path:
+    return Path(os.environ.get("VIDEOGEN_PROJECTS_DIR", "./projects")).resolve()
+
+
 def _project_dir() -> Path:
     proj = os.environ.get("SPARK_VIDEO_PROJECT")
     if not proj:
         print("ERROR: SPARK_VIDEO_PROJECT must be set", file=sys.stderr)
         sys.exit(2)
-    return Path("projects") / proj
+    return _projects_root() / proj
 
 
 def _episode_dir(required: bool = True) -> Path:

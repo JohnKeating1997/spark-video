@@ -26,17 +26,24 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import importlib
 import json
 import os
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
+
+
+def _projects_root() -> Path:
+    return Path(os.environ.get("VIDEOGEN_PROJECTS_DIR", "./projects")).resolve()
 
 
 def _episode_dir() -> Path:
@@ -47,7 +54,7 @@ def _episode_dir() -> Path:
               file=sys.stderr)
         sys.exit(2)
     ep_id = ep if ep.startswith("episode-") else f"episode-{ep}"
-    return Path("projects") / proj / ep_id
+    return _projects_root() / proj / ep_id
 
 
 def _load_state(state_path: Path) -> dict:
@@ -58,9 +65,33 @@ def _load_state(state_path: Path) -> dict:
 
 def _save_state(state_path: Path, state: dict) -> None:
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = state_path.with_suffix(".tmp")
+    # Per-PID/uuid tmp name so concurrent writers don't collide on the same
+    # .tmp path. The final atomic rename is still the single commit point.
+    tmp = state_path.with_suffix(f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2))
     tmp.replace(state_path)
+
+
+def _update_state(state_path: Path, mutate: Callable[[dict], None]) -> dict:
+    """flock-guarded read-modify-write of state_path.
+
+    Why: render_shot.py runs in parallel across shots, all touching the same
+    shots_state.json. Without locking, two processes both load → mutate → save
+    and the later writer silently overwrites the earlier writer's appended
+    attempt. We hold an exclusive flock on a sibling .lock file across the
+    full read→mutate→save so the merge is atomic.
+    """
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = state_path.with_suffix(state_path.suffix + ".lock")
+    with open(lock_path, "a+") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        try:
+            state = _load_state(state_path)
+            mutate(state)
+            _save_state(state_path, state)
+            return state
+        finally:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
 
 
 def _next_version(state: dict, shot_id: str, *, reset: bool) -> int:
@@ -138,8 +169,7 @@ def main() -> int:
 
     # --accept-version: promote and exit
     if args.accept_version is not None:
-        entry = state.get(args.shot)
-        if not entry:
+        if args.shot not in state:
             print(f"ERROR: shot {args.shot} has no attempts to accept",
                   file=sys.stderr)
             return 2
@@ -151,10 +181,16 @@ def main() -> int:
             return 2
         import shutil as _sh
         _sh.copy2(src, dst)
-        entry["winner_version"] = ver
-        entry["winner_path"] = str(dst)
-        entry["needs_director_rewrite"] = False
-        _save_state(state_path, state)
+
+        def _promote(s: dict) -> None:
+            entry = s.get(args.shot)
+            if not entry:
+                raise RuntimeError(f"shot {args.shot} disappeared from state")
+            entry["winner_version"] = ver
+            entry["winner_path"] = str(dst)
+            entry["needs_director_rewrite"] = False
+
+        _update_state(state_path, _promote)
         print(json.dumps({"shot_id": args.shot, "winner_version": ver,
                           "winner_path": str(dst)}))
         return 0
@@ -209,7 +245,7 @@ def main() -> int:
             extra=extra,
         )
     except Exception as e:
-        # Record the failed attempt
+        # Record the failed attempt (locked merge — see _update_state docstring)
         attempt = {
             "version": version,
             "status": "FAILED",
@@ -218,12 +254,15 @@ def main() -> int:
             "provider": provider_name,
             "prompt": args.prompt,
         }
-        entry = state.setdefault(args.shot, {
-            "shot_id": args.shot, "attempts": [], "winner_version": None,
-            "winner_path": None, "needs_director_rewrite": False,
-        })
-        entry["attempts"].append(attempt)
-        _save_state(state_path, state)
+
+        def _append_failed(s: dict) -> None:
+            entry = s.setdefault(args.shot, {
+                "shot_id": args.shot, "attempts": [], "winner_version": None,
+                "winner_path": None, "needs_director_rewrite": False,
+            })
+            entry["attempts"].append(attempt)
+
+        _update_state(state_path, _append_failed)
         print(f"ERROR: {e}", file=sys.stderr)
         if isinstance(e, TimeoutError):
             return 3
@@ -233,7 +272,7 @@ def main() -> int:
     extracted = _extract_last_frame(clip_path, frame_path)
     last_frame = str(frame_path) if extracted else None
 
-    # Record attempt
+    # Record attempt (locked merge — see _update_state docstring)
     attempt = {
         "version": version,
         "status": "SUCCEEDED",
@@ -246,12 +285,15 @@ def main() -> int:
         "elapsed_s": result.get("elapsed_s"),
         "prompt": args.prompt,
     }
-    entry = state.setdefault(args.shot, {
-        "shot_id": args.shot, "attempts": [], "winner_version": None,
-        "winner_path": None, "needs_director_rewrite": False,
-    })
-    entry["attempts"].append(attempt)
-    _save_state(state_path, state)
+
+    def _append_succeeded(s: dict) -> None:
+        entry = s.setdefault(args.shot, {
+            "shot_id": args.shot, "attempts": [], "winner_version": None,
+            "winner_path": None, "needs_director_rewrite": False,
+        })
+        entry["attempts"].append(attempt)
+
+    _update_state(state_path, _append_succeeded)
 
     out = {
         "shot_id": args.shot,
