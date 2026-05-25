@@ -13,6 +13,12 @@ Usage:
         --prompt "..." --duration 12 --media a.png b.png \\
         [--voice cast.mp3] [--provider bl|wan27] [--force] [--reset-attempts]
 
+Re-render flags:
+    --force           render again even if a winner exists; keeps prior attempts
+    --reset-attempts  wipe attempts and winner, start at version 1 (implies --force)
+    (If the winner_path is missing on disk, the stale winner is auto-cleared
+     and the next attempt proceeds — no flag needed.)
+
 Stdout (JSON):
     {"shot_id":"S01-001","version":1,"video_path":"...","last_frame_path":"...",
      "duration_s":12.0,"provider":"bl","model":"happyhorse-1.0-r2v","elapsed_s":47.2}
@@ -160,7 +166,8 @@ def main() -> int:
     ap.add_argument("--force", action="store_true",
                     help="render even if a winner already exists")
     ap.add_argument("--reset-attempts", action="store_true",
-                    help="wipe existing attempts before rendering")
+                    help="wipe existing attempts (and winner) before "
+                         "rendering — implies --force")
     args = ap.parse_args()
 
     ep_dir = _episode_dir()
@@ -198,8 +205,11 @@ def main() -> int:
     # Skip if winner exists, its file is still on disk, and not forced.
     # If the recorded winner_path is gone (user deleted the clip to retry),
     # fall through and re-render rather than misleading them with "skipped".
+    # ``--reset-attempts`` implies the user wants to start over, so it also
+    # bypasses the skip-check (otherwise the flag was a no-op without
+    # ``--force`` — confusing).
     if (args.shot in state and state[args.shot].get("winner_version")
-            and not args.force):
+            and not args.force and not args.reset_attempts):
         existing = state[args.shot]
         winner_path = existing.get("winner_path")
         if winner_path and Path(winner_path).exists():

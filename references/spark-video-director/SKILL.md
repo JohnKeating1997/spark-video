@@ -169,6 +169,14 @@ Rules that matter for narration shots:
     对齐视频。比如 4s 视频 + 4.6s 旁白 → rate × 1.15。
   - **视频 ≪ 旁白** (差距 > 20% 或 >1s): 说明 `duration` 估错了——
     把该 beat 的 `duration` 上调到 ≈ TTS 时长, 否则会裁掉旁白尾部。
+  - **旁白时长超过 provider 单镜上限** (e.g. happyhorse-1.0-r2v 硬封顶
+    10s, 旁白却有 17s): bump `duration` 不会突破 provider cap。
+    解决方案是**渲染续接片段** —— 把同一 shot 的第二段镜头落到
+    `clips/<shot_id>b.mp4` (例: `clips/S01-002b.mp4`)。stitch.py 会自动
+    用 1s xfade 把 a + b 拼成单段, 再做旁白对齐, 中间不会出现音画错位。
+    续接片段使用与主镜头相同的角色 / 场景参考图, prompt 描述这个 shot
+    的"下半段"动作 (例如主镜头是"走入办公室", 续接是"已走到落地窗前");
+    a + b 总时长应略大于旁白时长, 留 0.3-1s 缓冲。
   - 核心原则: **单镜静帧 hold 不超过 1s**;需要更长停顿时用下一句旁白
     前的无声尾画面, 而不是无限 freeze。
 - **Do NOT set `narration_text` on `role: "drama"` shots.** The schema rejects it.
