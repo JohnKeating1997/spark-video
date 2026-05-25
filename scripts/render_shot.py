@@ -195,17 +195,34 @@ def main() -> int:
                           "winner_path": str(dst)}))
         return 0
 
-    # Skip if winner exists and not forced
+    # Skip if winner exists, its file is still on disk, and not forced.
+    # If the recorded winner_path is gone (user deleted the clip to retry),
+    # fall through and re-render rather than misleading them with "skipped".
     if (args.shot in state and state[args.shot].get("winner_version")
             and not args.force):
         existing = state[args.shot]
-        print(json.dumps({
-            "shot_id": args.shot,
-            "version": existing["winner_version"],
-            "video_path": existing.get("winner_path"),
-            "skipped": "already has winner; pass --force to re-render",
-        }))
-        return 0
+        winner_path = existing.get("winner_path")
+        if winner_path and Path(winner_path).exists():
+            print(json.dumps({
+                "shot_id": args.shot,
+                "version": existing["winner_version"],
+                "video_path": winner_path,
+                "skipped": "already has winner; pass --force to re-render",
+            }))
+            return 0
+        # Stale winner — clear it so this run isn't blocked.
+        print(f"warn: shot {args.shot} winner_path missing on disk "
+              f"({winner_path}); clearing winner and re-rendering",
+              file=sys.stderr)
+
+        def _clear_stale_winner(s: dict) -> None:
+            entry = s.get(args.shot)
+            if entry:
+                entry["winner_version"] = None
+                entry["winner_path"] = None
+
+        _update_state(state_path, _clear_stale_winner)
+        state = _load_state(state_path)
 
     version = _next_version(state, args.shot, reset=args.reset_attempts)
     os.environ["SPARK_VIDEO_SHOT"] = args.shot
@@ -230,8 +247,19 @@ def main() -> int:
     if args.first_frame:
         extra["first_frame_url"] = args.first_frame
 
-    media = [Path(m) for m in args.media]
-    voice = Path(args.voice) if args.voice else None
+    # Resolve to absolute paths up front. Providers upload local files by
+    # path, and a relative path resolved against a surprising cwd (e.g. when
+    # the caller cd'd between collecting paths and invoking us) fails with
+    # an opaque "Failed to download …" from the model API.
+    media = [Path(m).expanduser().resolve() for m in args.media]
+    voice = Path(args.voice).expanduser().resolve() if args.voice else None
+    for m in media:
+        if not m.exists():
+            print(f"ERROR: --media file not found: {m}", file=sys.stderr)
+            return 2
+    if voice and not voice.exists():
+        print(f"ERROR: --voice file not found: {voice}", file=sys.stderr)
+        return 2
 
     started = datetime.now(timezone.utc).isoformat()
     try:

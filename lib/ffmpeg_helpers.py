@@ -515,6 +515,58 @@ def mix_bgm(
     return out
 
 
+def xfade_continuation(
+    a: Path,
+    b: Path,
+    out: Path,
+    *,
+    xfade_s: float = 1.0,
+    fps: int = 24,
+) -> Path:
+    """Join a shot's part-a and part-b into a single continuation clip via xfade.
+
+    Models with hard duration caps (e.g. happyhorse-1.0-r2v at 10s) force long
+    narration shots to be rendered as two takes (``<id>.mp4`` + ``<id>b.mp4``)
+    that share the same reference images. This helper splices them with a
+    crossfade so downstream narration muxing sees a single source.
+
+    Audio is dropped (``-an``): the producer re-mounts narration in a later
+    pass anyway, and keeping the model-generated ambient noise across the
+    splice would just add an audible jump.
+
+    Returns the path to ``out`` containing the joined video.
+    """
+    _ensure_ffmpeg()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    a_dur = probe_duration(a)
+    b_dur = probe_duration(b)
+    if a_dur <= xfade_s or b_dur <= xfade_s:
+        raise ValueError(
+            f"xfade_continuation: xfade_s={xfade_s} >= part duration "
+            f"(a={a_dur:.2f}s, b={b_dur:.2f}s)"
+        )
+    offset = a_dur - xfade_s
+    cmd = [
+        "ffmpeg", "-y", "-i", str(a), "-i", str(b),
+        "-filter_complex",
+        f"[0:v]settb=AVTB,fps={fps}[v0];"
+        f"[1:v]settb=AVTB,fps={fps}[v1];"
+        f"[v0][v1]xfade=transition=fade:duration={xfade_s:.3f}:offset={offset:.3f}[v]",
+        "-map", "[v]", "-an",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-preset", "medium", "-crf", "20",
+        "-movflags", "+faststart",
+        str(out),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg xfade_continuation failed (rc={r.returncode}):\n"
+            f"  stderr tail: {r.stderr[-800:]}"
+        )
+    return out
+
+
 def concat(clips: list[Path], out: Path, *, crossfade_s: float = 0.0) -> Path:
     """Concatenate clips. If crossfade_s > 0, applies xfade between each pair.
 

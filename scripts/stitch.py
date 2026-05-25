@@ -8,6 +8,9 @@ stitch.py — assemble the final mp4 from per-shot winning clips.
 Pipeline:
     1. Read storyboard.json + shots_state.json
     2. For each shot in order, locate winner clip (clips/<id>.mp4)
+    2b. If a continuation take (clips/<id>b.mp4 or clips/<id>b-ver*.mp4) is
+        present, xfade-join it onto the main clip first — used when narration
+        exceeds the provider's hard per-clip duration cap
     3. For narration shots: synthesize TTS via ./scripts/bl speech synthesize,
        strip the clip's audio, mux the TTS in (lib.ffmpeg_helpers.mux_audio)
     4. Concat all clips (with optional --crossfade)
@@ -36,8 +39,31 @@ from lib.ffmpeg_helpers import (              # noqa: E402
     mix_bgm,
     probe_duration,
     audio_atempo,
+    xfade_continuation,
 )
 from lib.bgm import resolve_track             # noqa: E402
+
+
+_CONTINUATION_XFADE_S = 1.0
+
+
+def _find_continuation_clip(clips_dir: Path, shot_id: str) -> Path | None:
+    """Return the producer-rendered continuation clip for ``shot_id`` if any.
+
+    Convention: a "b" suffix sibling of the winner clip indicates a second
+    take that should be xfade-joined with the main clip before narration
+    muxing — used when narration is longer than a single take can cover under
+    the model's hard duration cap (e.g. happyhorse-1.0-r2v at 10s).
+
+    Looks for ``<id>b.mp4`` first (promoted via ``--accept-version``); falls
+    back to the highest-versioned ``<id>b-ver*.mp4`` so producers can simply
+    leave the rendered file in place without promoting it.
+    """
+    promoted = clips_dir / f"{shot_id}b.mp4"
+    if promoted.exists():
+        return promoted
+    versioned = sorted(clips_dir.glob(f"{shot_id}b-ver*.mp4"))
+    return versioned[-1] if versioned else None
 
 
 def _projects_root() -> Path:
@@ -149,6 +175,22 @@ def main() -> int:
                 print(f"ERROR: {clip} missing", file=sys.stderr)
                 return 1
 
+            # If the producer rendered a continuation take (long narration
+            # spanning beyond the model's per-clip cap), xfade-join it onto
+            # the main clip so downstream muxing sees a single source.
+            cont = _find_continuation_clip(ep_dir / "clips", shot.id)
+            if cont:
+                joined = tmp_dir / f"{shot.id}-combined.mp4"
+                xfade_continuation(clip, cont, joined,
+                                   xfade_s=_CONTINUATION_XFADE_S)
+                a_dur = probe_duration(clip)
+                joined_dur = probe_duration(joined)
+                print(f"[continuation] {shot.id}: a={a_dur:.2f}s + "
+                      f"{cont.name} → combined={joined_dur:.2f}s "
+                      f"(xfade={_CONTINUATION_XFADE_S:.1f}s)",
+                      file=sys.stderr)
+                clip = joined
+
             if (sb.mode == "narration" and shot.role == "narration"
                     and shot.narration_text):
                 # 1. synthesize TTS
@@ -166,7 +208,19 @@ def main() -> int:
                     msg = (f"[fit] {shot.id}: a={a_dur:.2f}s v={v_dur:.2f}s "
                            f"→ atempo×{tempo:.3f}")
                     if residual > 0.05:
-                        msg += f" (residual freeze ~{residual:.2f}s — consider bumping shot.duration)"
+                        # Significant freeze tail remains even at max atempo.
+                        # For providers with a hard duration cap (happyhorse
+                        # r2v = 10s), bumping shot.duration won't help; render
+                        # a continuation take (<id>b.mp4) instead — stitch
+                        # will xfade-join it automatically.
+                        fix = ("render a continuation clip "
+                               f"clips/{shot.id}b.mp4 (stitch will xfade-join)"
+                               if not cont
+                               else "even with the continuation take this "
+                                    "shot is still under-budget — split into "
+                                    "two storyboard shots")
+                        msg += (f" (residual freeze ~{residual:.2f}s — "
+                                f"{fix})")
                     print(msg, file=sys.stderr)
                 # 2. mux into clip (replace audio, fit duration)
                 muxed = tmp_dir / f"{shot.id}-muxed.mp4"
