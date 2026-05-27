@@ -3,36 +3,48 @@
 > [English version →](README.md)
 
 AI 视频制作 skill — premise → 剧本 → 分镜 → 渲染 → 审片 → 成片 mp4,
-角色/布景/道具一致。跨 agent 平台(Claude Code / Qwen Code / …)。
+角色/布景/道具一致。跨 agent 平台(Claude Code / Cursor / Qwen Code /
+Codex / …)。
 
-## 安装(两步)
+## 安装 — 一句话交给 agent
 
-### Step 1 — clone 到 skills 目录
+整个安装就是**一段 prompt**。打开任意支持 skills 的 agent
+(Claude Code / Cursor / Qwen Code / Gemini CLI / …),把下面这段粘进去:
+
+> 帮我装 spark-video skill:
+> 1. 识别我当前所在 agent 在这个操作系统下的 skills 目录
+>    (比如 `~/.claude/skills/`、`~/.qwen/skills/`、
+>    `~/.cursor/skills/` …),把
+>    `https://github.com/JohnKeating1997/spark-video.git` clone 到那里,
+>    目录名叫 `spark-video`。
+> 2. 提醒我新开一个会话,让 skill 被加载。
+> 3. 新会话里读 `spark-video/SKILL.md`,跑 `./scripts/doctor.sh`,
+>    用我系统的包管理器装上缺的依赖(`bl` / `ffmpeg` / `uv`),
+>    每条命令都先问我确认。
+> 4. 问我要不要顺手 `./scripts/install-deps.sh` 拉 山音 craft 引用
+>    (失败不影响主流程)。
+> 5. 再跑一次 doctor,全绿后告诉我可以开工了。
+
+完事。不需要记路径,也不需要复制 platform-specific 的命令 —— agent 读
+`SKILL.md`(里面有完整的安装 runbook)自己驱动后面的步骤。
+
+<details>
+<summary>手动 fallback(如果你的 agent 不识别 skills)</summary>
 
 ```bash
-# Claude Code(用户级,所有项目可用)
-git clone https://github.com/<you>/spark-video ~/.claude/skills/spark-video
-
-# Qwen Code(以平台文档为准)
-git clone https://github.com/<you>/spark-video ~/.qwen/skills/spark-video
+# 挑你所在平台对应的目录:
+git clone https://github.com/JohnKeating1997/spark-video.git \
+  ~/.claude/skills/spark-video
+# 或  ~/.qwen/skills/spark-video
+# 或  ~/.cursor/skills/spark-video
+# …
 ```
 
-**重启你的 agent 一次**(或新开会话),让 skill 被加载。
+然后新开 agent 会话发一句:
+**"帮我把 spark-video 装好"**
+agent 会按 `SKILL.md` 里的安装 runbook 继续。
 
-### Step 2 — 让 agent 帮你装依赖
-
-新会话里发一句:
-
-> 帮我把 spark-video 装好
-
-agent 会自动:
-- 检测缺失的依赖(`bl` / `ffmpeg` / `uv`)
-- 用对应包管理器装好(请求你确认)
-- 拉可选的 山音 craft 引用(失败也不影响主流程)
-- 跑体检确认就绪
-
-**你不需要预装任何东西,agent 都会自己搞定**(但你要在 macOS 上有 `brew`,
-或在 Ubuntu/Debian 上有 `apt`,或在 Windows 上用 WSL)。
+</details>
 
 ## 用起来
 
@@ -60,12 +72,21 @@ projects/<project>/<episode>/
 
 ## 排障
 
+大多数情况直接交给 agent 处理 —— 说"帮我修 XX"就行。
+
 - 安装后 agent 不认识 `spark-video` → 重启 agent / 新开会话
-- `bl: command not found` → agent 没装成,手动: `npm i -g @alibaba/bailian-cli && bl auth login`
+- `bl: command not found` → `npm i -g @alibaba/bailian-cli && bl auth login`
 - `Permission denied: scripts/bl` → `chmod +x scripts/*.sh scripts/bl`
 - 渲染卡住 → `tail -f projects/<p>/<e>/logs/model_calls.jsonl | jq .`
 
 ## 更新 / 卸载
+
+直接交给 agent:
+
+> 帮我更新一下 spark-video。
+> 帮我卸载 spark-video。
+
+或者手动:
 
 ```bash
 # 更新

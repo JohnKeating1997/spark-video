@@ -4,36 +4,49 @@
 
 AI video production skill — premise → screenplay → storyboard → render
 → review → final mp4, with consistent characters / sets / props.
-Cross-platform (Claude Code, Qwen Code, …).
+Cross-platform (Claude Code, Cursor, Qwen Code, Codex, …).
 
-## Install (2 steps)
+## Install — just ask your agent
 
-### Step 1 — clone into your agent's skills directory
+The whole install is **one prompt**. Open any agent that supports skills
+(Claude Code, Cursor, Qwen Code, Gemini CLI, …) and paste:
+
+> Install the spark-video skill for me:
+> 1. Detect this OS's correct skills directory for the agent I'm running
+>    in (e.g. `~/.claude/skills/`, `~/.qwen/skills/`,
+>    `~/.cursor/skills/`, …) and `git clone
+>    https://github.com/JohnKeating1997/spark-video.git` into it as
+>    `spark-video`.
+> 2. Tell me to open a new session so the skill gets loaded.
+> 3. In the new session, read `spark-video/SKILL.md`, run
+>    `./scripts/doctor.sh`, and install any missing deps (`bl`,
+>    `ffmpeg`, `uv`) with my OS's package manager — ask before each
+>    install command.
+> 4. Ask whether to also clone the Shanyin craft references via
+>    `./scripts/install-deps.sh` (failure is safe).
+> 5. Re-run doctor and confirm everything is green.
+
+That's it. No paths to memorize, no platform-specific commands to copy
+— the agent reads `SKILL.md` (which contains the full install runbook)
+and drives the rest.
+
+<details>
+<summary>Manual fallback (if your agent isn't skill-aware)</summary>
 
 ```bash
-# Claude Code (user-global, available in every project)
-git clone https://github.com/<you>/spark-video ~/.claude/skills/spark-video
-
-# Qwen Code (path may differ — check your platform docs)
-git clone https://github.com/<you>/spark-video ~/.qwen/skills/spark-video
+# Pick the path your platform expects:
+git clone https://github.com/JohnKeating1997/spark-video.git \
+  ~/.claude/skills/spark-video
+# or  ~/.qwen/skills/spark-video
+# or  ~/.cursor/skills/spark-video
+# …
 ```
 
-**Restart your agent** (or open a new session) so the skill gets loaded.
+Then open a new agent session and say:
+**"Set up spark-video for me."**
+The agent will follow the install runbook in `SKILL.md`.
 
-### Step 2 — let the agent install dependencies for you
-
-In a new session, just say:
-
-> Set up spark-video for me
-
-The agent will:
-- Detect missing dependencies (`bl`, `ffmpeg`, `uv`)
-- Install them via your package manager (asking before each command)
-- Optionally clone the upstream Shanyin craft references (failure is safe)
-- Run a health check to confirm everything is ready
-
-**You don't need to pre-install anything** (assuming you have `brew` on
-macOS, `apt` on Ubuntu/Debian, or are using WSL on Windows).
+</details>
 
 ## Use it
 
@@ -63,12 +76,23 @@ projects/<project>/<episode>/
 
 ## Troubleshooting
 
-- After install the agent doesn't recognize `spark-video` → restart the agent / open a new session
-- `bl: command not found` → manual install: `npm i -g @alibaba/bailian-cli && bl auth login`
+Most of these you can just hand to the agent — say "fix X for me" and
+it'll run the right command.
+
+- After install the agent doesn't recognize `spark-video` → restart the
+  agent / open a new session
+- `bl: command not found` → `npm i -g @alibaba/bailian-cli && bl auth login`
 - `Permission denied: scripts/bl` → `chmod +x scripts/*.sh scripts/bl`
 - Render seems stuck → `tail -f projects/<p>/<e>/logs/model_calls.jsonl | jq .`
 
 ## Update / Uninstall
+
+Just ask your agent:
+
+> Update spark-video.
+> Uninstall spark-video.
+
+Or do it manually:
 
 ```bash
 # Update
