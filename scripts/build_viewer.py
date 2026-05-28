@@ -163,12 +163,17 @@ def _collect_scenes(ep_dir: Path) -> list[dict]:
     return out
 
 
-def _collect_shots(ep_dir: Path, storyboard: dict | None) -> list[dict]:
+def _collect_shots(
+    ep_dir: Path,
+    storyboard: dict | None,
+    sent_by_shot_ver: dict[str, str] | None = None,
+) -> list[dict]:
     """For each shot in storyboard order, find all clip versions on disk."""
     state = _load_json(ep_dir / "shots_state.json") or {}
     clips_dir = ep_dir / "clips"
     frames_dir = ep_dir / "frames"
     reviews_dir = ep_dir / "reviews"
+    sent_by_shot_ver = sent_by_shot_ver or {}
 
     shot_specs: list[dict] = []
     if storyboard:
@@ -209,11 +214,14 @@ def _collect_shots(ep_dir: Path, storyboard: dict | None) -> list[dict]:
                 if not review:
                     review = _load_json(reviews_dir / f"{sid}-ver{n}.json")
                 thumb = frames_dir / f"{sid}-ver{n}_last.png"
+                recorded_prompt = attempt.get("prompt")
+                sent_prompt = sent_by_shot_ver.get(f"{sid}::{n}")
                 versions.append({
                     "version": n,
                     "clip_url": _rel(clip, ep_dir),
                     "thumb_url": _rel(thumb, ep_dir) if thumb.exists() else None,
-                    "prompt": attempt.get("prompt"),
+                    "prompt": recorded_prompt,
+                    "sent_prompt": sent_prompt,
                     "review": review,
                     "status": attempt.get("status"),
                     "task_id": attempt.get("task_id"),
@@ -233,14 +241,66 @@ def _collect_shots(ep_dir: Path, storyboard: dict | None) -> list[dict]:
     return out
 
 
+def _extract_sent_prompt(rec: dict) -> str | None:
+    """Recover the literal prompt that hit the model from one log record.
+
+    Handles two logger schemas:
+      * lib/model_log.py — ``request`` is a dict that contains ``input.prompt``
+        (DashScope shape) or ``parameters.prompt`` on some endpoints.
+      * scripts/bl wrapper — records have a ``cmd`` array; we grep it for
+        the value following ``--prompt``.
+    Returns None when no prompt is identifiable (e.g. wait / review calls).
+    """
+    req = rec.get("request")
+    if isinstance(req, dict):
+        inp = req.get("input")
+        if isinstance(inp, dict) and isinstance(inp.get("prompt"), str):
+            return inp["prompt"]
+        params = req.get("parameters")
+        if isinstance(params, dict) and isinstance(params.get("prompt"), str):
+            return params["prompt"]
+        if isinstance(req.get("prompt"), str):
+            return req["prompt"]
+    cmd = rec.get("cmd")
+    if isinstance(cmd, list):
+        for i, tok in enumerate(cmd):
+            if tok == "--prompt" and i + 1 < len(cmd):
+                return cmd[i + 1]
+    return None
+
+
+def _is_video_render_record(rec: dict) -> bool:
+    """Best-effort: does this log record correspond to a video render submit?"""
+    k = (rec.get("kind") or "").lower()
+    if k in {"video_submit", "video_render", "video"}:
+        return True
+    cmd = rec.get("cmd")
+    if isinstance(cmd, list) and len(cmd) >= 3 and cmd[0] == "bl" and cmd[1] == "video":
+        return cmd[2] in {"generate", "ref", "edit"}
+    return False
+
+
 def _collect_calls(ep_dir: Path) -> dict:
-    """Group model_calls.jsonl by shot_id; return summary + raw."""
+    """Group model_calls.jsonl by shot; return summary + raw + sent-prompt index.
+
+    Two logger schemas coexist in the repo (see lib/model_log.py docstring
+    and scripts/bl). Field names differ:
+      * Python logger: shot_id / version / duration_ms / kind
+      * Shell wrapper: shot   / attempt / duration_ms / (no kind, infer from cmd)
+    We accept both so the calls table populates per-shot in either case, and
+    we also harvest the actual ``--prompt`` value sent to the video model so
+    the shots section can show it as ground truth.
+    """
     log = ep_dir / "logs" / "model_calls.jsonl"
     by_shot: dict = {}
     raw: list = []
+    sent_by_shot_ver: dict[str, str] = {}
     total = 0
     if not log.exists():
-        return {"by_shot": by_shot, "total": 0, "raw_count": 0, "raw": []}
+        return {
+            "by_shot": by_shot, "total": 0, "raw_count": 0,
+            "raw": [], "sent_by_shot_ver": sent_by_shot_ver,
+        }
     for line in log.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -250,7 +310,7 @@ def _collect_calls(ep_dir: Path) -> dict:
             continue
         total += 1
         raw.append(rec)
-        sid = rec.get("shot_id") or "_project_"
+        sid = rec.get("shot_id") or rec.get("shot") or "_project_"
         slot = by_shot.setdefault(sid, {"count": 0, "duration_ms": 0.0, "kinds": {}})
         slot["count"] += 1
         d = rec.get("duration_ms") or 0
@@ -258,9 +318,29 @@ def _collect_calls(ep_dir: Path) -> dict:
             slot["duration_ms"] += float(d)
         except (TypeError, ValueError):
             pass
-        k = rec.get("kind") or "?"
+        k = rec.get("kind")
+        if not k:
+            cmd = rec.get("cmd")
+            if isinstance(cmd, list) and len(cmd) >= 3 and cmd[0] == "bl":
+                k = f"bl_{cmd[1]}_{cmd[2]}"
+            else:
+                k = "?"
         slot["kinds"][k] = slot["kinds"].get(k, 0) + 1
-    return {"by_shot": by_shot, "total": total, "raw_count": len(raw), "raw": raw}
+
+        if _is_video_render_record(rec):
+            prompt = _extract_sent_prompt(rec)
+            if prompt:
+                ver = rec.get("version") or rec.get("attempt")
+                if ver is not None:
+                    key = f"{sid}::{ver}"
+                    # Keep the first occurrence per (shot, version). render_shot
+                    # passes the prompt only once per attempt so collisions are
+                    # rare and the first call is the truthful one.
+                    sent_by_shot_ver.setdefault(key, prompt)
+    return {
+        "by_shot": by_shot, "total": total, "raw_count": len(raw),
+        "raw": raw, "sent_by_shot_ver": sent_by_shot_ver,
+    }
 
 
 def _collect_final(ep_dir: Path, project: str, episode_norm: str) -> dict | None:
@@ -449,7 +529,10 @@ const md = (txt) => {{
 const missing = (msg) => `<div class="empty">${{esc(msg || '(missing)')}}</div>`;
 
 // ---- markdown sections
-$('x-premise').innerHTML = D.premise ? `<div class="md">${{md(D.premise)}}</div>` : missing('(no initialPrompt.md found)');
+$('x-premise').innerHTML = D.premise
+  ? `<div class="md">${{md(D.premise)}}</div>` +
+    (D.premise_source ? `<div style="margin-top:6px;font-size:11px;color:var(--mute)">source · <code>${{esc(D.premise_source)}}</code></div>` : '')
+  : missing('(no initialPrompt.md / premise.md found in project or episode dir)');
 $('x-lore').innerHTML = D.lore ? `<div class="md">${{md(D.lore)}}</div>` : missing('(no lore.md found)');
 $('x-script').innerHTML = D.script ? `<div class="md">${{md(D.script)}}</div>` : missing('(no script.md found)');
 
@@ -517,17 +600,44 @@ const shotsHtml = (D.shots||[]).map((shot, si) => {{
   }}
   const winner = shot.winner_version;
   const tabs = versions.map(v => `<div class="tab ${{v.version===winner?'winner':''}}" data-shot="${{si}}" data-ver="${{v.version}}">v${{v.version}}</div>`).join('');
+  const renderPromptBlock = (v) => {{
+    // The storyboard's director prompt is shown once at the shot level
+    // (shotPromptBlock below). Per-version, we surface:
+    //   1. sent_prompt — pulled from logs/model_calls.jsonl --prompt arg.
+    //      This is GROUND TRUTH — exactly what the video model received.
+    //   2. prompt      — shots_state.json attempts[].prompt — what
+    //      render_shot.py was invoked with. Should equal #1; if it does,
+    //      we collapse the two into one block.
+    const sent = v.sent_prompt;
+    const rec = v.prompt;
+    const same = (a, b) => (a||'').trim() === (b||'').trim();
+    const out = [];
+    if (sent) {{
+      out.push(`<details open><summary>prompt actually sent to model <span class="kpill">model_calls.jsonl</span></summary><div class="md"><pre>${{esc(sent)}}</pre></div></details>`);
+    }}
+    if (rec && !same(rec, sent)) {{
+      const badge = sent
+        ? `<span class="kpill" style="background:#5a3a00;color:#f0b429">differs from sent</span>`
+        : `<span class="kpill">recorded by render_shot.py</span>`;
+      out.push(`<details${{sent?'':' open'}}><summary>render_shot prompt ${{badge}}</summary><div class="md"><pre>${{esc(rec)}}</pre></div></details>`);
+    }}
+    return out.join('');
+  }};
+
   const panels = versions.map(v => `<div class="version-panel" data-shot="${{si}}" data-ver="${{v.version}}" style="display:none">
     <div class="version-body">
       <div>
         <video controls preload="metadata" src="${{v.clip_url}}"></video>
         ${{v.thumb_url ? `<details><summary>last frame</summary><img class="thumb" src="${{v.thumb_url}}"></details>` : ''}}
-        ${{v.prompt ? `<details><summary>prompt</summary><div class="md"><pre>${{esc(v.prompt)}}</pre></div></details>` : ''}}
+        ${{renderPromptBlock(v)}}
         ${{v.task_id ? `<div style="font-size:11px;color:var(--mute);margin-top:6px">task: ${{esc(v.task_id)}}</div>` : ''}}
       </div>
       <div>${{renderReview(v.review)}}</div>
     </div>
   </div>`).join('');
+  const shotPromptBlock = shot.prompt
+    ? `<details style="margin:8px 0"><summary>storyboard prompt (director's intent) · ${{(shot.prompt||'').length}} chars</summary><div class="md"><pre>${{esc(shot.prompt)}}</pre></div></details>`
+    : '';
   return `<div class="shot">
     <div class="shot-head">
       <span class="id">${{esc(shot.id)}}</span>
@@ -537,6 +647,7 @@ const shotsHtml = (D.shots||[]).map((shot, si) => {{
       ${{(shot.characters||[]).map(c=>`<span class="kpill">${{esc(c)}}</span>`).join('')}}
       ${{shot.narrative_purpose ? `<div class="purpose">${{esc(shot.narrative_purpose)}}</div>` : ''}}
     </div>
+    ${{shotPromptBlock}}
     <div class="tabs">${{tabs}}</div>
     ${{panels}}
   </div>`;
@@ -599,11 +710,32 @@ def main() -> int:
     proj_dir = project_dir(project)
 
     storyboard = _load_json(ep_dir / "storyboard.json")
+    calls = _collect_calls(ep_dir)
+
+    # Try a few plausible filenames for the user's original premise. The
+    # repo doesn't enforce a single canonical name yet — agents may write
+    # it as initialPrompt.md (legacy) or premise.md (newer convention),
+    # at the project or episode tier. First non-empty wins.
+    premise_candidates = (
+        ep_dir / "initialPrompt.md",
+        ep_dir / "premise.md",
+        proj_dir / "initialPrompt.md",
+        proj_dir / "premise.md",
+    )
+    premise_text = None
+    premise_source = None
+    for cand in premise_candidates:
+        text = _read_text(cand)
+        if text and text.strip():
+            premise_text = text
+            premise_source = str(cand.relative_to(proj_dir.parent))
+            break
 
     payload = {
         "project": project,
         "episode": ep_norm,
-        "premise": _read_text(proj_dir / "initialPrompt.md"),
+        "premise": premise_text,
+        "premise_source": premise_source,
         "lore": _read_text(proj_dir / "lore.md"),
         "direction": _load_json(ep_dir / "direction.json"),
         "script": _read_text(ep_dir / "script.md"),
@@ -615,8 +747,10 @@ def main() -> int:
         "sets": _collect_entities(proj_dir / "movie-set", ep_dir, "set.md"),
         "props": _collect_entities(proj_dir / "props", ep_dir, "prop.md"),
         "bgm": _collect_bgm(proj_dir, ep_dir),
-        "shots": _collect_shots(ep_dir, storyboard),
-        "calls": _collect_calls(ep_dir),
+        "shots": _collect_shots(
+            ep_dir, storyboard, calls.get("sent_by_shot_ver"),
+        ),
+        "calls": calls,
         "final": _collect_final(ep_dir, project, ep_norm),
     }
 

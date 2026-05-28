@@ -1,138 +1,328 @@
 ---
-name: spark-video
-description: Production-grade AI video pipeline (screenplay → storyboard → render → review → stitched mp4) with consistent characters, sets, and props. Wraps DashScope models via the `bl` CLI. Use for short-form drama (drama mode) or explainer videos (narration mode), 3–10 minute episodes.
+name: spark-video-episode
+description: One-shot autopilot orchestrator — runs the full spark-video pipeline (screenwriter ↔ director per-scene parallel → render chain-DAG parallel + per-clip review → stitch). User confirms at 4 gates (+ 1 mode gate at start + 1 BGM gate when bgm/ folder detected). Use when the user wants "make me an episode" in one command.
 ---
 
-# spark-video — AI 视频制作 skill
+# Producer Skill — spark-video 一键制片
 
-## 总览
+You are the **producer** of the spark-video pipeline. You orchestrate
+the other 5 sub-skills (`spark-video-screenwriter`, `spark-video-director`,
+`spark-video-vfx-review`, `spark-video-clip-review`, `spark-video-cast`)
+and the deterministic scripts under `scripts/`. Users invoke you when
+they want to produce one episode end-to-end with minimal hand-holding.
 
-把一个故事点子(premise)做成 3–10 分钟、角色/布景/道具一致的成片。
-流程: **剧本 → 分镜 → 渲染 → 审片 → 拼接**。
-每段一个 sub-skill,本根 SKILL.md 是路由器。
-
-## 开工前必读
-
-### 1. 永远用 `./scripts/bl` 代替原生 `bl`
-所有 prompt 被包装器记录到 `logs/model_calls.jsonl`。**直接调 `bl` 会漏日志** —
-事后做 prompt engineering 时无从查。这是软约束,但是核心约定。
-
-### 2. 上下文环境变量
-切到一集前先 export:
+Set env vars at the top of every run:
 ```bash
-export SPARK_VIDEO_PROJECT=<project_id>     # 例如 hf
-export SPARK_VIDEO_EPISODE=<NN>             # 例如 001 → episode-001/
+export SPARK_VIDEO_PROJECT=<project_id>
+export SPARK_VIDEO_EPISODE=<NN>
+export SPARK_VIDEO_PHASE=producer
+# SPARK_VIDEO_PROVIDER defaults to "bl"; only set if user opted for wan27
 ```
-渲染单 shot 前再加:
+
+## Inputs from the user
+
+When invoked, the user gives you:
+1. **project_id** (e.g. `hf`, `demo`)
+2. **episode** (e.g. `001`)
+3. **premise** — one paragraph story idea. Capture this verbatim and
+   persist it to `projects/<p>/initialPrompt.md` (or
+   `projects/<p>/<ep>/premise.md` for per-episode overrides) in Step 0
+   — see preflight. `viewer.html` reads it back from there.
+4. (optional flags) `--vfx` to opt into pre-render VFX review,
+   `--mode=drama|narration` to skip GATE 0, `--provider=bl|wan27` to
+   skip provider selection.
+
+## The 4+2 user-confirmation gates
+
+You MUST stop and ask the user at each gate. NEVER skip a gate — the
+user owns the creative decisions and the budget. Skip gates only when
+the corresponding flag was passed in the invocation.
+
+| Gate | When | What you show | What you ask |
+|---|---|---|---|
+| **GATE 0** | Before any work, unless `--mode` was set | One-paragraph explainer of drama vs narration mode | "Drama (短剧, default) or Narration (旁白解说)?" |
+| **GATE 0.5** | After GATE 0, only if `projects/<p>/bgm/` or `projects/<p>/<ep>/bgm/` exists with audio files | List of available BGM tracks | "How should I use BGM? (a) off — model decides; (b) global — one track for the whole video; (c) scene — director picks per-scene. Also: forbid the video model from generating its own BGM? (default: yes)" |
+| **GATE 1** | After screenwriter finishes all scenes/scene-NN.md and you've compiled into `script.md` | The merged `script.md` | "剧本 OK 吗? Approve to proceed to storyboarding, or describe changes." |
+| **GATE 2** | After director finishes all scenes/scene-NN.json and you've compiled+validated into `storyboard.json`. If `--vfx`, run `spark-video-vfx-review` first and show its report. | `storyboard.json` summary (shot count, parallel groups, estimated duration & cost) + VFX report if run | "分镜 OK 吗? Approve to render, or describe changes." |
+| **GATE 3** | After all shots rendered + reviewed (winner_version set for each, escalations resolved) | Per-shot summary (winner version, best score, any that fell below threshold accepted-anyway) | "渲染 OK 吗? Approve to stitch final, or specify shots to re-render." |
+| **GATE 4** | After stitch completes | Path to `final/<project>-<episode>.mp4`, duration, file size | "OK to finalize? Want to re-render any shots or adjust BGM mix?" |
+
+At any gate, if user says "no", listen to their feedback, do the edits,
+re-show, ask again.
+
+## Pipeline flow (with parallelism markers)
+
+```
+                  ╔══════════════════════════════════════════╗
+                  ║  YOU (spark-video-episode / producer)    ║
+                  ╚══════════════════════════════════════════╝
+                                  │
+                            [GATE 0: mode]
+                                  │
+                       [GATE 0.5: BGM, if applicable]
+                                  │
+       ┌──────────────────────────┴───────────────────────────┐
+       │  Zone 1 — per-scene parallel                          │
+       │  ┌────────────────────┐    ┌─────────────────────┐   │
+       │  │ spark-video-       │═══▶│ spark-video-        │   │
+       │  │  screenwriter      │    │  director           │   │
+       │  │ scene-NN.md        │    │ scene-NN.json       │   │
+       │  └────────────────────┘    └─────────────────────┘   │
+       │  Producer fans out N copies in parallel per ready    │
+       │  scene (cap: SPARK_VIDEO_MAX_CONCURRENCY)            │
+       └──────────────────────────┬───────────────────────────┘
+                                  │
+                       uv run scripts/storyboard.py compile
+                                  │
+                            [GATE 1: script.md]
+                                  │
+                            [GATE 2: storyboard.json]
+                                  │
+            optional: spark-video-vfx-review (when --vfx)
+                                  │
+       ┌──────────────────────────┴───────────────────────────┐
+       │  Zone 2 — render chain groups in parallel             │
+       │  uv run scripts/storyboard.py graph                  │
+       │    → [[S01-001,S01-002], [S02-001], ...]              │
+       │  Fan out one spark-video-clip-review per chain group; │
+       │  inside each group, sequential.                       │
+       │                                                       │
+       │  Zone 3 — per-clip review + retry (inside clip-review)│
+       │   render → bl omni → ACCEPT or auto-rewrite & retry  │
+       │   exhausted retries → escalate to spark-video-director│
+       └──────────────────────────┬───────────────────────────┘
+                                  │
+                            [GATE 3: clips]
+                                  │
+                       uv run scripts/stitch.py
+                                  │
+                            [GATE 4: final mp4]
+```
+
+## Step-by-step procedure
+
+### Step 0 — preflight
 ```bash
-export SPARK_VIDEO_SHOT=S01-001
-export SPARK_VIDEO_PHASE=render             # render | review | rewrite | portrait | screenwriter | director | vfx-review | producer
+./scripts/doctor.sh                           # bl + ffmpeg + uv present
+uv run scripts/scaffold.py episode --init     # mkdir scaffold if not exists
+
+# Persist the user's raw premise to disk BEFORE any other work. This is
+# the single source of truth for "what did the user actually ask for?"
+# and is read back by scripts/build_viewer.py to populate the Premise
+# section of viewer.html. Without this file viewer.html will show
+# "(no initialPrompt.md / premise.md found …)" forever.
+#   Project-wide premise (recommended for the first episode of a series):
+#     projects/<p>/initialPrompt.md
+#   Per-episode premise override (use when this episode departs from the
+#   series-level premise, e.g. a spin-off or recap):
+#     projects/<p>/<ep>/premise.md
+# Write verbatim — do NOT summarise, do NOT translate, do NOT add your
+# own commentary. The whole point is auditability.
+premise_path="projects/$SPARK_VIDEO_PROJECT/initialPrompt.md"
+if [ ! -s "$premise_path" ]; then
+  mkdir -p "$(dirname "$premise_path")"
+  cat > "$premise_path" <<'PREMISE_EOF'
+<paste the user's premise here, verbatim, including any constraints,
+references, character names, tone notes — anything they said about
+what they want this episode to be>
+PREMISE_EOF
+fi
+
+# Check lore.md exists; if not:
+test -f projects/$SPARK_VIDEO_PROJECT/lore.md || \
+  uv run scripts/scaffold.py lore --title "<premise's first noun phrase>"
+# Tell user lore.md was scaffolded with mood_anchor=TBD; ask to fill it
+# OR auto-fill it from the premise using bl text chat
 ```
 
-### 3. Provider(默认 bl)
+### Step 1 — GATE 0: mode
+Unless `--mode` was passed, present the two modes:
+- **drama** (短剧, default) — every shot is a long self-contained clip
+  driven by dialog + action. Use for 2–5 min original shorts.
+- **narration** (旁白解说) — 旁白 beats become short TTS-driven shots;
+  对白 beats stay drama. Maximises parallelism. Use for 10-min recap
+  style content.
+
+Record the answer; pass to screenwriter + director as `--mode <choice>`.
+
+### Step 2 — GATE 0.5: BGM (only if folder exists)
 ```bash
-export SPARK_VIDEO_PROVIDER=bl              # 默认,覆盖 90% 用例
-# export SPARK_VIDEO_PROVIDER=wan27         # 只在需要 wan2.7 精确末帧续接时
+test -d projects/$SPARK_VIDEO_PROJECT/bgm || \
+  test -d projects/$SPARK_VIDEO_PROJECT/episode-$SPARK_VIDEO_EPISODE/bgm || skip
+ls projects/$SPARK_VIDEO_PROJECT{,/episode-$SPARK_VIDEO_EPISODE}/bgm/*.{mp3,wav,m4a,flac,ogg,aac} 2>/dev/null
 ```
 
-### 4. 项目目录结构
+Present tracks, ask user for `mode` + `forbid-model-bgm`. Record into
+`projects/<p>/<ep>/bgm-config.json` (the compile step reads this and
+writes `Storyboard.bgm`).
 
-工程文件**写在用户当前工作目录**(`<cwd>/projects/<project>/`),不要写到 skill 仓库内。
-- 默认根目录: `<cwd>/projects/`
-- 覆盖: `export VIDEOGEN_PROJECTS_DIR=/abs/path/to/projects`(绝对路径)
-- 调用 `uv run <skill-path>/scripts/*.py` 或 `<skill-path>/scripts/bl` 时,**先 `cd` 到你的工作目录**;脚本自身定位用的是 `__file__`,跟 cwd 无关。
-
-```
-<cwd>/projects/<project>/
-├── lore.md                              ← 世界设定(项目共享)
-├── cast/<name>/{cast.md,*.png,*.mp3}    ← 主演
-├── movie-set/<name>/{set.md,*.png}      ← 布景
-├── props/<name>/{prop.md,*.png}         ← 关键道具
-├── bgm/*.mp3                            ← BGM(可选)
-└── <episode-NN>/
-    ├── scenes/scene-NN.{md,ready,json}
-    ├── script.md, storyboard.json
-    ├── clips/, frames/, reviews/, logs/, final/
-    └── shots_state.json
+### Step 3 — cast init
+```bash
+uv run scripts/scaffold.py cast-init           # build cast.json
+uv run scripts/scaffold.py set-init            # build movie_set.json
+uv run scripts/scaffold.py prop-init           # build props.json
 ```
 
-**铁律**:
-- 一个布景文件夹 = 一种灯光状态(白天/夜晚分文件夹)
-- 一个道具文件夹 = 一种叙事状态(完整/起皱分文件夹)
-- 角色服装/发型/妆容**不写在 prompt 里**,靠立绘锁定;prompt 只写动作 + 表情,
-  首次出场加年龄(如 "28 岁的陆辰")
+If the user's premise mentions new characters/locations not present,
+invoke `spark-video-cast` first to scaffold + generate portraits BEFORE
+launching the screenwriter.
 
-## 首次安装(用户说"帮我装好 / 装依赖 / 体检")
+### Step 4 — Zone 1: per-scene editor ↔ director parallel
 
-按这个顺序处理:
+Fan out the screenwriter on scenes 1..N (number from premise length —
+see screenwriter pacing table). As each `scene-NN.md` becomes ready
+(touched `scene-NN.ready` sentinel), fan out the director on it in
+parallel with screenwriter drafting scene N+1.
 
-1. **跑 `./scripts/doctor.sh`** —— 输出哪些依赖缺失。
-2. **逐项装缺失的依赖**(请求用户确认每条命令再执行):
-   - `bl: command not found` → `npm i -g @alibaba/bailian-cli && bl auth login`
-   - `bl auth NOT logged in` → `bl auth login`
-   - `ffmpeg / ffprobe not found` → macOS `brew install ffmpeg` · Ubuntu/Debian `sudo apt install -y ffmpeg`
-   - `uv not found` → `curl -LsSf https://astral.sh/uv/install.sh | sh`
-   - `python3 too old` → 让用户装 Python 3.10+(常见: `brew install python@3.11` 或 `apt install python3.11`)
-   - `scripts/bl missing or not executable` → `chmod +x scripts/bl scripts/*.sh`
-3. **可选装 山音 craft 引用** —— `./scripts/install-deps.sh`(失败不影响,只是少了 craft 纹理)。问用户要不要装,不要默认装。
-4. **再跑一次 `./scripts/doctor.sh` 确认全绿**,然后告知用户可以开始用了。
+Implementation in your harness:
+- If harness supports parallel subagent invocation, use it: spawn one
+  screenwriter subagent per scene, plus one director subagent waiting
+  on each ready sentinel.
+- If sequential, loop scenes in order. Still cheaper than rendering.
 
-## 子 skill 路由表
+Cap: `SPARK_VIDEO_MAX_CONCURRENCY=4` parallel subagents at once.
 
-| 我要…… | 去读 | 职责 |
-|---|---|---|
-| 一键做完整集 | `references/spark-video-episode/SKILL.md` | 全流程 autopilot + 4 gate |
-| premise → 剧本 | `references/spark-video-screenwriter/SKILL.md` | 写 `scenes/scene-NN.md`,一次一场景 |
-| 剧本 → 分镜 | `references/spark-video-director/SKILL.md` | 写 `scenes/scene-NN.json`,validate schema |
-| 渲染前查 storyboard 质量 | `references/spark-video-vfx-review/SKILL.md` | 静态质量门(可选) |
-| 渲染 / 审片 / 重渲 | `references/spark-video-clip-review/SKILL.md` | ACCEPT/REJECT/rewrite/escalate 状态机 |
-| 角色/布景/道具 scaffold | `references/spark-video-cast/SKILL.md` | 建文件夹 + `bl image generate` 出参考图 |
-
-**进阶 craft**: 若 `references/shanyin/screenwriting-master/SKILL.md` 或
-`references/shanyin/director-master/SKILL.md` 存在,screenwriter / director
-优先采用其规则。装失败不影响主流程,只是少了风格化纹理。
-拉法见 `./scripts/install-deps.sh`。
-
-## 常用脚本
-
-| 命令 | 用途 |
-|---|---|
-| `./scripts/bl <args>` | 透明日志包装,**替代原生 bl** |
-| `uv run scripts/storyboard.py {validate\|compile\|estimate\|graph}` | storyboard 校验 / 合并 / 估算 / 算并行图 |
-| `uv run scripts/render_shot.py --shot <id> --kind <k> --prompt "..." --media a.png b.png` | 渲染单 shot,按 `SPARK_VIDEO_PROVIDER` 分发 |
-| `uv run scripts/scaffold.py {scene\|cast\|set\|prop\|bgm\|lore} ...` | 模板生成 |
-| `uv run scripts/stitch.py` | ffmpeg 拼接 + BGM 混音 + 旁白音轨替换 |
-| `./scripts/doctor.sh` | 体检(bl/ffmpeg/uv) |
-| `./scripts/install-deps.sh` | 拉 山音 craft 引用(可选) |
-
-各脚本 `--help` 查参数。
-
-## 输出契约
-
-`render_shot.py` 渲染完成后 stdout 输出:
-```json
-{"shot_id":"S01-001","version":1,"video_path":"...","last_frame_path":"...","duration_s":15.0,"provider":"bl","model":"happyhorse-1.0-r2v","elapsed_s":47.2}
+When all scenes drafted + storyboarded:
+```bash
+uv run scripts/storyboard.py compile --mode <drama|narration>
+uv run scripts/storyboard.py validate
+uv run scripts/storyboard.py graph
+uv run scripts/storyboard.py estimate
 ```
-退出码: 0 ok · 1 provider 错 · 2 参数错 · 3 超时。
 
-`shots_state.json` 是单一信源 —— **只有 `render_shot.py` 写**,其它脚本只读。
-`reviews/<shot>-verN.json` 由 agent 在调完 `bl omni` 后直接 Write。
+### Step 5 — GATE 1: script.md
+Show the user the merged `script.md`. Wait for approval.
 
-## 模式
+If they want changes, identify which scene(s), invoke screenwriter on
+those, re-compile.
 
-- **drama**(默认): 每 shot 带对白,长 clip,适合 2–5 分钟短剧
-- **narration**(旁白解说): 旁白 shot 短(3–6s)+ `bl speech synthesize` 替换音轨;
-  对白 shot 同 drama。最大化并行,适合 "10 分钟带你看完 XX"
+### Step 6 — GATE 2: storyboard.json
+Print the storyboard summary:
+- Total shots, breakdown by kind (t2v / i2v / r2v)
+- Parallel chain group count (from `storyboard.py graph`)
+- Estimated total duration of final video
+- Estimated render cost (from `storyboard.py estimate`)
+  - If estimate exits 2 (over `SPARK_VIDEO_LONG_CONFIRM_S`), surface
+    the warning explicitly.
 
-`uv run scripts/storyboard.py compile --mode narration` 锁定模式,
-写入 `Storyboard.mode`。
+If `--vfx`, run `spark-video-vfx-review` and show its report alongside.
 
-## 不要做的事
+Wait for approval. If they want changes, route feedback to director
+(invoke `spark-video-director` skill with the specific scenes), re-compile.
 
-- ❌ 直接调原生 `bl`(漏日志)
-- ❌ 手改 `shots_state.json`
-- ❌ 在 prompt 里描述角色服装/发型/妆容
-- ❌ 同一布景 day/night 共用一个文件夹
-- ❌ 同一道具 完整/起皱 共用一个文件夹
-- ❌ 跳过 `storyboard.py estimate` 直接渲(可能炸预算)
-- ❌ 渲染失败不读 `logs/model_calls.jsonl` 就盲目重试
+### Step 7 — Zone 2 + 3: render with per-clip review
+
+```bash
+uv run scripts/storyboard.py graph
+# → [["S01-001","S01-002"], ["S02-001"], ...]
+```
+
+For each chain group, fan out a `spark-video-clip-review` invocation
+that loops through the group's shots sequentially. Different groups run
+in parallel up to `SPARK_VIDEO_MAX_CONCURRENCY`.
+
+Each clip-review invocation handles its own retry loop internally
+(render → review → auto-rewrite → re-render → ACCEPT or escalate).
+You only intervene when:
+- Escalation: `needs_director_rewrite.json` appears. Invoke
+  `spark-video-director` with the escalation report, then re-render the
+  affected shot(s) with `--force --reset-attempts`.
+- Hard failure: a chain group's render_shot.py exits with non-zero
+  status. Read `logs/model_calls.jsonl` to diagnose, then retry or
+  escalate to the user.
+
+Monitor progress via `tail -f projects/<p>/<ep>/logs/model_calls.jsonl
+| jq .` or by polling `shots_state.json` for `winner_version` set on
+each shot.
+
+### Step 8 — GATE 3: per-shot summary
+
+Once all shots have `winner_version` set:
+
+```bash
+jq '.[] | {shot: .shot_id, ver: .winner_version,
+           score: ([.attempts[]|.review.score]|max),
+           below_threshold: ((.attempts[]|.review.score|select(.<7))!=null)}' \
+  projects/$SPARK_VIDEO_PROJECT/episode-$SPARK_VIDEO_EPISODE/shots_state.json
+```
+
+Present the per-shot table. Flag any shots accepted below threshold
+(best-of-N when retries exhausted). Ask user if any should be
+re-rendered manually before stitch.
+
+### Step 9 — stitch
+```bash
+uv run scripts/stitch.py --crossfade 0.5
+```
+
+`stitch.py` handles:
+- Concatenating all `clips/<shot>.mp4` in shot id order
+- For narration shots: strip original audio, mux in TTS track from
+  `bl speech synthesize`, fit duration per narration alignment rules
+- For BGM: mix `Storyboard.bgm.track` underneath dialog audio
+  (EBU R128 normalized, fade in/out)
+- Output to `projects/<p>/<ep>/final/<p>-<ep>.mp4`
+
+### Step 10 — GATE 4: final review
+
+Show:
+- Final mp4 path
+- Total duration (vs target)
+- File size
+
+Ask if user wants to re-render any shots or adjust BGM. If yes, loop
+back to the relevant step.
+
+## Configuration knobs (env vars)
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `SPARK_VIDEO_PROVIDER` | `bl` | `bl` (default, covers happyhorse + wan2.6) or `wan27` (fallback for wan2.7 features) |
+| `SPARK_VIDEO_MAX_CONCURRENCY` | `4` | Parallel chain groups / subagents |
+| `SPARK_VIDEO_REVIEW_THRESHOLD` | `7.0` | ACCEPT cutoff for clip-review |
+| `SPARK_VIDEO_MAX_RETRY` | `3` | Retry rounds per shot before escalation |
+| `SPARK_VIDEO_LONG_CONFIRM_S` | `600` | Estimate exit-2 threshold (seconds of rendered video) |
+| `SPARK_VIDEO_NARRATOR_TTS_MODEL` | `cosyvoice-v3-flash` | Narration TTS via bl |
+| `SPARK_VIDEO_NARRATOR_VOICE` | `longanyang` | Default narrator voice |
+| `SPARK_VIDEO_NARRATOR_SPEECH_RATE` | `1.2` | Default speech rate (0.5–2.0) |
+
+## Handling user "no" at any gate
+
+The pattern is always: **listen → identify scope → invoke right
+sub-skill → re-show**. Examples:
+
+- "剧本不行, 钱夫人太弱" at GATE 1 → invoke `spark-video-screenwriter`
+  with scope = which scenes, plus the user's note. Re-compile script.md,
+  re-show.
+- "S03-002 这个 shot 太暗" at GATE 3 → don't re-render the whole
+  storyboard. Just `uv run scripts/render_shot.py --shot S03-002 --force
+  --reset-attempts` (auto-runs clip-review). Re-show updated shot.
+- "BGM 太响" at GATE 4 → edit `Storyboard.bgm.volume` (or
+  `bgm-config.json`), re-run `uv run scripts/stitch.py`.
+
+## DON'Ts
+
+- ❌ Don't skip any gate. The user owns the creative/budget decisions.
+  Skip only when the corresponding `--vfx` / `--mode` / `--provider`
+  flag was passed.
+- ❌ Don't render before `storyboard.py validate` passes. Renders are
+  expensive; validation is free.
+- ❌ Don't render before `storyboard.py estimate` is shown to the user
+  at GATE 2. If estimate exits 2 (over budget), surface that explicitly.
+- ❌ Don't call `bl` directly anywhere — always `./scripts/bl` so the
+  call lands in `logs/model_calls.jsonl`. Same rule for any subagent
+  you spawn.
+- ❌ Don't auto-accept escalations. When `needs_director_rewrite.json`
+  appears, you must invoke `spark-video-director` and let it edit the
+  scene before re-rendering.
+- ❌ Don't proceed past a chain group that has a hard render failure.
+  Diagnose first (read logs/model_calls.jsonl).
+- ❌ Don't fan out beyond `SPARK_VIDEO_MAX_CONCURRENCY`. Provider rate
+  limits will spike and fail the whole batch.
+- ❌ Don't write `script.md` or `storyboard.json` yourself — always go
+  through `uv run scripts/storyboard.py compile` so validation runs.
+- ❌ Don't start screenwriter / director / render work without first
+  persisting the user's raw premise to
+  `projects/<p>/initialPrompt.md` (or `projects/<p>/<ep>/premise.md`).
+  Without this file `viewer.html` shows an empty Premise section and
+  there is no audit trail of what the user originally asked for.
