@@ -100,6 +100,17 @@ def _update_state(state_path: Path, mutate: Callable[[dict], None]) -> dict:
             fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
 
 
+def _refresh_viewer() -> None:
+    """Best-effort rebuild of viewer.html after state changes."""
+    try:
+        subprocess.run(
+            ["uv", "run", str(_HERE / "build_viewer.py"), "--no-open"],
+            check=False, capture_output=True, timeout=30,
+        )
+    except Exception:
+        pass
+
+
 def _next_version(state: dict, shot_id: str, *, reset: bool) -> int:
     if reset:
         state.pop(shot_id, None)
@@ -198,6 +209,7 @@ def main() -> int:
             entry["needs_director_rewrite"] = False
 
         _update_state(state_path, _promote)
+        _refresh_viewer()
         print(json.dumps({"shot_id": args.shot, "winner_version": ver,
                           "winner_path": str(dst)}))
         return 0
@@ -332,6 +344,7 @@ def main() -> int:
         entry["attempts"].append(attempt)
 
     _update_state(state_path, _append_succeeded)
+    _refresh_viewer()
 
     out = {
         "shot_id": args.shot,

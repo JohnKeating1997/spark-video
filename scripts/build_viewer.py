@@ -445,7 +445,7 @@ details[open] > summary {{ color: var(--fg); margin-bottom: 8px; }}
 .tab.active {{ background:var(--accent); color:#fff; border-color:transparent; }}
 .tab.winner::after {{ content: " ★"; color: var(--gold); }}
 .tab.active.winner::after {{ color: #fff; }}
-.version-body {{ display: grid; grid-template-columns: 2fr 1fr; gap: 14px; align-items: start; }}
+.version-body {{ gap: 14px; align-items: start; }}
 .version-body video {{ width:100%; max-height: 420px; background:#000; border-radius:6px; }}
 .review {{ font-size: 13px; }}
 .review .score {{ font-size: 22px; font-weight: 600; }}

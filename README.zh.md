@@ -75,7 +75,8 @@ projects/<project>/<episode>/
 大多数情况直接交给 agent 处理 —— 说"帮我修 XX"就行。
 
 - 安装后 agent 不认识 `spark-video` → 重启 agent / 新开会话
-- `bl: command not found` → `npm i -g @alibaba/bailian-cli && bl auth login`
+- `bl: command not found` → `npm install -g bailian-cli && npx skills add modelstudioai/skills --all -g && bl auth login`
+  (完整安装说明：<https://bailian.aliyun.com/cli/install.md>)
 - `Permission denied: scripts/bl` → `chmod +x scripts/*.sh scripts/bl`
 - 渲染卡住 → `tail -f projects/<p>/<e>/logs/model_calls.jsonl | jq .`
 

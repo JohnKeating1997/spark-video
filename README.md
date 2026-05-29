@@ -81,7 +81,8 @@ it'll run the right command.
 
 - After install the agent doesn't recognize `spark-video` → restart the
   agent / open a new session
-- `bl: command not found` → `npm i -g @alibaba/bailian-cli && bl auth login`
+- `bl: command not found` → `npm install -g bailian-cli && npx skills add modelstudioai/skills --all -g && bl auth login`
+  (full install guide: <https://bailian.aliyun.com/cli/install.md>)
 - `Permission denied: scripts/bl` → `chmod +x scripts/*.sh scripts/bl`
 - Render seems stuck → `tail -f projects/<p>/<e>/logs/model_calls.jsonl | jq .`
 

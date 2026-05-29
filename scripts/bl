@@ -30,7 +30,8 @@ for _dir in "${_path_arr[@]}"; do
 done
 if [ -z "$real_bl" ]; then
   echo "scripts/bl: real 'bl' CLI not found in PATH. Install via:" >&2
-  echo "  npm i -g @alibaba/bailian-cli" >&2
+  echo "  # Follow https://bailian.aliyun.com/cli/install.md, or:" >&2
+  echo "  npm install -g bailian-cli && npx skills add modelstudioai/skills --all -g" >&2
   exit 127
 fi
 

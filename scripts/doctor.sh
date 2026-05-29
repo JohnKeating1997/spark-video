@@ -22,7 +22,8 @@ if command -v bl >/dev/null 2>&1; then
     warn "bl auth NOT logged in — run: bl auth login"
   fi
 else
-  err "bl not found. Install: npm i -g @alibaba/bailian-cli"
+  err "bl not found. Install (see https://bailian.aliyun.com/cli/install.md):"
+  err "  npm install -g bailian-cli && npx skills add modelstudioai/skills --all -g"
 fi
 
 # ffmpeg + ffprobe
