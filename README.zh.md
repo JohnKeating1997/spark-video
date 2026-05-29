@@ -8,6 +8,8 @@ Codex / …)。
 
 ## 示例
 
+> **提示：** GitHub README 不支持内嵌 `<video>` 播放，**点击右侧封面图**可在新标签页观看完整成片。
+
 <table>
 <tr>
 <th width="44%">📝 Prompt</th>
@@ -24,7 +26,9 @@ Codex / …)。
 </td>
 <td>
 
-<video src="https://cloud.video.taobao.com/vod/ToFBk3q6IrT1L6k9TAW3Qu0GdJAWN80uyb75zNelvE8.mp4" controls muted></video>
+<a href="https://cloud.video.taobao.com/vod/ToFBk3q6IrT1L6k9TAW3Qu0GdJAWN80uyb75zNelvE8.mp4" target="_blank">
+<img src="https://img.alicdn.com/imgextra/i4/6000000000158/O1CN01Nko87m1D2Pip5isBr_!!6000000000158-0-tbvideo.jpg" alt="日剧风 · 青涩初恋 — 点击播放" width="100%">
+</a>
 
 </td>
 </tr>
@@ -34,26 +38,23 @@ Codex / …)。
 
 **② 悬疑短剧 · 末班车** — 纯旁白、无 BGM、指定 TTS 音色
 
-> 一列午夜特快上，男子挨个询问乘客年龄；结尾揭示他看到的其实是寿命，火车即将出事——可惜已经来不及了。
-
 <details>
-<summary>展开完整 prompt</summary>
+<summary>完整 prompt</summary>
 
-帮我生成一个悬疑短剧。
+使用 spark-video 生成一段帮我生成一个悬疑短剧。
 
-故事梗概：我搭上了一列特快车，大概在还差 10 分就午夜 12 点的时候，在中途站有一名男子也上了列车，他在车门关闭后，像是突然回复意识一般，开始左右环视着周遭乘客的脸。"恕我愚昧，请问您今年 28 岁吗？" 他如此地向我问道……一直到他问到最后一名女士。"您是 50 岁吗？""是的，不过还有五分钟就 51 岁了！" 那名女士如此微笑地回答道。霎时，那名男子的脸色铁青。
+故事梗概如下：我搭上了一列特快车，大概在还差 10 分就午夜 12 点的时候，在中途站有一名男子也上了列车，他在车门关闭后，像是突然回复意识一般，开始左右环视着周遭乘客的脸。"恕我愚昧，请问您今年 28 岁吗？"他如此的向我问道，"是的，不过您怎么知道呢？"我如此反问他，但被他无视，只是自顾自的和别人说话。"您今年 45 岁吧？""是没错。""您是 62 岁吗？""你怎么知道的？"一直和看似不相识的乘客群重复着诸如此类的对话，看来这名男子，似乎有着只要看着别人的脸就能知道其年龄的特殊能力。此时到下个停车站还有 15 分钟左右的时间，全车箱包括我在内的乘客都对这名男子投以好奇的注目眼光，一直到他问到最后一名女士。"您是 50 岁吗？""是的，不过还有五分钟就 51 岁了！"那名女士如此微笑的回答道。霎时，那名男子的脸色铁青，仿佛震撼到无以复加。
 
-采用 **旁白模式**，第三人称叙事。结尾旁白加一句：原来，这个男子看到的数字，是寿命而不是年龄……可现在，似乎来不及了。
-
-- 旁白音色：`qwen3-tts` → **Ebona**
-- 注意：不要让模型生成背景音乐
+采用旁白模式，将故事改成第三人称叙事。故事的最后，旁白加一句：原来，这个男子看到的数字，是寿命而不是年龄，他察觉到大家头上的数字和实际年龄非常吻合，猜测到这趟火车即将发生事故，因此疯狂地和大家确认年龄，就是希望在火车到站时马上逃离这趟火车，可现在，似乎来不及了。旁白音色用 qwen3-tts 的 Ebona。注意不要让模型生成背景音乐。
 
 </details>
 
 </td>
 <td>
 
-<video src="https://cloud.video.taobao.com/vod/MZx8KDUpGBygpU3SuTShGzyVxh0CbeJjpzhfNqSWz1Y.mp4" controls muted></video>
+<a href="https://cloud.video.taobao.com/vod/MZx8KDUpGBygpU3SuTShGzyVxh0CbeJjpzhfNqSWz1Y.mp4" target="_blank">
+<img src="https://img.alicdn.com/imgextra/i4/O1CN01UrL0Si1tTAiwIC1f3_!!6000000005902-2-tps-5032-2830.png" alt="悬疑短剧 · 末班车 — 点击播放" width="100%">
+</a>
 
 </td>
 </tr>
@@ -63,12 +64,14 @@ Codex / …)。
 
 **③ 趣味科普 · 人类肌肉之谜** — 指定本地 BGM 文件
 
-> 3 分钟以内的趣味科普视频，从科学的角度介绍为什么人类相比其他哺乳动物，不容易保持强大的肌肉。背景音乐采用 `~/Documents/darktown-strutters-ball.mp3`。
+> 使用 spark-video，帮我生成一段 3 分钟以内的趣味科普视频，从科学的角度介绍为什么人类相比其他哺乳动物，不容易保持强大的肌肉。背景音乐采用 `~/Documents/darktown-strutters-ball.mp3`。
 
 </td>
 <td>
 
-<video src="https://cloud.video.taobao.com/vod/s589nKcgwi15bqIZyn8923w-F53_ZIDprlsmbaaodzo.mp4" controls muted></video>
+<a href="https://cloud.video.taobao.com/vod/s589nKcgwi15bqIZyn8923w-F53_ZIDprlsmbaaodzo.mp4" target="_blank">
+<img src="https://img.alicdn.com/imgextra/i3/O1CN01sStqZg20wfXgzHgEI_!!6000000006914-2-tps-5032-2830.png" alt="趣味科普 · 人类肌肉之谜 — 点击播放" width="100%">
+</a>
 
 </td>
 </tr>
@@ -78,34 +81,33 @@ Codex / …)。
 
 **④ 产品广告 · iPhone Pro** — 参考图 + 5 段文案 + 循环 BGM
 
-> 高端手机广告。代言人形象参考 `jason1.jpg` / `jason2.jpg`，产品图 `product-item.webp`，全旁白（代言人不说话），BGM 不够长则循环。
-
 <details>
-<summary>展开完整 prompt（5 段文案）</summary>
+<summary>完整 prompt</summary>
 
-帮我创作一款高端手机的广告，名字叫 **iPhone Pro**。
+使用 spark-video，帮我创作一款高端手机的广告，名字叫 iPhone Pro。
 
-**广告文案：**
+广告文案如下：
 
-1. 你，与众不同，你喜欢超越……iPhone Pro，钛合金 24° 黄金角立体切割……向成功的人生致敬。
-2. 专属一对一保密钥匙。人机分离 10 米自动报警……忘带会提醒，丢失就报警，手机不忘带，机密不泄露。
-3. 隐形拨号，加密通话，无痕迹沟通。幸福往往是分享，而苦痛却常常隐藏……能谈吐有方，会进退自如。
-4. 双密码、双空间，工作生活分别存储，互不干扰。跑得快不一定赢，不跌跟头才是成功。
-5. 顶峰的目标，钛金的气概，真皮的情怀，让我们向成功的人生致敬。
+1、你，与众不同，你喜欢超越。你有梦想，你有力量，你从不把成就作为终点，记住，你的名字叫做：成功！ iPhone Pro，钛合金 24°黄金角立体切割，荷兰进口小牛皮，视网膜高清屏幕，128G 顶配内存，1300 万高清摄像，向成功的人生致敬。
 
-**素材：**
+2、 iPhone Pro，专属一对一保密钥匙。人机分离 10 米，自动报警。很好与优秀只差一点点距离，这段距离叫安全。忘带会提醒，丢失就报警，手机不忘带，机密不泄露。
 
-- 产品图：`~/Documents/product-item.webp`
-- 代言人参考：`~/Documents/jason1.jpg`、`~/Documents/jason2.jpg`
-- 背景音乐：`~/Documents/励志奋斗.mp3`（不够长可循环）
-- 全旁白，代言人不说话
+3、 iPhone Pro，隐形拨号，加密通话，无痕迹沟通。幸福往往是分享，而苦痛却常常隐藏。这就是男人，你的世界，别人不懂。隐形拨号，加密通话，无痕迹沟通，能谈吐有方，会进退自如。
+
+4、懂生活才能会工作， iPhone Pro，双密码，双空间，工作生活分别存储，互不干扰。记住：跑得快不一定赢，不跌跟头才是成功。一部手机，两个密码，两个空间，分别存储，互不干扰。
+
+5、成功并不是高瞻远瞩，而是你本来就站在高处，运筹帷幄，掌控未来，这才是 iPhone Pro，这才是胸怀天下。顶峰的目标，钛金的气概，真皮的情怀，让我们向成功的人生致敬。
+
+产品图片在 `~/Documents/product-item.webp`，广告代言人物形象参考 `~/Documents/jason1.jpg` 和 `~/Documents/jason2.jpg`。采用全旁白，代言人不需要说话。背景音乐用 `~/Documents/励志奋斗.mp3`，如果音乐时长不够可以循环播放。
 
 </details>
 
 </td>
 <td>
 
-<video src="https://cloud.video.taobao.com/vod/x_UZpW3zyL0JC1x6uhATnVRwwrkq9PIEjIsaNuzUPZA.mp4" controls muted></video>
+<a href="https://cloud.video.taobao.com/vod/x_UZpW3zyL0JC1x6uhATnVRwwrkq9PIEjIsaNuzUPZA.mp4" target="_blank">
+<img src="https://img.alicdn.com/imgextra/i3/O1CN01nN98IX1P7FI0i1bs7_!!6000000001793-2-tps-5032-2830.png" alt="产品广告 · iPhone Pro — 点击播放" width="100%">
+</a>
 
 </td>
 </tr>

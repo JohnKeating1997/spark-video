@@ -9,6 +9,8 @@ Cross-platform (Claude Code, Cursor, Qwen Code, Codex, …).
 ## Examples
 
 > **Note:** The videos below were actually generated from **Chinese prompts** (see [`README.zh.md`](README.zh.md) for the originals). The prompts here are English translations for readability — spark-video works equally well in either language, but on-screen text, TTS narration, and rendered dialog will follow whichever language you write your prompt in.
+>
+> **GitHub cannot embed `<video>` in READMEs** — click a cover image to open the full video in a new tab.
 
 <table>
 <tr>
@@ -26,7 +28,9 @@ Cross-platform (Claude Code, Cursor, Qwen Code, Codex, …).
 </td>
 <td>
 
-<video src="https://cloud.video.taobao.com/vod/ToFBk3q6IrT1L6k9TAW3Qu0GdJAWN80uyb75zNelvE8.mp4" controls muted></video>
+<a href="https://cloud.video.taobao.com/vod/ToFBk3q6IrT1L6k9TAW3Qu0GdJAWN80uyb75zNelvE8.mp4" target="_blank">
+<img src="https://img.alicdn.com/imgextra/i4/6000000000158/O1CN01Nko87m1D2Pip5isBr_!!6000000000158-0-tbvideo.jpg" alt="J-drama · First Love — click to play" width="100%">
+</a>
 
 </td>
 </tr>
@@ -36,26 +40,23 @@ Cross-platform (Claude Code, Cursor, Qwen Code, Codex, …).
 
 **② Suspense · The Last Train** — narrator-only, no BGM, custom TTS voice
 
-> A man boards a late-night express, asking every passenger their age — until the final reveal that he was reading lifespans, not ages.
-
 <details>
 <summary>Full prompt</summary>
 
-Generate a suspense short film for me.
+Use spark-video to generate a suspense short film for me.
 
-**Synopsis:** I boarded an express train. About ten minutes before midnight, at an intermediate stop, a man also got on. The moment the doors closed, he seemed to snap back to consciousness and began scanning the faces of the passengers around him. *"Forgive my rudeness — but are you 28 this year?"* he asked me. *"Yes, but how could you tell?"* I replied. He ignored me and turned to others. *"You're 45, aren't you?" — "That's right." — "And you, 62?" — "How did you know?"* He kept this up with every stranger in the car, as if able to read a person's age from their face. The next station was still about 15 minutes away, and every passenger watched him in fascinated silence. Finally he reached the last woman. *"You're 50?" — "Yes — but in five more minutes I'll turn 51!"* she answered, smiling. The man's face went deathly pale.
+**Synopsis:** I boarded an express train. About ten minutes before midnight, at an intermediate stop, a man also got on. The moment the doors closed, he seemed to snap back to consciousness and began scanning the faces of the passengers around him. *"Forgive my rudeness — but are you 28 this year?"* he asked me. *"Yes, but how could you tell?"* I replied — but he ignored me and kept talking to others on his own. *"You're 45 this year, aren't you?" — "That's right." — "And you — 62?" — "How did you know?"* He kept repeating exchanges like this with passengers who seemed like strangers, as if he had a special ability to read a person's age from their face alone. The next stop was still about 15 minutes away, and every passenger in the car — myself included — watched him with curious eyes. Finally he reached the last woman. *"You're 50?" — "Yes — but in five more minutes I'll turn 51!"* she answered with a smile. In an instant the man's face went deathly pale, as if struck by something beyond comprehension.
 
-Use **narrator mode** — third-person voiceover. As the closing line, the narrator adds: *It turned out the numbers he saw were not ages, but lifespans. He realized everyone's number lined up too perfectly with their actual age, and guessed the train was about to crash. That's why he was frantically confirming ages — hoping to flee the moment they pulled into the next station. But now, it seems, it was already too late.*
-
-- Narrator voice: `qwen3-tts` → **Ebona**
-- Important: do **not** let the model generate any background music.
+Use **narrator mode** — retell the story in third person. As the closing line, the narrator adds: *It turned out the numbers he saw were not ages, but lifespans. He noticed that everyone's number matched their actual age almost perfectly, and guessed this train was about to crash. That's why he was frantically confirming ages with everyone — hoping to flee the moment they pulled into the next station. But now, it seems, it was already too late.* Narrator voice: **Ebona** from `qwen3-tts`. Important: do **not** let the model generate any background music.
 
 </details>
 
 </td>
 <td>
 
-<video src="https://cloud.video.taobao.com/vod/MZx8KDUpGBygpU3SuTShGzyVxh0CbeJjpzhfNqSWz1Y.mp4" controls muted></video>
+<a href="https://cloud.video.taobao.com/vod/MZx8KDUpGBygpU3SuTShGzyVxh0CbeJjpzhfNqSWz1Y.mp4" target="_blank">
+<img src="https://img.alicdn.com/imgextra/i4/O1CN01UrL0Si1tTAiwIC1f3_!!6000000005902-2-tps-5032-2830.png" alt="Suspense · The Last Train — click to play" width="100%">
+</a>
 
 </td>
 </tr>
@@ -65,12 +66,14 @@ Use **narrator mode** — third-person voiceover. As the closing line, the narra
 
 **③ Pop-sci · Why humans lose muscle easily** — local BGM file
 
-> An entertaining pop-science video, under 3 minutes, explaining from a scientific angle why humans — compared to other mammals — have such a hard time maintaining strong muscles. Use `~/Documents/darktown-strutters-ball.mp3` as the background music.
+> Use spark-video to generate an entertaining pop-science video, under 3 minutes, explaining from a scientific angle why humans — compared to other mammals — have such a hard time maintaining strong muscles. Use `~/Documents/darktown-strutters-ball.mp3` as the background music.
 
 </td>
 <td>
 
-<video src="https://cloud.video.taobao.com/vod/s589nKcgwi15bqIZyn8923w-F53_ZIDprlsmbaaodzo.mp4" controls muted></video>
+<a href="https://cloud.video.taobao.com/vod/s589nKcgwi15bqIZyn8923w-F53_ZIDprlsmbaaodzo.mp4" target="_blank">
+<img src="https://img.alicdn.com/imgextra/i3/O1CN01sStqZg20wfXgzHgEI_!!6000000006914-2-tps-5032-2830.png" alt="Pop-sci · Why humans lose muscle easily — click to play" width="100%">
+</a>
 
 </td>
 </tr>
@@ -80,34 +83,33 @@ Use **narrator mode** — third-person voiceover. As the closing line, the narra
 
 **④ Product ad · iPhone Pro** — reference images + 5-segment script + looped BGM
 
-> A high-end smartphone ad called **iPhone Pro**. Spokesperson reference: `jason1.jpg` / `jason2.jpg`; product shot: `product-item.webp`; pure voiceover (spokesperson never speaks); loop the BGM if it's too short.
-
 <details>
-<summary>Full prompt (5-segment script)</summary>
+<summary>Full prompt</summary>
 
-Create a high-end smartphone ad for me, named **iPhone Pro**.
+Use spark-video to create a high-end smartphone ad for me, named **iPhone Pro**.
 
-**Ad copy (5 segments):**
+**Ad copy:**
 
-1. *You — extraordinary. You love to surpass. You have dreams, you have power, and you never treat achievement as the finish line. Remember: your name is **Success**. iPhone Pro — titanium-alloy 24° golden-angle bevel cut, imported Dutch calfskin, retina HD display, 128 GB top-spec storage, 13 MP HD camera. A salute to a life of success.*
+1. *You — extraordinary. You love to surpass. You have dreams, you have power, and you never treat achievement as the finish line. Remember: your name is **Success**! iPhone Pro — titanium-alloy 24° golden-angle bevel cut, imported Dutch calfskin, retina HD display, 128 GB top-spec storage, 13 MP HD camera. A salute to a life of success.*
+
 2. *iPhone Pro — your one-to-one private security key. The moment phone and owner are more than 10 meters apart, an alert fires automatically. The gap between "good" and "excellent" is short — and that gap is called **safety**. Forget it nearby and it reminds you; lose it and it alerts you. The phone stays close; the secrets stay safe.*
+
 3. *iPhone Pro — invisible dialing, encrypted calls, traceless communication. Happiness is often shared, but pain is often hidden. This is what it means to be a man — your world, others don't get to understand. Invisible dialing, encrypted calls, traceless communication. Eloquent when speaking; composed when retreating.*
+
 4. *Knowing how to live is what makes you good at work. iPhone Pro — dual password, dual space. Work and life stored separately, neither interferes with the other. Remember: running fast doesn't always win — never tripping is what success looks like. One phone, two passwords, two spaces, kept perfectly apart.*
+
 5. *Success isn't about looking from afar — it's that you were standing on the heights all along, planning ahead, owning the future. That's iPhone Pro. That's what it means to hold the world. Peak ambition, titanium spirit, leather sensibility. Let us salute a life of success.*
 
-**Assets:**
-
-- Product image: `~/Documents/product-item.webp`
-- Spokesperson references: `~/Documents/jason1.jpg`, `~/Documents/jason2.jpg`
-- Background music: `~/Documents/励志奋斗.mp3` (loop if too short)
-- All voiceover — the spokesperson never speaks on-camera
+Product image: `~/Documents/product-item.webp`. Spokesperson references: `~/Documents/jason1.jpg` and `~/Documents/jason2.jpg`. Use pure voiceover — the spokesperson does not speak on-camera. Background music: `~/Documents/励志奋斗.mp3` — loop if the track is too short.
 
 </details>
 
 </td>
 <td>
 
-<video src="https://cloud.video.taobao.com/vod/x_UZpW3zyL0JC1x6uhATnVRwwrkq9PIEjIsaNuzUPZA.mp4" controls muted></video>
+<a href="https://cloud.video.taobao.com/vod/x_UZpW3zyL0JC1x6uhATnVRwwrkq9PIEjIsaNuzUPZA.mp4" target="_blank">
+<img src="https://img.alicdn.com/imgextra/i3/O1CN01nN98IX1P7FI0i1bs7_!!6000000001793-2-tps-5032-2830.png" alt="Product ad · iPhone Pro — click to play" width="100%">
+</a>
 
 </td>
 </tr>
