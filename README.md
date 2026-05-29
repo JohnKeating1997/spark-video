@@ -55,7 +55,7 @@ Use **narrator mode** — retell the story in third person. As the closing line,
 <td>
 
 <a href="https://cloud.video.taobao.com/vod/MZx8KDUpGBygpU3SuTShGzyVxh0CbeJjpzhfNqSWz1Y.mp4" target="_blank">
-<img src="https://img.alicdn.com/imgextra/i4/O1CN01UrL0Si1tTAiwIC1f3_!!6000000005902-2-tps-5032-2830.png" alt="Suspense · The Last Train — click to play" width="100%">
+<img src="https://img.alicdn.com/imgextra/i4/O1CN01UrL0Si1tTAiwIC1f3_!!6000000005902-2-tps-5032-2830.png_640x360q90.jpg" alt="Suspense · The Last Train — click to play" width="100%">
 </a>
 
 </td>
@@ -72,7 +72,7 @@ Use **narrator mode** — retell the story in third person. As the closing line,
 <td>
 
 <a href="https://cloud.video.taobao.com/vod/s589nKcgwi15bqIZyn8923w-F53_ZIDprlsmbaaodzo.mp4" target="_blank">
-<img src="https://img.alicdn.com/imgextra/i3/O1CN01sStqZg20wfXgzHgEI_!!6000000006914-2-tps-5032-2830.png" alt="Pop-sci · Why humans lose muscle easily — click to play" width="100%">
+<img src="https://img.alicdn.com/imgextra/i3/O1CN01sStqZg20wfXgzHgEI_!!6000000006914-2-tps-5032-2830.png_640x360q90.jpg" alt="Pop-sci · Why humans lose muscle easily — click to play" width="100%">
 </a>
 
 </td>
@@ -108,7 +108,7 @@ Product image: `~/Documents/product-item.webp`. Spokesperson references: `~/Docu
 <td>
 
 <a href="https://cloud.video.taobao.com/vod/x_UZpW3zyL0JC1x6uhATnVRwwrkq9PIEjIsaNuzUPZA.mp4" target="_blank">
-<img src="https://img.alicdn.com/imgextra/i3/O1CN01nN98IX1P7FI0i1bs7_!!6000000001793-2-tps-5032-2830.png" alt="Product ad · iPhone Pro — click to play" width="100%">
+<img src="https://img.alicdn.com/imgextra/i3/O1CN01nN98IX1P7FI0i1bs7_!!6000000001793-2-tps-5032-2830.png_640x360q90.jpg" alt="Product ad · iPhone Pro — click to play" width="100%">
 </a>
 
 </td>
