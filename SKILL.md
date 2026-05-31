@@ -3,7 +3,7 @@ name: spark-video-episode
 description: One-shot autopilot orchestrator — runs the full spark-video pipeline (screenwriter ↔ director per-scene parallel → render chain-DAG parallel + per-clip review → stitch). User confirms at 4 gates (+ 1 mode gate at start + 1 BGM gate when bgm/ folder detected). Use when the user wants "make me an episode" in one command.
 ---
 
-# Producer Skill — spark-video 一键制片
+# Producer Skill — spark-video one-shot production
 
 You are the **producer** of the spark-video pipeline. You orchestrate
 the other 5 sub-skills (`spark-video-screenwriter`, `spark-video-director`,
@@ -40,11 +40,11 @@ the corresponding flag was passed in the invocation.
 
 | Gate | When | What you show | What you ask |
 |---|---|---|---|
-| **GATE 0** | Before any work, unless `--mode` was set | One-paragraph explainer of drama vs narration mode | "Drama (短剧, default) or Narration (旁白解说)?" |
+| **GATE 0** | Before any work, unless `--mode` was set | One-paragraph explainer of drama vs narration mode | "Drama (short drama, default) or Narration (voiceover recap)?" |
 | **GATE 0.5** | After GATE 0, only if `projects/<p>/bgm/` or `projects/<p>/<ep>/bgm/` exists with audio files | List of available BGM tracks | "How should I use BGM? (a) off — model decides; (b) global — one track for the whole video; (c) scene — director picks per-scene. Also: forbid the video model from generating its own BGM? (default: yes)" |
-| **GATE 1** | After screenwriter finishes all scenes/scene-NN.md and you've compiled into `script.md` | The merged `script.md` | "剧本 OK 吗? Approve to proceed to storyboarding, or describe changes." |
-| **GATE 2** | After director finishes all scenes/scene-NN.json and you've compiled+validated into `storyboard.json`. If `--vfx`, run `spark-video-vfx-review` first and show its report. | `storyboard.json` summary (shot count, parallel groups, estimated duration & cost) + VFX report if run | "分镜 OK 吗? Approve to render, or describe changes." |
-| **GATE 3** | After all shots rendered + reviewed (winner_version set for each, escalations resolved) | Per-shot summary (winner version, best score, any that fell below threshold accepted-anyway) | "渲染 OK 吗? Approve to stitch final, or specify shots to re-render." |
+| **GATE 1** | After screenwriter finishes all scenes/scene-NN.md and you've compiled into `script.md` | The merged `script.md` | "Script OK? Approve to proceed to storyboarding, or describe changes." |
+| **GATE 2** | After director finishes all scenes/scene-NN.json and you've compiled+validated into `storyboard.json`. If `--vfx`, run `spark-video-vfx-review` first and show its report. | `storyboard.json` summary (shot count, parallel groups, estimated duration & cost) + VFX report if run | "Storyboard OK? Approve to render, or describe changes." |
+| **GATE 3** | After all shots rendered + reviewed (winner_version set for each, escalations resolved) | Per-shot summary (winner version, best score, any that fell below threshold accepted-anyway) | "Renders OK? Approve to stitch final, or specify shots to re-render." |
 | **GATE 4** | After stitch completes | Path to `final/<project>-<episode>.mp4`, duration, file size | "OK to finalize? Want to re-render any shots or adjust BGM mix?" |
 
 At any gate, if user says "no", listen to their feedback, do the edits,
@@ -137,10 +137,10 @@ test -f projects/$SPARK_VIDEO_PROJECT/lore.md || \
 
 ### Step 1 — GATE 0: mode
 Unless `--mode` was passed, present the two modes:
-- **drama** (短剧, default) — every shot is a long self-contained clip
+- **drama** (short drama, default) — every shot is a long self-contained clip
   driven by dialog + action. Use for 2–5 min original shorts.
-- **narration** (旁白解说) — 旁白 beats become short TTS-driven shots;
-  对白 beats stay drama. Maximises parallelism. Use for 10-min recap
+- **narration** (voiceover recap) — narration beats become short TTS-driven shots;
+  dialog beats stay drama. Maximises parallelism. Use for 10-min recap
   style content.
 
 Record the answer; pass to screenwriter + director as `--mode <choice>`.
@@ -291,13 +291,13 @@ back to the relevant step.
 The pattern is always: **listen → identify scope → invoke right
 sub-skill → re-show**. Examples:
 
-- "剧本不行, 钱夫人太弱" at GATE 1 → invoke `spark-video-screenwriter`
+- "The script is weak — 钱夫人 needs more bite" at GATE 1 → invoke `spark-video-screenwriter`
   with scope = which scenes, plus the user's note. Re-compile script.md,
   re-show.
-- "S03-002 这个 shot 太暗" at GATE 3 → don't re-render the whole
+- "S03-002 is too dark" at GATE 3 → don't re-render the whole
   storyboard. Just `uv run scripts/render_shot.py --shot S03-002 --force
   --reset-attempts` (auto-runs clip-review). Re-show updated shot.
-- "BGM 太响" at GATE 4 → edit `Storyboard.bgm.volume` (or
+- "BGM is too loud" at GATE 4 → edit `Storyboard.bgm.volume` (or
   `bgm-config.json`), re-run `uv run scripts/stitch.py`.
 
 ## DON'Ts

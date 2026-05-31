@@ -3,7 +3,7 @@ name: spark-video-episode
 description: One-shot autopilot orchestrator — runs the full spark-video pipeline (screenwriter ↔ director per-scene parallel → render chain-DAG parallel + per-clip review → stitch). User confirms at 4 gates (+ 1 mode gate at start + 1 BGM gate when bgm/ folder detected). Use when the user wants "make me an episode" in one command.
 ---
 
-# Producer Skill — spark-video 一键制片
+# Producer Skill — spark-video One-Shot Production
 
 You are the **producer** of the spark-video pipeline. You orchestrate
 the other 5 sub-skills (`spark-video-screenwriter`, `spark-video-director`,
@@ -37,15 +37,38 @@ the corresponding flag was passed in the invocation.
 
 | Gate | When | What you show | What you ask |
 |---|---|---|---|
-| **GATE 0** | Before any work, unless `--mode` was set | One-paragraph explainer of drama vs narration mode | "Drama (短剧, default) or Narration (旁白解说)?" |
+| **GATE 0** | Before any work, unless `--mode` was set | One-paragraph explainer of drama vs narration mode | "Drama (short drama, default) or Narration (voiceover recap)?" |
 | **GATE 0.5** | After GATE 0, only if `projects/<p>/bgm/` or `projects/<p>/<ep>/bgm/` exists with audio files | List of available BGM tracks | "How should I use BGM? (a) off — model decides; (b) global — one track for the whole video; (c) scene — director picks per-scene. Also: forbid the video model from generating its own BGM? (default: yes)" |
-| **GATE 1** | After screenwriter finishes all scenes/scene-NN.md and you've compiled into `script.md` | The merged `script.md` | "剧本 OK 吗? Approve to proceed to storyboarding, or describe changes." |
-| **GATE 2** | After director finishes all scenes/scene-NN.json and you've compiled+validated into `storyboard.json`. If `--vfx`, run `spark-video-vfx-review` first and show its report. | `storyboard.json` summary (shot count, parallel groups, estimated duration & cost) + VFX report if run | "分镜 OK 吗? Approve to render, or describe changes." |
-| **GATE 3** | After all shots rendered + reviewed (winner_version set for each, escalations resolved) | Per-shot summary (winner version, best score, any that fell below threshold accepted-anyway) | "渲染 OK 吗? Approve to stitch final, or specify shots to re-render." |
+| **GATE 1** | After screenwriter finishes all scenes/scene-NN.md and you've compiled into `script.md` | The merged `script.md` | "Script OK? Approve to proceed to storyboarding, or describe changes." |
+| **GATE 2** | After director finishes all scenes/scene-NN.json and you've compiled+validated into `storyboard.json`. If `--vfx`, run `spark-video-vfx-review` first and show its report. | `storyboard.json` summary (shot count, parallel groups, estimated duration & cost) + VFX report if run | "Storyboard OK? Approve to render, or describe changes." |
+| **GATE 3** | After all shots rendered + reviewed (winner_version set for each, escalations resolved) | Per-shot summary (winner version, best score, any that fell below threshold accepted-anyway) | "Renders OK? Approve to stitch final, or specify shots to re-render." |
 | **GATE 4** | After stitch completes | Path to `final/<project>-<episode>.mp4`, duration, file size | "OK to finalize? Want to re-render any shots or adjust BGM mix?" |
 
 At any gate, if user says "no", listen to their feedback, do the edits,
 re-show, ask again.
+
+### Verify before you ask (gate.py)
+
+Before you present GATE 1–4 to the user, run the deterministic verifier
+so you never ask for approval on top of a half-finished stage (e.g. a
+storyboard with unscored clips, or a stitch with no viewer):
+
+```bash
+uv run scripts/gate.py check script      # before GATE 1
+uv run scripts/gate.py check storyboard  # before GATE 2
+uv run scripts/gate.py check render      # before GATE 3
+uv run scripts/gate.py check final       # before GATE 4
+# uv run scripts/gate.py check all --json # machine-readable, for a dashboard
+```
+
+`gate.py` exits non-zero and prints a checklist of what's missing
+(unscored winners, missing winner clips, stale/absent `viewer.html`,
+unresolved escalations, …). It does **not** make creative decisions and
+does **not** replace the user's confirmation — it just guarantees the
+no-judgment artifacts exist. If a check fails, fix the gap (usually:
+re-run `render_shot.py` for the offending shot, or `stitch.py`) before
+showing the gate. Full schema validation still comes from
+`storyboard.py validate`.
 
 ## Pipeline flow (with parallelism markers)
 
@@ -111,10 +134,10 @@ test -f projects/$SPARK_VIDEO_PROJECT/lore.md || \
 
 ### Step 1 — GATE 0: mode
 Unless `--mode` was passed, present the two modes:
-- **drama** (短剧, default) — every shot is a long self-contained clip
+- **drama** (short drama, default) — every shot is a long self-contained clip
   driven by dialog + action. Use for 2–5 min original shorts.
-- **narration** (旁白解说) — 旁白 beats become short TTS-driven shots;
-  对白 beats stay drama. Maximises parallelism. Use for 10-min recap
+- **narration** (voiceover recap) — narration beats become short TTS-driven shots;
+  dialog beats stay drama. Maximises parallelism. Use for 10-min recap
   style content.
 
 Record the answer; pass to screenwriter + director as `--mode <choice>`.
@@ -165,6 +188,9 @@ uv run scripts/storyboard.py estimate
 ```
 
 ### Step 5 — GATE 1: script.md
+```bash
+uv run scripts/gate.py check script
+```
 Show the user the merged `script.md`. Wait for approval.
 
 If they want changes, identify which scene(s), invoke screenwriter on
@@ -180,6 +206,11 @@ Print the storyboard summary:
     the warning explicitly.
 
 If `--vfx`, run `spark-video-vfx-review` and show its report alongside.
+
+```bash
+uv run scripts/gate.py check storyboard   # structural completeness
+uv run scripts/storyboard.py validate     # full schema lint
+```
 
 Wait for approval. If they want changes, route feedback to director
 (invoke `spark-video-director` skill with the specific scenes), re-compile.
@@ -197,7 +228,9 @@ in parallel up to `SPARK_VIDEO_MAX_CONCURRENCY`.
 
 Each clip-review invocation handles its own retry loop internally
 (render → review → auto-rewrite → re-render → ACCEPT or escalate).
-You only intervene when:
+Scoring + winner promotion are deterministic inside `render_shot.py`
+now (see `spark-video-clip-review`); the sub-skill only owns the
+prompt-rewrite judgment and escalation. You only intervene when:
 - Escalation: `needs_director_rewrite.json` appears. Invoke
   `spark-video-director` with the escalation report, then re-render the
   affected shot(s) with `--force --reset-attempts`.
@@ -211,7 +244,14 @@ each shot.
 
 ### Step 8 — GATE 3: per-shot summary
 
-Once all shots have `winner_version` set:
+Verify completeness first — this catches any shot that rendered but
+never got scored/promoted (the classic inferior-agent miss):
+
+```bash
+uv run scripts/gate.py check render        # must pass before you ask the user
+```
+
+Then summarise. Once all shots have `winner_version` set:
 
 ```bash
 jq '.[] | {shot: .shot_id, ver: .winner_version,
@@ -239,10 +279,15 @@ uv run scripts/stitch.py --crossfade 0.5
 
 ### Step 10 — GATE 4: final review
 
+```bash
+uv run scripts/gate.py check final   # final mp4 present + viewer.html fresh
+```
+
 Show:
 - Final mp4 path
 - Total duration (vs target)
 - File size
+- `viewer.html` path (the self-contained production archive)
 
 Ask if user wants to re-render any shots or adjust BGM. If yes, loop
 back to the relevant step.
@@ -265,13 +310,13 @@ back to the relevant step.
 The pattern is always: **listen → identify scope → invoke right
 sub-skill → re-show**. Examples:
 
-- "剧本不行, 钱夫人太弱" at GATE 1 → invoke `spark-video-screenwriter`
+- "Script is weak — 钱夫人 needs more bite" at GATE 1 → invoke `spark-video-screenwriter`
   with scope = which scenes, plus the user's note. Re-compile script.md,
   re-show.
-- "S03-002 这个 shot 太暗" at GATE 3 → don't re-render the whole
+- "S03-002 is too dark" at GATE 3 → don't re-render the whole
   storyboard. Just `uv run scripts/render_shot.py --shot S03-002 --force
   --reset-attempts` (auto-runs clip-review). Re-show updated shot.
-- "BGM 太响" at GATE 4 → edit `Storyboard.bgm.volume` (or
+- "BGM is too loud" at GATE 4 → edit `Storyboard.bgm.volume` (or
   `bgm-config.json`), re-run `uv run scripts/stitch.py`.
 
 ## DON'Ts
@@ -295,3 +340,10 @@ sub-skill → re-show**. Examples:
   limits will spike and fail the whole batch.
 - ❌ Don't write `script.md` or `storyboard.json` yourself — always go
   through `uv run scripts/storyboard.py compile` so validation runs.
+- ❌ Don't present a gate to the user before `gate.py check <gate>`
+  passes (or you've explicitly surfaced the failing checks to them).
+  This is the cheap insurance against shipping a stage with a skipped
+  step (unscored clips, missing `viewer.html`, …).
+- ❌ Don't hand-stitch with raw `ffmpeg`. Always `uv run scripts/stitch.py`
+  — it also (re)builds `viewer.html`. Skipping it is the usual reason
+  the viewer is missing/stale at GATE 4.

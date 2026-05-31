@@ -148,7 +148,7 @@ def _lint(sb: Storyboard, ep_dir: Path) -> list[str]:
                 sets_seen.add(effective_set)
         if len(sets_seen) > 1:
             warns.append(f"chain group {group[0]}..{group[-1]} mixes set_ids "
-                         f"{sorted(sets_seen)} (灯光统一铁律: split the chain)")
+                         f"{sorted(sets_seen)} (lighting consistency rule: split the chain)")
 
     return warns
 

@@ -114,19 +114,21 @@ class Shot(BaseModel):
         ),
     )
 
-    # ── 山音融合 ──────────────────────────────────────────
+    # ── Shanyin fusion ──────────────────────────────────────────
     # Why this shot exists in the story. Specific to visual means
-    # (e.g. "用低角度仰拍 + 缓慢推近放大钱夫人的优越感"), not vague labels
-    # (e.g. "展现冲突"). The CLI doesn't render this — it's metadata for
+    # (e.g. "low-angle push-in to amplify 钱夫人's superiority"), not vague labels
+    # (e.g. "show conflict"). The CLI doesn't render this — it's metadata for
     # the director's own discipline + VFX reviewer's quality gate.
     narrative_purpose: str | None = Field(
         default=None,
         description=(
-            "山音融合：每个 shot 必填。具体到视听手段, 不写'展现冲突'等空话。"
+            "Shanyin fusion: required on every shot. Be specific about "
+            "audiovisual means; avoid empty labels like '展现冲突'."
         ),
     )
-    # Optional shot-group affiliation (山音"镜头组"概念)。同组镜头共同
-    # 完成一个叙事单元 (蒙太奇组 / 递进组 / 因果组 / 对比组)。
+    # Optional shot-group affiliation (Shanyin "shot group" concept). Shots
+    # in the same group jointly complete one narrative unit (montage /
+    # progression / cause-effect / contrast group).
     shot_group_id: str | None = Field(default=None, description="e.g. 'G01'")
     shot_group_role: Literal[
         "建立", "递进", "反应", "对比", "收尾"
@@ -170,7 +172,7 @@ class Shot(BaseModel):
     )
 
     seed: int | None = None
-    candidates: int = Field(default=1, ge=1, le=4, description="N抽卡候选")
+    candidates: int = Field(default=1, ge=1, le=4, description="N candidate renders per shot")
 
     set_id: str | None = Field(
         default=None,
@@ -181,7 +183,7 @@ class Shot(BaseModel):
             "(common in narration mode: 工地·夜 → 婚车·日 → 酒店·黄昏 are "
             "three beats inside one scene, each needs its own set image). "
             "**One set folder = one lighting state**: never reuse a "
-            "白天客栈 set for a 夜晚客栈 shot — scaffold a second set "
+            "daytime 客栈 set for a nighttime 客栈 shot — scaffold a second set "
             "instead. Setting set_id to empty string ('') explicitly "
             "disables the fallback for this shot."
         ),
@@ -312,8 +314,8 @@ class Scene(BaseModel):
             "without extension). Only used when ``Storyboard.bgm.mode == "
             "'scene'`` — the stitcher mixes this track underneath every "
             "clip in this scene at ``Storyboard.bgm.volume``. Director "
-            "picks the track based on the scene's emotional beat (煽情 "
-            "→ slow piano, 惊悚 → low drone, 轻喜 → upbeat ukulele, …). "
+            "picks the track based on the scene's emotional beat (sentimental "
+            "→ slow piano, thriller → low drone, light comedy → upbeat ukulele, …). "
             "Leave null to skip BGM on this scene."
         ),
     )
@@ -551,7 +553,7 @@ class Storyboard(BaseModel):
         """Soft continuity / pacing checks. Never blocks render."""
         warnings: list[str] = []
 
-        # 山音融合: every shot should have a non-trivial narrative_purpose.
+        # Shanyin fusion: every shot should have a non-trivial narrative_purpose.
         # Soft warning only — never blocks render. VFX reviewer enforces.
         _vague = {
             "", "展现冲突", "推进剧情", "推进故事", "建立场景",
@@ -569,14 +571,15 @@ class Storyboard(BaseModel):
                 f"narrative_purpose missing on {len(missing_purpose)} shot(s): "
                 f"{', '.join(missing_purpose[:5])}"
                 f"{'...' if len(missing_purpose) > 5 else ''}. "
-                f"山音铁律：每个 shot 必填具体叙事目的。"
+                f"Shanyin rule: every shot must have a specific narrative purpose."
             )
         if vague_purpose:
             warnings.append(
                 f"narrative_purpose too vague on {len(vague_purpose)} shot(s): "
                 f"{', '.join(vague_purpose[:5])}"
                 f"{'...' if len(vague_purpose) > 5 else ''}. "
-                f"要具体到视听手段, 例如 '用低角度仰拍 + 缓慢推近放大钱夫人的优越感'。"
+                f"Be specific about audiovisual means, e.g. "
+                f"'low-angle push-in to amplify 钱夫人's superiority'."
             )
 
         # Narration-shot recommendations (soft — never block render).
@@ -679,9 +682,9 @@ class Storyboard(BaseModel):
                     f"Scene.set_id, or remove the per-shot overrides."
                 )
 
-        # 灯光统一铁律 — within ONE chain group, every r2v shot must
+        # Lighting consistency rule — within ONE chain group, every r2v shot must
         # resolve to the SAME effective set_id (or no set at all).
-        # Mixing 客栈-白天 + 客栈-夜晚 inside one chain produces a
+        # Mixing 客栈-day + 客栈-night inside one chain produces a
         # discontinuous lighting flicker (the chained first_frame is
         # already locked to the previous shot's lighting, but the new
         # set image fights it). Splits between chain groups are fine —
@@ -707,8 +710,8 @@ class Storyboard(BaseModel):
                         f"{s.id}: chain rooted at {anchor_shot} uses "
                         f"set_id={anchor_set!r} but this shot resolves to "
                         f"set_id={eff!r}. Within one chain group every "
-                        f"r2v shot must share the same set (灯光/色调/时段 "
-                        f"必须统一). Split the chain "
+                        f"r2v shot must share the same set (lighting / "
+                        f"color grade / time of day must match). Split the chain "
                         f"(use_prev_last_frame_as_first=false on this shot) "
                         f"or align the set_id."
                     )
