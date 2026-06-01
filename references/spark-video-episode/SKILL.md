@@ -215,32 +215,45 @@ uv run scripts/storyboard.py validate     # full schema lint
 Wait for approval. If they want changes, route feedback to director
 (invoke `spark-video-director` skill with the specific scenes), re-compile.
 
-### Step 7 — Zone 2 + 3: render with per-clip review
+### Step 7 — Zone 2 + 3: render all shots
+
+Use `render_all.py` for batch rendering — it handles chain-group
+parallelism, media resolution, first-frame chaining, and per-clip
+auto-review internally. **Never manually fan out `render_shot.py`
+calls or write ad-hoc batch scripts.**
 
 ```bash
-uv run scripts/storyboard.py graph
-# → [["S01-001","S01-002"], ["S02-001"], ...]
+# Full reset — re-render everything from scratch:
+uv run scripts/render_all.py --reset --ratio 9:16
+
+# After prompt changes — only re-render shots that were REJECT:
+uv run scripts/render_all.py --rejected-only
+
+# Re-render specific shots:
+uv run scripts/render_all.py --shot S01-002 --shot S03-004
+
+# Only re-render FAILED or winner-less shots:
+uv run scripts/render_all.py --failed-only
 ```
 
-For each chain group, fan out a `spark-video-clip-review` invocation
-that loops through the group's shots sequentially. Different groups run
-in parallel up to `SPARK_VIDEO_MAX_CONCURRENCY`.
+`render_all.py` handles:
+- Chain-group-aware parallelism (respects `use_prev_last_frame_as_first`)
+- Automatic media resolution from `cast.json` / `movie_set.json` / `props.json`
+- Per-clip auto-review via `render_shot.py` (includes single-axis veto)
+- Winner promotion on ACCEPT
+- `viewer.html` refresh after each shot
 
-Each clip-review invocation handles its own retry loop internally
-(render → review → auto-rewrite → re-render → ACCEPT or escalate).
-Scoring + winner promotion are deterministic inside `render_shot.py`
-now (see `spark-video-clip-review`); the sub-skill only owns the
-prompt-rewrite judgment and escalation. You only intervene when:
+The stdout JSON summary includes `rejected_shots` with each shot's
+`review.critique`. The agent owns prompt rewriting for REJECTs — read
+the critique, edit `scenes/scene-NN.json`, then re-run with
+`--rejected-only`.
+
+You only intervene beyond `render_all.py` when:
 - Escalation: `needs_director_rewrite.json` appears. Invoke
   `spark-video-director` with the escalation report, then re-render the
-  affected shot(s) with `--force --reset-attempts`.
-- Hard failure: a chain group's render_shot.py exits with non-zero
-  status. Read `logs/model_calls.jsonl` to diagnose, then retry or
-  escalate to the user.
-
-Monitor progress via `tail -f projects/<p>/<ep>/logs/model_calls.jsonl
-| jq .` or by polling `shots_state.json` for `winner_version` set on
-each shot.
+  affected shot(s) with `--shot <id>`.
+- Hard failure: check `logs/model_calls.jsonl` to diagnose, then retry
+  or escalate to the user.
 
 ### Step 8 — GATE 3: per-shot summary
 

@@ -282,6 +282,18 @@ default cap is `SPARK_VIDEO_MAX_CONCURRENCY=4`.
 Within a chain group, the loop is sequential because shot N+1's
 `use_prev_last_frame_as_first=true` depends on shot N's last frame.
 
+For full-episode batch rendering, use `render_all.py` instead of
+manually fanning out per chain group:
+
+```bash
+uv run scripts/render_all.py --reset
+# Or after prompt rewrites:
+uv run scripts/render_all.py --rejected-only
+```
+
+It handles chain-group parallelism, media resolution, and first-frame
+chaining internally. You only intervene for prompt rewrites on REJECT.
+
 ## DON'Ts
 
 - ❌ Don't modify `storyboard.json` or `scenes/scene-NN.json` yourself

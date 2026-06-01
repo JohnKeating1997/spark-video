@@ -82,6 +82,20 @@ def threshold() -> float:
         return 7.0
 
 
+def _veto_floor() -> float:
+    """Any single axis scoring at or below this floor triggers an automatic REJECT.
+
+    Default 5.0 — a score of 5 or below on any axis means a critical defect
+    (e.g. wrong action, broken anatomy, wrong identity) that should not pass
+    regardless of how high other axes score.
+    """
+    raw = _env("SPARK_VIDEO_REVIEW_VETO_FLOOR", "VIDEOGEN_REVIEW_VETO_FLOOR", default="5.0")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 5.0
+
+
 def _timeout_s() -> int:
     try:
         return int(_env("SPARK_VIDEO_REVIEW_TIMEOUT_S",
@@ -392,15 +406,22 @@ def score_clip(
         if parsed:
             breakdown = parsed["breakdown"]
             score = round(sum(breakdown.values()) / len(AXES), 2)
-            # Threshold is authoritative; trust the model's verdict only if
-            # it agrees with the arithmetic (defends against lenient judges).
-            verdict = "ACCEPT" if score >= thr else "REJECT"
+            # Single-axis veto: any axis <= 5 forces REJECT regardless of avg.
+            veto_floor = _veto_floor()
+            vetoed_axes = [k for k, v in breakdown.items() if v <= veto_floor]
+            if vetoed_axes:
+                verdict = "REJECT"
+            elif score >= thr:
+                verdict = "ACCEPT"
+            else:
+                verdict = "REJECT"
             return _finalize({
                 "score": score,
                 "breakdown": breakdown,
                 "verdict": verdict,
                 "model_verdict": parsed.get("verdict") or None,
                 "critique": parsed.get("critique", ""),
+                "vetoed_axes": vetoed_axes if vetoed_axes else None,
             })
         last_err = f"could not parse 6-axis JSON from omni output: {proc.stdout[-400:].strip()}"
 

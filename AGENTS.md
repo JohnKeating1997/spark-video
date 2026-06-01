@@ -41,6 +41,7 @@ scripts/                     ← deterministic tools (the "tools" the skills cal
   doctor.sh                  ← dependency check (bl + ffmpeg + uv + python3.10+)
   storyboard.py              ← compile / validate / estimate / graph
   render_shot.py             ← render one shot; auto-scores + promotes winner; owns shots_state.json
+  render_all.py              ← batch-render all/failed/rejected shots; chain-group parallel; media auto-resolve
   gate.py                    ← deterministic gate verifier (verify-don't-constrain)
   stitch.py                  ← concat + TTS narration + BGM mix → final mp4
   scaffold.py · build_viewer.py · tts_qwen.py · install-deps.sh · install-hooks.sh · pre-commit
