@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -215,6 +216,90 @@ def _lint(sb: Storyboard, ep_dir: Path) -> list[str]:
     return warns
 
 
+def _llm_continuity_check(sb: Storyboard, ep_dir: Path) -> list[str]:
+    """Use LLM to check narrative continuity across shots within each scene.
+
+    Best-effort: returns [] on any failure (API down, timeout, parse error).
+    Never blocks compile.
+    """
+    bl = _HERE / "bl"
+    if not bl.exists():
+        return []
+
+    # Read lore for context
+    proj_dir = ep_dir.parent
+    lore_path = proj_dir / "lore.md"
+    lore_text = lore_path.read_text(encoding="utf-8")[:500] if lore_path.exists() else ""
+
+    # Build per-scene summaries
+    scene_blocks = []
+    shot_by_scene: dict[str, list] = {}
+    for s in sb.shots:
+        shot_by_scene.setdefault(s.scene, []).append(s)
+
+    for sc in sb.scenes:
+        shots = shot_by_scene.get(sc.id, [])
+        if not shots:
+            continue
+        lines = [f"## Scene {sc.id}: {sc.name} (set: {sc.set_id or 'none'})"]
+        for s in shots:
+            lines.append(
+                f"  {s.id} [{s.kind}, {s.duration}s, chars={s.characters}]: "
+                f"{s.prompt[:120]}{'...' if len(s.prompt) > 120 else ''}"
+            )
+        scene_blocks.append("\n".join(lines))
+
+    prompt = (
+        "你是一个影视剧本连贯性审查员。下面是一部短剧的分镜列表，按场景分组。\n"
+        "请检查以下问题，只输出有问题的条目，每条一行，格式: `[SHOT_ID] 问题描述`。\n"
+        "如果没有问题，输出一个空行。\n\n"
+        "检查项：\n"
+        "1. 同一场景内时间矛盾（如一个镜头白天，下一个镜头深夜）\n"
+        "2. 同一场景内地点矛盾（如一个镜头在办公室，下一个突然在户外但没有转场说明）\n"
+        "3. 角色行为逻辑矛盾（如角色已离开但下一个镜头又出现）\n"
+        "4. 动作连贯性问题（如前一个镜头角色站着，下一个镜头突然坐着，且是链式续接）\n"
+        "5. 台词内容与场景设定冲突\n\n"
+    )
+    if lore_text:
+        prompt += f"世界设定摘要:\n{lore_text}\n\n"
+    prompt += "分镜列表:\n" + "\n\n".join(scene_blocks)
+
+    try:
+        proc = subprocess.run(
+            [str(bl), "text", "chat", "--model", "qwen-plus",
+             "--message", prompt],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            return []
+        # Parse output — extract lines starting with [S
+        output = proc.stdout
+        # Try to extract from JSON envelope
+        try:
+            envelope = json.loads(output)
+            choices = envelope.get("choices") or []
+            if choices:
+                content = choices[0].get("message", {}).get("content", "")
+            else:
+                content = output
+        except (json.JSONDecodeError, ValueError):
+            content = output
+
+        warns = []
+        for line in content.strip().splitlines():
+            line = line.strip()
+            if not line or line == "无" or line == "没有问题":
+                continue
+            if line.startswith("[S") or line.startswith("- [S") or line.startswith("S0"):
+                warns.append(line.lstrip("- "))
+            elif "S0" in line and ("矛盾" in line or "冲突" in line or "不一致" in line
+                                   or "问题" in line):
+                warns.append(line.lstrip("- "))
+        return warns
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return []
+
+
 _DAY_KEYWORDS = ("白天", "阳光", "日光", "晴天", "日照", "午后", "上午", "下午", "daylight")
 _NIGHT_KEYWORDS = ("夜晚", "夜色", "深夜", "黑夜", "月光", "凌晨", "夜市", "霓虹")
 
@@ -340,6 +425,16 @@ def cmd_compile(args: argparse.Namespace) -> int:
     sb_path.write_text(json.dumps(sb.model_dump(), ensure_ascii=False, indent=2))
     print(f"wrote {sb_path} ({len(sb.scenes)} scenes, {len(sb.shots)} shots)",
           file=sys.stderr)
+
+    # LLM continuity check (best-effort — never blocks compile)
+    continuity_warns = _llm_continuity_check(sb, ep_dir)
+    if continuity_warns:
+        print(f"\n{'='*60}", file=sys.stderr)
+        print("CONTINUITY ISSUES (from LLM review):", file=sys.stderr)
+        for w in continuity_warns:
+            print(f"  ⚠ {w}", file=sys.stderr)
+        print(f"{'='*60}\n", file=sys.stderr)
+
     return 0
 
 
