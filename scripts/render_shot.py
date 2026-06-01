@@ -243,6 +243,8 @@ def main() -> int:
         if not src.exists():
             print(f"ERROR: {src} not found", file=sys.stderr)
             return 2
+        if dst.is_symlink() or dst.exists():
+            dst.unlink()
         import shutil as _sh
         _sh.copy2(src, dst)
 
@@ -419,6 +421,8 @@ def main() -> int:
         accept = review.get("verdict") == "ACCEPT"
         winner_dst = ep_dir / "clips" / f"{args.shot}.mp4"
         if accept:
+            if winner_dst.is_symlink() or winner_dst.exists():
+                winner_dst.unlink()
             import shutil as _sh
             _sh.copy2(clip_path, winner_dst)
 
