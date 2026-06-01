@@ -129,6 +129,26 @@ def _lint(sb: Storyboard, ep_dir: Path) -> list[str]:
         if sc.set_id and set_names and sc.set_id not in set_names:
             warns.append(f"scene {sc.id}: set_id '{sc.set_id}' not in movie_set.json")
 
+    # Dialog duration vs shot duration
+    _CHARS_PER_SEC = 4.0
+    _BUFFER_S = 2  # leave room for action/reaction
+    for shot in sb.shots:
+        dialog = _extract_dialog(shot.prompt)
+        if dialog:
+            est_s = len(dialog) / _CHARS_PER_SEC
+            avail_s = shot.duration - _BUFFER_S
+            if est_s > shot.duration:
+                warns.append(
+                    f"{shot.id}: dialog too long for duration — "
+                    f"~{len(dialog)} chars ≈ {est_s:.0f}s speech, "
+                    f"but shot is only {shot.duration}s "
+                    f"(will be truncated; split the dialog or increase duration)")
+            elif est_s > avail_s:
+                warns.append(
+                    f"{shot.id}: dialog tight — "
+                    f"~{len(dialog)} chars ≈ {est_s:.0f}s speech in a {shot.duration}s shot "
+                    f"(leaves <{_BUFFER_S}s for action; consider splitting)")
+
     # Chain-group lighting consistency
     groups = compute_chain_groups(sb)
     shot_by_id = {s.id: s for s in sb.shots}
@@ -151,6 +171,16 @@ def _lint(sb: Storyboard, ep_dir: Path) -> list[str]:
                          f"{sorted(sets_seen)} (lighting consistency rule: split the chain)")
 
     return warns
+
+
+def _extract_dialog(prompt: str) -> str | None:
+    """Extract dialog text from a shot prompt (after '说道：' or '说道:')."""
+    import re
+    m = re.search(r"说道[：:](.+?)(?:真人写实|$)", prompt, re.DOTALL)
+    if not m:
+        return None
+    dialog = m.group(1).strip().rstrip("。！？，、")
+    return dialog if len(dialog) > 2 else None
 
 
 def _safe_load_json(p: Path) -> dict | None:

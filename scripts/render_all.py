@@ -254,6 +254,7 @@ def _render_chain_group(
     state: dict,
     *,
     mode: str,
+    target_shots: list[str] | None = None,
     ratio: str | None,
     provider: str | None,
     no_review: bool,
@@ -287,7 +288,7 @@ def _render_chain_group(
             "--prompt", shot.prompt,
             "--duration", str(shot.duration),
         ]
-        if mode == "reset":
+        if mode == "reset" and not target_shots:
             cmd.append("--reset-attempts")
         else:
             cmd.append("--force")
@@ -388,14 +389,10 @@ def main() -> int:
         state_path.write_text("{}")
         state = {}
         print("[render_all] state reset — rendering all shots from scratch")
-    elif mode == "reset" and args.shot:
-        state = _load_json(state_path) or {}
-        for sid in args.shot:
-            state.pop(sid, None)
-        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
-        print(f"[render_all] reset state for {args.shot} only")
     else:
         state = _load_json(state_path) or {}
+        if args.shot:
+            print(f"[render_all] re-rendering {args.shot} (preserving version history)")
 
     cast_index = _build_cast_index(ep_dir)
     set_index = _build_set_index(ep_dir)
@@ -431,7 +428,8 @@ def main() -> int:
                 _render_chain_group,
                 group, shots_by_id, scenes_by_id,
                 cast_index, set_index, prop_index, state,
-                mode=mode, ratio=args.ratio, provider=args.provider,
+                mode=mode, target_shots=args.shot or None,
+                ratio=args.ratio, provider=args.provider,
                 no_review=args.no_review,
             )
             futures[future] = i
