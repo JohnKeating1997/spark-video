@@ -170,7 +170,74 @@ def _lint(sb: Storyboard, ep_dir: Path) -> list[str]:
             warns.append(f"chain group {group[0]}..{group[-1]} mixes set_ids "
                          f"{sorted(sets_seen)} (lighting consistency rule: split the chain)")
 
+    # Time-of-day / setting continuity within each scene
+    for sc in sb.scenes:
+        scene_shots = [s for s in sb.shots if s.scene == sc.id]
+        if not scene_shots:
+            continue
+
+        # Detect set_id time-of-day
+        effective_set = sc.set_id or ""
+        set_tod = _detect_time_of_day_from_set(effective_set)
+
+        shot_tods = []
+        for shot in scene_shots:
+            prompt_tod = _detect_time_of_day(shot.prompt)
+            shot_set = shot.set_id or effective_set or ""
+            shot_set_tod = _detect_time_of_day_from_set(shot_set)
+
+            # Prompt vs its own set_id
+            if prompt_tod and shot_set_tod and prompt_tod != shot_set_tod:
+                warns.append(
+                    f"{shot.id}: time-of-day conflict — prompt says "
+                    f"'{prompt_tod}' but set_id '{shot_set}' implies "
+                    f"'{shot_set_tod}'")
+
+            # Prompt vs scene set_id
+            if prompt_tod and set_tod and prompt_tod != set_tod and not shot.set_id:
+                warns.append(
+                    f"{shot.id}: time-of-day conflict — prompt says "
+                    f"'{prompt_tod}' but scene set '{effective_set}' implies "
+                    f"'{set_tod}'")
+
+            if prompt_tod:
+                shot_tods.append((shot.id, prompt_tod))
+
+        # Cross-shot consistency within the scene
+        if len(shot_tods) >= 2:
+            tods_set = set(t for _, t in shot_tods)
+            if len(tods_set) > 1:
+                examples = ", ".join(f"{sid}={t}" for sid, t in shot_tods[:4])
+                warns.append(
+                    f"scene {sc.id}: mixed time-of-day across shots "
+                    f"({examples}) — verify this is intentional")
+
     return warns
+
+
+_DAY_KEYWORDS = ("白天", "阳光", "日光", "晴天", "日照", "午后", "上午", "下午", "daylight")
+_NIGHT_KEYWORDS = ("夜晚", "夜色", "深夜", "黑夜", "月光", "凌晨", "夜市", "霓虹")
+
+
+def _detect_time_of_day(text: str) -> str | None:
+    """Detect day/night from prompt text. Returns 'day', 'night', or None."""
+    has_day = any(k in text for k in _DAY_KEYWORDS)
+    has_night = any(k in text for k in _NIGHT_KEYWORDS)
+    if has_day and not has_night:
+        return "day"
+    if has_night and not has_day:
+        return "night"
+    return None
+
+
+def _detect_time_of_day_from_set(set_id: str) -> str | None:
+    """Detect day/night from set_id naming convention (e.g. 'office-day')."""
+    s = set_id.lower()
+    if any(k in s for k in ("day", "白天", "日", "morning", "afternoon")):
+        return "day"
+    if any(k in s for k in ("night", "夜", "evening", "凌晨")):
+        return "night"
+    return None
 
 
 def _extract_dialog(prompt: str) -> str | None:
