@@ -116,6 +116,28 @@ line must be the one the prompt assigned that line to.
 - critique: "0:00–0:08 Action never matches prompt's 「追逐」 (character stands still); 0:02 extra limbs on child; 0:05 cup floats."
 - verdict: REJECT
 
+## Score-critique consistency (HARD RULE)
+
+Your critique and your scores MUST agree. If the critique describes a
+defect, the corresponding axis score MUST reflect it. Specifically:
+
+- If critique mentions **floating, levitating, passing-through, or
+  gravity-defying** objects/body parts → `physics` ≤ 5
+- If critique mentions **wrong action, off-script behavior, or dead
+  air** → `logic` ≤ 5
+- If critique mentions **wrong person, unrecognizable face, or identity
+  swap** → `cast_match` ≤ 5
+- If critique mentions **wrong speaker, lip-sync to wrong character** →
+  `dialog_attribution` ≤ 5
+- If critique mentions **half body, missing limbs, merged with
+  background, or severe deformation** → `proportion` ≤ 5
+- If critique mentions **completely wrong color palette, different
+  visual era, or forbidden element** → `style` ≤ 5
+
+Rationale: a score of 7+ means "minor or no issue". If you wrote about
+the issue in the critique, it is NOT minor — score accordingly. Do NOT
+describe a serious defect and then give a passing score.
+
 ## Anti-patterns (don't do)
 
 - ❌ Don't refuse to score. If the video is empty / corrupt, give every
@@ -126,3 +148,6 @@ line must be the one the prompt assigned that line to.
 - ❌ Don't be lenient to "save" a shot. The threshold (7.0) is a
   business decision; your job is honest scoring.
 - ❌ Don't write critique in a language other than English.
+- ❌ Don't describe a defect in critique but score the axis 7+. This is
+  the single most common calibration failure — see "Score-critique
+  consistency" above.
