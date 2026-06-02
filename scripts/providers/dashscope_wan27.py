@@ -167,11 +167,15 @@ def render(
         if extra.get("first_frame_url"):
             input_block["img_url"] = extra["first_frame_url"]
     elif kind == "r2v":
-        input_block["media"] = [{"type": "image", "image": u} for u in media_urls]
-        if voice_url:
-            input_block["reference_voice"] = voice_url
+        media_objs = []
+        for i, u in enumerate(media_urls):
+            obj: dict = {"type": "reference_image", "url": u}
+            if voice_url and i == 0:
+                obj["reference_voice"] = voice_url
+            media_objs.append(obj)
         if extra.get("first_frame_url"):
-            input_block["first_frame"] = extra["first_frame_url"]
+            media_objs.insert(0, {"type": "first_frame", "url": extra["first_frame_url"]})
+        input_block["media"] = media_objs
 
     body = {"input": input_block, "parameters": parameters}
 
