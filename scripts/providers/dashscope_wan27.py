@@ -167,7 +167,7 @@ def render(
         if extra.get("first_frame_url"):
             input_block["img_url"] = extra["first_frame_url"]
     elif kind == "r2v":
-        input_block["media"] = media_urls
+        input_block["media"] = [{"type": "image", "image": u} for u in media_urls]
         if voice_url:
             input_block["reference_voice"] = voice_url
         if extra.get("first_frame_url"):
