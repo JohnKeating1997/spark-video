@@ -52,6 +52,7 @@ def _headers() -> dict[str, str]:
     return {
         "Authorization": f"Bearer {API_KEY}",
         "X-DashScope-Async": "enable",
+        "X-DashScope-OssResourceResolve": "enable",
         "Content-Type": "application/json",
     }
 
