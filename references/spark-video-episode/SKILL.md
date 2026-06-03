@@ -39,10 +39,10 @@ the corresponding flag was passed in the invocation.
 |---|---|---|---|
 | **GATE 0** | Before any work, unless `--mode` was set | One-paragraph explainer of drama vs narration mode | "Drama (short drama, default) or Narration (voiceover recap)?" |
 | **GATE 0.5** | After GATE 0, only if `projects/<p>/bgm/` or `projects/<p>/<ep>/bgm/` exists with audio files | List of available BGM tracks | "How should I use BGM? (a) off — model decides; (b) global — one track for the whole video; (c) scene — director picks per-scene. Also: forbid the video model from generating its own BGM? (default: yes)" |
-| **GATE 1** | After screenwriter finishes all scenes/scene-NN.md and you've compiled into `script.md` | The merged `script.md` | "Script OK? Approve to proceed to storyboarding, or describe changes." |
-| **GATE 2** | After director finishes all scenes/scene-NN.json and you've compiled+validated into `storyboard.json`. If `--vfx`, run `spark-video-vfx-review` first and show its report. | `storyboard.json` summary (shot count, parallel groups, estimated duration & cost) + VFX report if run | "Storyboard OK? Approve to render, or describe changes." |
-| **GATE 3** | After all shots rendered + reviewed (winner_version set for each, escalations resolved) | Per-shot summary (winner version, best score, any that fell below threshold accepted-anyway) | "Renders OK? Approve to stitch final, or specify shots to re-render." |
-| **GATE 4** | After stitch completes | Path to `final/<project>-<episode>.mp4`, duration, file size | "OK to finalize? Want to re-render any shots or adjust BGM mix?" |
+| **GATE 1** | After screenwriter finishes all scenes/scene-NN.md and you've compiled into `script.md` | `viewer.html` (auto-opened) showing premise + script + cast/sets/props | "Script OK? Approve to proceed to storyboarding, or describe changes." |
+| **GATE 2** | After director finishes all scenes/scene-NN.json and you've compiled+validated into `storyboard.json`. If `--vfx`, run `spark-video-vfx-review` first and show its report. | `viewer.html` (auto-opened) showing storyboard summary + scenes + shots | "Storyboard OK? Approve to render, or describe changes." |
+| **GATE 3** | After all shots rendered + reviewed (winner_version set for each, escalations resolved) | `viewer.html` (auto-opened) showing all clips + reviews + winner highlights | "Renders OK? Approve to stitch final, or specify shots to re-render." |
+| **GATE 4** | After stitch completes | `viewer.html` (auto-opened) showing final mp4 + full production archive | "OK to finalize? Want to re-render any shots or adjust BGM mix?" |
 
 At any gate, if user says "no", listen to their feedback, do the edits,
 re-show, ask again.
@@ -190,8 +190,11 @@ uv run scripts/storyboard.py estimate
 ### Step 5 — GATE 1: script.md
 ```bash
 uv run scripts/gate.py check script
+uv run scripts/build_viewer.py            # opens viewer.html in browser for review
 ```
-Show the user the merged `script.md`. Wait for approval.
+Show the user the merged `script.md` — point them to the viewer.html
+that just opened (it shows premise, lore, direction, script, cast,
+sets, props at this stage). Wait for approval.
 
 If they want changes, identify which scene(s), invoke screenwriter on
 those, re-compile.
@@ -210,9 +213,11 @@ If `--vfx`, run `spark-video-vfx-review` and show its report alongside.
 ```bash
 uv run scripts/gate.py check storyboard   # structural completeness
 uv run scripts/storyboard.py validate     # full schema lint
+uv run scripts/build_viewer.py            # opens viewer.html — now includes scenes + shots
 ```
 
-Wait for approval. If they want changes, route feedback to director
+Wait for approval (viewer.html shows the full storyboard breakdown).
+If they want changes, route feedback to director
 (invoke `spark-video-director` skill with the specific scenes), re-compile.
 
 ### Step 7 — Zone 2 + 3: render all shots
@@ -262,6 +267,7 @@ never got scored/promoted (the classic inferior-agent miss):
 
 ```bash
 uv run scripts/gate.py check render        # must pass before you ask the user
+uv run scripts/build_viewer.py             # opens viewer.html — all clips + reviews visible
 ```
 
 Then summarise. Once all shots have `winner_version` set:
@@ -294,6 +300,8 @@ uv run scripts/stitch.py --crossfade 0.5
 
 ```bash
 uv run scripts/gate.py check final   # final mp4 present + viewer.html fresh
+# stitch.py already rebuilt + opened viewer.html; if stale, force refresh:
+uv run scripts/build_viewer.py
 ```
 
 Show:
