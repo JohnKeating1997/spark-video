@@ -270,6 +270,41 @@ their project-tier portrait, do NOT solve it in the prompt. Use
 `spark-video-cast` skill's fork procedure to override the portrait for
 this episode only. Episode tier overrides project tier automatically.
 
+## Dialog & voiceover in drama-mode prompts
+
+In drama mode the video model is the **sole source of audio** — there
+is no post-production TTS pass (that's narration mode only). If a shot
+has dialog, voiceover, news broadcast, system prompt, or any spoken
+audio, you **must write the spoken text into the shot prompt** so the
+model generates the speech as part of the video.
+
+### How to include dialog
+
+Take the **Dialog** section from `scene-NN.md` and weave each line
+into the shot prompt. Describe who speaks, the delivery style, then
+quote the line.
+
+| Scene-NN.md Dialog | Shot prompt |
+|---|---|
+| `- 新闻播报（画外音）: "全球生产与运输系统，已全面实现自动化。"` | `…冷静的女性新闻播报声音说："全球生产与运输系统，已全面实现自动化。"…` |
+| `- 系统提示（轻声）: "今日无需安排。"` | `…一个轻柔的电子系统提示音响起，说："今日无需安排。"…` |
+| `- 主角（轻声）: "……还不知道。"` | `…主角犹豫片刻，轻声回答："……还不知道。"…` |
+
+### Rules
+
+1. **Every dialog / voiceover line from the screenplay must appear in
+   exactly one shot prompt.** If a scene has 3 dialog lines and 2 shots,
+   decide which shot carries which line — don't drop any.
+2. **Quote verbatim.** Don't paraphrase the screenwriter's dialog.
+3. **Describe delivery** (tone, volume, emotion) to guide the model's
+   audio generation: "冷静地说", "轻声回答", "愤怒地喊道".
+4. **Off-screen audio** (news broadcasts, PA announcements, phone calls)
+   is still part of the prompt — describe the sound source and quote the
+   line, e.g. "背景中电视新闻播报声说：…".
+5. **Don't rely on `narration_text`** for drama-mode dialog.
+   `narration_text` is a narration-mode-only field for external
+   third-person TTS voiceover; it is rejected on `role: "drama"` shots.
+
 ## Movie sets (set dressing)
 
 The "two consecutive shots set in the *same* room render as two

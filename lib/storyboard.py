@@ -65,11 +65,13 @@ def estimate_narration_audio_seconds(
 ShotKind = Literal["t2v", "i2v", "r2v"]
 ProviderName = Literal["bl", "wan27"]
 
-# Episode-level mode. ``drama`` (default) is the legacy behaviour: every
-# shot is a self-contained video that already carries its own dialog/audio
-# (or is silent on HappyHorse). ``narration`` is the "10-min recap" mode —
-# short visual beats whose original audio is stripped and replaced by a
-# qwen3-tts-flash voiceover synthesised from ``Shot.narration_text``.
+# Episode-level mode. ``drama`` (default): the video model generates both
+# picture AND audio (including dialog / voiceover / sound effects) from
+# the shot prompt — the director must write spoken lines into the prompt
+# so the model produces them. No post-production TTS.
+# ``narration`` is the "10-min recap" mode — short visual beats whose
+# original audio is stripped and replaced by a qwen3-tts-flash voiceover
+# synthesised from ``Shot.narration_text``.
 EpisodeMode = Literal["drama", "narration"]
 
 # Per-shot role. In drama-mode storyboards every shot must be ``drama``.
@@ -193,10 +195,11 @@ class Shot(BaseModel):
     role: ShotRole = Field(
         default="drama",
         description=(
-            "Shot role. ``drama`` (default) = today's long-form clip with "
-            "its own audio. ``narration`` = short beat whose audio is "
-            "stripped and replaced by a TTS voiceover; only allowed when "
-            "the storyboard's mode is ``narration``."
+            "Shot role. ``drama`` (default) = the video model generates "
+            "both picture and audio from the prompt; dialog / voiceover "
+            "must be written into the prompt. ``narration`` = short beat "
+            "whose audio is stripped and replaced by a TTS voiceover; "
+            "only allowed when the storyboard's mode is ``narration``."
         ),
     )
     narration_text: str | None = Field(
