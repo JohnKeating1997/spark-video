@@ -331,11 +331,16 @@ def main() -> int:
         print(f"ERROR: --voice file not found: {voice}", file=sys.stderr)
         return 2
 
+    # Suppress model-generated BGM — cross-clip music can't be coherent.
+    render_prompt = args.prompt.rstrip()
+    if "no background music" not in render_prompt.lower():
+        render_prompt += " No background music."
+
     started = datetime.now(timezone.utc).isoformat()
     try:
         result = mod.render(
             kind=args.kind,
-            prompt=args.prompt,
+            prompt=render_prompt,
             media=media,
             voice=voice,
             duration=args.duration,
