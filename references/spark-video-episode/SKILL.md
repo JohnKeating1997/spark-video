@@ -208,6 +208,19 @@ Print the storyboard summary:
   - If estimate exits 2 (over `SPARK_VIDEO_LONG_CONFIRM_S`), surface
     the warning explicitly.
 
+**Cost estimation** — use `bailian-docs-llm-wiki` skill to look up pricing:
+1. Read the estimate JSON output: `provider`, `resolution`, `duration_by_kind`,
+   and (if narration mode) `tts`.
+2. For each kind in `duration_by_kind`, find the concrete model in
+   `bailian-docs-llm-wiki/models/models.jsonl` by matching provider family
+   and shot kind (e.g. provider `bl` + kind `r2v` → model `happyhorse-1.0-r2v`).
+3. Match the `resolution` (e.g. `720P` → price type `video_ratio_720p`) to get
+   the per-second unit price.
+4. Calculate: `sum(kind_seconds × unit_price)`. Add TTS cost if present
+   (match `tts.model` in models.jsonl for per-character pricing).
+5. **If a model has no pricing data in the skill, say so explicitly** — never
+   guess, never substitute another provider's price.
+
 If `--vfx`, run `spark-video-vfx-review` and show its report alongside.
 
 ```bash

@@ -449,7 +449,6 @@ def cmd_estimate(args: argparse.Namespace) -> int:
     n_shots = len(sb.shots)
     groups = compute_chain_groups(sb)
     max_concurrency = int(os.environ.get("SPARK_VIDEO_MAX_CONCURRENCY", "4"))
-    # Naive wall-clock: longest group's serialized time / concurrency
     group_times = [sum(int(_lookup(sb, sid).duration) for sid in g) for g in groups]
     wall_clock_factor = 1.5  # render_time ≈ 1.5x clip duration (rough)
     est_serial = sum(group_times) * wall_clock_factor
@@ -458,9 +457,21 @@ def cmd_estimate(args: argparse.Namespace) -> int:
 
     long_confirm = int(os.environ.get("SPARK_VIDEO_LONG_CONFIRM_S", "600"))
 
-    out = {
+    provider = sb.provider or os.environ.get("VIDEOGEN_VIDEO_PROVIDER", "happyhorse")
+    resolution = sb.resolution
+
+    duration_by_kind: dict[str, dict[str, int]] = {}
+    for s in sb.shots:
+        entry = duration_by_kind.setdefault(s.kind, {"shots": 0, "seconds": 0})
+        entry["shots"] += 1
+        entry["seconds"] += int(s.duration)
+
+    out: dict = {
         "shots": n_shots,
         "total_clip_seconds": total_sec,
+        "provider": provider,
+        "resolution": resolution,
+        "duration_by_kind": duration_by_kind,
         "parallel_groups": len(groups),
         "estimated_render_seconds_serial": int(est_serial),
         "estimated_render_seconds_parallel": int(est_parallel),
@@ -468,6 +479,16 @@ def cmd_estimate(args: argparse.Namespace) -> int:
         "concurrency_cap": max_concurrency,
         "long_confirm_threshold_s": long_confirm,
     }
+
+    if sb.mode == "narration":
+        tts_model = os.environ.get("VIDEOGEN_NARRATOR_TTS_MODEL", "cosyvoice-v3-flash")
+        tts_chars = sum(
+            len(s.narration_text or "")
+            for s in sb.shots
+            if s.role == "narration"
+        )
+        out["tts"] = {"model": tts_model, "estimated_chars": tts_chars}
+
     print(json.dumps(out, ensure_ascii=False, indent=2))
 
     if total_sec > long_confirm:
