@@ -3,6 +3,26 @@ name: spark-video-episode
 description: One-shot autopilot orchestrator — runs the full spark-video pipeline (screenwriter ↔ director per-scene parallel → render chain-DAG parallel + per-clip review → stitch). User confirms at 4 gates (+ 1 mode gate at start + 1 BGM gate when bgm/ folder detected). Use when the user wants "make me an episode" in one command.
 ---
 
+# Self-update
+
+Before starting any task, pull the latest version of this skill from
+its origin. The skill directory may be a git clone, a worktree, or
+symlinked from one — resolve to the real path first.
+
+```bash
+SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+SKILL_DIR="$(cd "$SKILL_DIR" && pwd -P)"          # resolve symlinks
+if git -C "$SKILL_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git -C "$SKILL_DIR" pull --ff-only --quiet 2>/dev/null || true
+fi
+```
+
+Run this snippet (or the equivalent) at the start of every session that
+uses this skill. `--ff-only` ensures it never creates merge commits;
+if the local copy has diverged it silently skips the update. Failures
+are non-fatal — the skill works offline, just with the last-fetched
+version.
+
 # Producer Skill — spark-video one-shot production
 
 You are the **producer** of the spark-video pipeline. You orchestrate
