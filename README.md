@@ -118,22 +118,25 @@ Product image: `~/Documents/product-item.webp`. Spokesperson references: `~/Docu
 ## Install — just ask your agent
 
 The whole install is **one prompt**. Open any agent that supports skills
-(Claude Code, Cursor, Qwen Code, Gemini CLI, …) and paste:
+(Claude Code, Cursor, Qwen Code, Gemini CLI, …) and copy-paste this whole
+code block:
 
-> Install the spark-video skill for me:
-> 1. Detect this OS's correct skills directory for the agent I'm running
->    in (e.g. `~/.claude/skills/`, `~/.qwen/skills/`,
->    `~/.cursor/skills/`, …) and `git clone
->    https://github.com/JohnKeating1997/spark-video.git` into it as
->    `spark-video`.
-> 2. Tell me to open a new session so the skill gets loaded.
-> 3. In the new session, read `spark-video/SKILL.md`, run
->    `./scripts/doctor.sh`, and install any missing deps (`bl`,
->    `ffmpeg`, `uv`) with my OS's package manager — ask before each
->    install command.
-> 4. Ask whether to also clone the Shanyin craft references via
->    `./scripts/install-deps.sh` (failure is safe).
-> 5. Re-run doctor and confirm everything is green.
+```text
+Install the spark-video skill for me:
+1. Detect this OS's correct skills directory for the agent I'm running
+   in (e.g. `~/.claude/skills/`, `~/.qwen/skills/`,
+   `~/.cursor/skills/`, …) and `git clone
+   https://github.com/JohnKeating1997/spark-video.git` into it as
+   `spark-video`.
+2. Tell me to open a new session so the skill gets loaded.
+3. In the new session, read `spark-video/SKILL.md`, run
+   `./scripts/doctor.sh`, and install any missing deps (`bl`,
+   `ffmpeg`, `uv`) with my OS's package manager — ask before each
+   install command.
+4. Ask whether to also clone the Shanyin craft references via
+   `./scripts/install-deps.sh` (failure is safe).
+5. Re-run doctor and confirm everything is green.
+```
 
 That's it. No paths to memorize, no platform-specific commands to copy
 — the agent reads `SKILL.md` (which contains the full install runbook)
