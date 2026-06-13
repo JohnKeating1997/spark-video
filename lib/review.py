@@ -41,8 +41,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from lib.cli import bl_cmd
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_BL_WRAPPER = _REPO_ROOT / "scripts" / "bl"
 _RUBRIC = _REPO_ROOT / "references" / "spark-video-clip-review" / "rubric.md"
 
 # The six axes, in the canonical order the rubric emits them.
@@ -350,10 +351,12 @@ def score_clip(
             "score": None, "verdict": "ERROR",
             "error": f"rubric not found at {_RUBRIC}",
         })
-    if not _BL_WRAPPER.exists():
+    try:
+        bl_prefix = bl_cmd(_REPO_ROOT)
+    except FileNotFoundError as e:
         return _finalize({
             "score": None, "verdict": "ERROR",
-            "error": f"bl wrapper not found at {_BL_WRAPPER}",
+            "error": str(e),
         })
     if not Path(video_path).exists():
         return _finalize({
@@ -366,7 +369,7 @@ def score_clip(
         print(f"warn: review {shot_id} v{version}: no portrait for {missing} "
               f"(cast_match will be weaker)", file=sys.stderr)
 
-    cmd: list[str] = [str(_BL_WRAPPER), "omni"]
+    cmd: list[str] = bl_prefix + ["omni"]
     model = _omni_model_override()
     if model:
         cmd += ["--model", model]

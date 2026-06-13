@@ -30,6 +30,7 @@ import requests
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent.parent))
 
+from lib.cli import bl_cmd  # noqa: E402
 
 DASHSCOPE_BASE = os.environ.get(
     "DASHSCOPE_BASE_URL",
@@ -61,10 +62,9 @@ def _upload(local_path: Path, model: str) -> str:
     """Upload a local file via `bl file upload` and return the OSS URL."""
     import subprocess
     repo_root = Path(__file__).resolve().parents[2]
-    bl_wrapper = repo_root / "scripts" / "bl"
     proc = subprocess.run(
-        [str(bl_wrapper), "--output", "json", "file", "upload",
-         "--file", str(local_path), "--model", model],
+        bl_cmd(repo_root) + ["--output", "json", "file", "upload",
+                             "--file", str(local_path), "--model", model],
         capture_output=True, text=True, timeout=180,
     )
     if proc.returncode != 0:

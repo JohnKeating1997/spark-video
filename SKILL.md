@@ -123,7 +123,8 @@ re-show, ask again.
 
 ### Step 0 — preflight
 ```bash
-./scripts/doctor.sh                           # bl + ffmpeg + uv present
+./scripts/doctor.sh                           # macOS/Linux: bl + ffmpeg + uv present
+.\scripts\doctor.ps1                          # Windows PowerShell: same checks, no Bash/WSL
 uv run scripts/scaffold.py episode --init     # mkdir scaffold if not exists
 
 # Persist the user's raw premise to disk BEFORE any other work. This is
@@ -376,9 +377,9 @@ sub-skill → re-show**. Examples:
   expensive; validation is free.
 - ❌ Don't render before `storyboard.py estimate` is shown to the user
   at GATE 2. If estimate exits 2 (over budget), surface that explicitly.
-- ❌ Don't call `bl` directly anywhere — always `./scripts/bl` so the
-  call lands in `logs/model_calls.jsonl`. Same rule for any subagent
-  you spawn.
+- ❌ Don't call `bl` directly anywhere — always use the platform wrapper
+  (`./scripts/bl` on macOS/Linux, `.\scripts\bl.ps1` on Windows) so the call
+  lands in `logs/model_calls.jsonl`. Same rule for any subagent you spawn.
 - ❌ Don't auto-accept escalations. When `needs_director_rewrite.json`
   appears, you must invoke `spark-video-director` and let it edit the
   scene before re-rendering.

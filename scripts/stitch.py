@@ -42,6 +42,7 @@ from lib.ffmpeg_helpers import (              # noqa: E402
     xfade_continuation,
 )
 from lib.bgm import resolve_track             # noqa: E402
+from lib.cli import bl_cmd                    # noqa: E402
 
 
 _CONTINUATION_XFADE_S = 1.0
@@ -83,12 +84,11 @@ def _episode_dir() -> Path:
 
 def _synth_narration(shot, out_wav: Path, voice: str, rate: float, model: str) -> None:
     """Call ./scripts/bl speech synthesize for narration text."""
-    bl_wrapper = _HERE / "bl"
     text = shot.narration_text or ""
     if not text.strip():
         raise RuntimeError(f"shot {shot.id} has role=narration but empty narration_text")
-    cmd = [
-        str(bl_wrapper), "speech", "synthesize",
+    cmd = bl_cmd(_HERE.parent) + [
+        "speech", "synthesize",
         "--text", text,
         "--voice", voice,
         "--rate", str(rate),

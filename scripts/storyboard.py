@@ -27,6 +27,7 @@ sys.path.insert(0, str(_HERE.parent))
 
 from lib.storyboard import Storyboard, Scene, Shot  # noqa: E402
 from lib.render_graph import compute_chain_groups   # noqa: E402
+from lib.cli import bl_cmd                           # noqa: E402
 
 
 def _projects_root() -> Path:
@@ -222,8 +223,9 @@ def _llm_continuity_check(sb: Storyboard, ep_dir: Path) -> list[str]:
     Best-effort: returns [] on any failure (API down, timeout, parse error).
     Never blocks compile.
     """
-    bl = _HERE / "bl"
-    if not bl.exists():
+    try:
+        bl_prefix = bl_cmd(_HERE.parent)
+    except FileNotFoundError:
         return []
 
     # Read lore for context
@@ -266,8 +268,8 @@ def _llm_continuity_check(sb: Storyboard, ep_dir: Path) -> list[str]:
 
     try:
         proc = subprocess.run(
-            [str(bl), "text", "chat", "--model", "qwen-plus",
-             "--message", prompt],
+            bl_prefix + ["text", "chat", "--model", "qwen-plus",
+                         "--message", prompt],
             capture_output=True, text=True, timeout=30,
         )
         if proc.returncode != 0:

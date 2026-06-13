@@ -32,7 +32,7 @@ for bin in ffmpeg ffprobe; do
   if command -v "$bin" >/dev/null 2>&1; then
     good "$bin found ($("$bin" -version 2>&1 | head -1 | cut -d, -f1))"
   else
-    err "$bin not found. Install: brew install ffmpeg (macOS) or apt install ffmpeg"
+    err "$bin not found. Install: brew install ffmpeg (macOS) or apt install ffmpeg (Linux)"
   fi
 done
 
@@ -70,10 +70,19 @@ fi
 
 # Shanyin references (optional)
 echo "[shanyin craft references — optional]"
-sh_sw="$(dirname "$self_dir")/references/shanyin/screenwriting-master/SKILL.md"
-sh_dir="$(dirname "$self_dir")/references/shanyin/director-master/SKILL.md"
-[ -f "$sh_sw" ] && good "shanyin-screenwriting-master present" || echo "  · not installed (optional). Run: ./scripts/install-deps.sh"
-[ -f "$sh_dir" ] && good "shanyin-director-master present"     || echo "  · not installed (optional). Run: ./scripts/install-deps.sh"
+repo_root="$(dirname "$self_dir")"
+if [ -f "$repo_root/references/shanyin/screenwriting-master/SKILL.md" ] ||
+   [ -f "$repo_root/references/shanyin/screenwriting-master/screenwriting-master/SKILL.md" ]; then
+  good "shanyin-screenwriting-master present"
+else
+  echo "  · not installed (optional). Run: ./scripts/install-deps.sh"
+fi
+if [ -f "$repo_root/references/shanyin/director-master/SKILL.md" ] ||
+   [ -f "$repo_root/references/shanyin/director-master/director-master/SKILL.md" ]; then
+  good "shanyin-director-master present"
+else
+  echo "  · not installed (optional). Run: ./scripts/install-deps.sh"
+fi
 
 # sub-skills present
 echo "[sub-skills]"

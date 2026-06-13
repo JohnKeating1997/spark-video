@@ -130,11 +130,12 @@ Install the spark-video skill for me:
    `spark-video`.
 2. Tell me to open a new session so the skill gets loaded.
 3. In the new session, read `spark-video/SKILL.md`, run
-   `./scripts/doctor.sh`, and install any missing deps (`bl`,
-   `ffmpeg`, `uv`) with my OS's package manager — ask before each
-   install command.
+   `./scripts/doctor.sh` on macOS/Linux or `.\scripts\doctor.ps1` on
+   Windows, and install any missing deps (`bl`, `ffmpeg`, `uv`) with my
+   OS's package manager — ask before each install command.
 4. Ask whether to also clone the Shanyin craft references via
-   `./scripts/install-deps.sh` (failure is safe).
+   `./scripts/install-deps.sh` on macOS/Linux or `.\scripts\install-deps.ps1`
+   on Windows (failure is safe).
 5. Re-run doctor and confirm everything is green.
 ```
 
@@ -196,6 +197,9 @@ it'll run the right command.
 - `bl: command not found` → `npm install -g bailian-cli && npx skills add modelstudioai/skills --all -g && bl auth login`
   (full install guide: <https://bailian.aliyun.com/cli/install.md>)
 - `Permission denied: scripts/bl` → `chmod +x scripts/*.sh scripts/bl`
+- Windows: use `.\scripts\doctor.ps1`, `.\scripts\install-deps.ps1`, and
+  `.\scripts\bl.ps1`; do not run the Bash scripts through WSL unless the rest
+  of the toolchain is installed inside WSL too.
 - Render seems stuck → `tail -f projects/<p>/<e>/logs/model_calls.jsonl | jq .`
 
 ## Update / Uninstall

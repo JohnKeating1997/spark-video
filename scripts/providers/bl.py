@@ -27,18 +27,17 @@ from typing import Literal
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent.parent))
 
+from lib.cli import bl_cmd  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_BL_WRAPPER = _REPO_ROOT / "scripts" / "bl"
 
 
 def _bl_cmd() -> list[str]:
     """Always invoke the logging wrapper, not raw bl."""
-    if not _BL_WRAPPER.exists():
-        raise RuntimeError(
-            f"{_BL_WRAPPER} not found. Did you forget to chmod +x scripts/bl?"
-        )
-    return [str(_BL_WRAPPER)]
+    try:
+        return bl_cmd(_REPO_ROOT)
+    except FileNotFoundError as e:
+        raise RuntimeError(str(e)) from e
 
 
 # bl stderr substrings that indicate a transient network/socket hiccup the
@@ -122,7 +121,8 @@ def render(
     # Clamp; caller (render_shot.py) already checks but defense in depth.
     duration = max(2, min(15, int(duration)))
 
-    cmd = _bl_cmd()
+    bl_prefix = _bl_cmd()
+    cmd = list(bl_prefix)
     if kind == "t2v":
         # bl video generate without --image
         cmd += ["video", "generate", "--prompt", prompt, "--duration", str(duration)]
@@ -159,7 +159,7 @@ def render(
         cmd += ["--model", str(extra["model"])]
 
     # JSON output for parseability
-    cmd = [cmd[0]] + ["--output", "json"] + cmd[1:]
+    cmd = bl_prefix + ["--output", "json"] + cmd[len(bl_prefix):]
 
     started = time.time()
     timeout_s = int(os.environ.get("SPARK_VIDEO_RENDER_TIMEOUT_S", "900"))
