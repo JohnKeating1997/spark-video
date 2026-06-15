@@ -2,7 +2,6 @@
 name: spark-video-vfx-review
 description: Pre-render quality gate. Read a finished storyboard.json and produce a structured review report flagging visual inconsistencies, prompt defects, and continuity errors that would waste render budget. You find problems; the director fixes them. Opt-in — bypassed unless the producer explicitly invokes you.
 ---
-
 # VFX Review Skill — VFX Reviewer
 
 You are the **visual effects reviewer** — the last quality gate before
@@ -28,6 +27,7 @@ Reviews are scoped to a single episode. Read all of these:
    `projects/<p>/<ep>/cast/<name>/cast.md`.
 
 Set env vars:
+
 ```bash
 export SPARK_VIDEO_PROJECT=<project_id>
 export SPARK_VIDEO_EPISODE=<NN>
@@ -65,6 +65,7 @@ Also write the same report to
 to the director.
 
 **Verdict rules**:
+
 - Any critical issue → ❌ BLOCK
 - Only warnings/suggestions → ⚠️ PASS WITH WARNINGS
 - No issues → ✅ PASS
@@ -126,13 +127,13 @@ For action sequences (especially fights / confrontations):
 
 ### F. Kind selection sanity (Warning)
 
-| Situation | Expected kind | Flag if wrong |
-|-----------|---------------|---------------|
-| Character + dialog | `r2v` | CRITICAL if t2v/i2v |
-| Pure camera move / transition | `i2v` | WARNING if r2v |
-| Establishing shot, no character | `t2v` | WARNING if r2v |
-| First shot of project | Not `i2v` (needs no prev frame) | WARNING |
-| Narration beat | `t2v` (or `r2v` if face-lock needed) | WARNING if i2v |
+| Situation                       | Expected kind                            | Flag if wrong       |
+| ------------------------------- | ---------------------------------------- | ------------------- |
+| Character + dialog              | `r2v`                                  | CRITICAL if t2v/i2v |
+| Pure camera move / transition   | `i2v`                                  | WARNING if r2v      |
+| Establishing shot, no character | `t2v`                                  | WARNING if r2v      |
+| First shot of project           | Not `i2v` (needs no prev frame)        | WARNING             |
+| Narration beat                  | `t2v` (or `r2v` if face-lock needed) | WARNING if i2v      |
 
 ### G. Continuation-frame logic (Warning)
 
@@ -200,6 +201,7 @@ Every shot must have a concrete `narrative_purpose` field — no empty platitude
 - **Rule of thumb**: a valid `narrative_purpose` must answer "what would the story lose if this shot didn't exist?" If you can't answer → **WARNING**.
 
 Reference — good examples:
+
 - "用低角度仰拍 + 缓慢推近, 放大钱夫人挑衅时的优越感"
 - "通过她偷瞄郭芙蓉的眼神, 暗示她已经心虚"
 
@@ -224,8 +226,7 @@ If `lore.imagery_system.motifs` is non-empty, every motif must appear as a concr
   Grounding count < 2 → **CRITICAL**.
 - Long form (>300s): each motif at least 5 times. < 5 → **WARNING**.
 - Grounding must be a shootable concrete image, not abstract mention. E.g. motif is "搓动的围裙",
-  prompt should be `"[Image 1] 钱夫人 双手反复搓动腰间围裙"`, not `"她紧张地
-  搓着围裙"`.
+  prompt should be `"[Image 1] 钱夫人 双手反复搓动腰间围裙"`, not `"她紧张地 搓着围裙"`.
 - `lore.imagery_system.highlight_elements` — same rules, half the threshold.
 
 ### P. Dialog-shot variety (Warning)
