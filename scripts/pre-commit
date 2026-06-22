@@ -16,7 +16,7 @@ while IFS= read -r f; do
   case "$f" in
     cast/*|projects/*)
       # Only allow .gitkeep / README.md inside cast/ or projects/.
-      # Everything else under these paths (portraits, voices, rendered
+      # Everything else under these paths (cast reference images, voices, rendered
       # clips, frames, cast.json, lore.md, etc.) is local-only.
       case "$f" in
         cast/.gitkeep|cast/README.md) ;;

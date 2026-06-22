@@ -3,12 +3,12 @@
 Each line in ``projects/<id>/<episode>/logs/model_calls.jsonl`` is a
 self-contained JSON record describing one HTTP call to an upstream model
 endpoint (DashScope video, qwen-vl review, qwen-text rewrite, wan t2i
-portrait, …). The record captures the request body, a summary of the
+cast reference generation, …). The record captures the request body, a summary of the
 response, the timing, and the shot context active when the call happened
 — giving us a complete audit trail for "what did we ask the model on
 this episode, and what did it answer?".
 
-Project-level calls (e.g. NPC portraits generated outside any episode)
+Project-level calls (e.g. NPC cast references generated outside any episode)
 are logged to ``projects/<id>/logs/model_calls.jsonl`` instead.
 
 ## Context propagation

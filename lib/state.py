@@ -7,7 +7,7 @@ Filesystem layout:
         cast/                      # project-level shared cast
             <character_name>/
                 cast.md            # soul card
-                <portrait>.png
+                <reference>.png
                 <voice>.mp3
         episode-<NNN>/             # one folder per episode
             script.md
@@ -18,7 +18,7 @@ Filesystem layout:
             cast/                  # episode-specific cast / NPCs
                 <name>/
                     cast.md
-                    <portrait>.png
+                    <reference>.png
             cast_built/            # ASCII-renamed singletons + composite grids
             clips/
             frames/

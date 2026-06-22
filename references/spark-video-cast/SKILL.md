@@ -1,6 +1,6 @@
 ---
 name: spark-video-cast
-description: Scaffold and generate reference assets for characters (cast), locations (movie-set / set dressing), and key props — the three pillars of visual consistency in spark-video. Wraps bl image generate / edit for portrait creation. Use when adding new characters/locations/props or when costume/state changes are needed.
+description: Scaffold and generate reference assets for characters (cast), locations (movie-set / set dressing), and key props — the three pillars of visual consistency in spark-video. Wraps bl image generate / edit for cast reference sheet creation. Use when adding new characters/locations/props or when costume/state changes are needed.
 ---
 
 # Cast / Set / Prop Skill — spark-video Art Department (all-in-one)
@@ -11,7 +11,7 @@ that pin visual consistency:
 
 | Pillar | Pins | Folder pattern |
 |---|---|---|
-| **Cast** | Faces, hairstyle, costume, build | `cast/<name>/` |
+| **Cast** | Full-body reference sheet: face, hairstyle, costume, build | `cast/<name>/` |
 | **Movie-set** | Locations, lighting, decor | `movie-set/<name>/` |
 | **Prop** | Hero objects that recur or change state | `props/<name>/` |
 
@@ -23,7 +23,7 @@ Set env vars:
 ```bash
 export SPARK_VIDEO_PROJECT=<project_id>
 export SPARK_VIDEO_EPISODE=<NN>
-export SPARK_VIDEO_PHASE=portrait
+export SPARK_VIDEO_PHASE=cast-reference
 ```
 
 ## Two-tier model — project vs episode
@@ -74,27 +74,30 @@ uv run scripts/scaffold.py cast --name "陆辰"
 # visual anchor (one-line appearance), do / don't
 ```
 
-Then generate the portrait via bl:
+Then generate the cast reference sheet via bl. Default to a full-body
+standing character sheet / 三视图 rather than a face-only or front-only
+portrait. Keep the `portrait` filename prefix for compatibility with the
+rest of the pipeline:
 
 ```bash
 ./scripts/bl image generate \
   --model wan2.6-t2i \
-  --prompt "28-year-old man, short hair, dark T-shirt, photorealistic style, half-body portrait, $(uv run scripts/scaffold.py mood-anchor)" \
+  --prompt "28-year-old man, short hair, dark T-shirt, photorealistic style, full-body standing character turnaround sheet, front view + side view + back view, same face and outfit in all three views, neutral clean background, no extra props, $(uv run scripts/scaffold.py mood-anchor)" \
   --size 16:9 \
   --out-dir projects/$SPARK_VIDEO_PROJECT/cast/陆辰/ \
   --out-prefix portrait
 ```
 
 Notes:
-- **Default model `wan2.6-t2i`**: produces stable cast portraits compatible
+- **Default model `wan2.6-t2i`**: produces stable cast reference sheets compatible
   with downstream r2v. `qwen-image-2.0` is newer but visual style differs;
   test before switching.
-- **Append `lore.mood_anchor`** to every portrait prompt so the visual
+- **Append `lore.mood_anchor`** to every cast-reference prompt so the visual
   style matches the rest of the production. The `scaffold.py mood-anchor`
   helper prints lore's mood_anchor for piping.
-- **Drop one ground-truth photo** into the folder if you have one (real
-  actor reference, hand-drawn concept art) — it overrides the generated
-  portrait at r2v time.
+- **Drop one ground-truth reference** into the folder if you have one (real
+  actor photo set, hand-drawn concept art, three-view sheet) — it overrides
+  the generated reference sheet at r2v time.
 
 Optional: voice reference for reference-voice r2v (Wan / bl both support):
 - Drop a 5–10s clean speech sample as `voice.mp3` in the cast folder.
@@ -107,7 +110,8 @@ uv run scripts/scaffold.py cast --name "钱夫人" --episode
 
 ./scripts/bl image generate \
   --model wan2.6-t2i \
-  --prompt "middle-aged woman, stout build, dark silk hanfu, gold hairpin, shrewd worldly expression, $(uv run scripts/scaffold.py mood-anchor)" \
+  --prompt "middle-aged woman, stout build, dark silk hanfu, gold hairpin, shrewd worldly expression, full-body standing character turnaround sheet, front view + side view + back view, same face and outfit in all three views, neutral clean background, no extra props, $(uv run scripts/scaffold.py mood-anchor)" \
+  --size 16:9 \
   --out-dir projects/$SPARK_VIDEO_PROJECT/episode-$SPARK_VIDEO_EPISODE/cast/钱夫人/ \
   --out-prefix portrait
 ```
@@ -120,16 +124,16 @@ uv run scripts/scaffold.py cast-init   # merges project + episode tiers
 ### 1.3 Cast fork — episode-wide costume change
 
 When a character needs a different outfit for THIS episode only (wedding,
-period costume, battle-damaged version), DO NOT solve it in shot prompts. Fork the portrait:
+period costume, battle-damaged version), DO NOT solve it in shot prompts. Fork the cast reference:
 
 ```bash
-# Deep-copy the project cast folder into the episode, drop old portrait
+# Deep-copy the project cast folder into the episode, drop old reference images
 uv run scripts/scaffold.py cast --fork --name "陆辰" --drop-portraits
 
-# Regenerate the portrait with the new appearance
+# Regenerate the reference sheet with the new appearance
 ./scripts/bl image edit \
   --image projects/$SPARK_VIDEO_PROJECT/cast/陆辰/portrait1.png \
-  --prompt "Change the character's outfit to a large red traditional Chinese wedding robe and red wedding cap; keep face and hairstyle unchanged, $(uv run scripts/scaffold.py mood-anchor)" \
+  --prompt "Create a full-body standing character turnaround sheet with front view + side view + back view; change the character's outfit to a large red traditional Chinese wedding robe and red wedding cap; keep face and hairstyle unchanged and keep the same outfit across all three views, $(uv run scripts/scaffold.py mood-anchor)" \
   --out-dir projects/$SPARK_VIDEO_PROJECT/episode-$SPARK_VIDEO_EPISODE/cast/陆辰/ \
   --out-prefix portrait
 
@@ -137,11 +141,12 @@ uv run scripts/scaffold.py cast-init
 ```
 
 `bl image edit` preserves face identity better than `bl image generate`
-for forks — always prefer edit when you have a project-tier portrait to
-base from.
+for forks — always prefer edit when you have a project-tier reference sheet
+or portrait to base from.
 
 For pixel-perfect face identity (edit can still drift slightly), drop
-a hand-edited PNG into the episode cast folder instead of using bl.
+a hand-edited PNG / three-view sheet into the episode cast folder instead
+of using bl.
 
 ## Procedure 2 — scaffold a movie-set
 
@@ -253,8 +258,8 @@ Without it, your asset visual style won't match the rendered shots.
 
 | Asset type | `--size` |
 |---|---|
-| Cast portrait (half-body) | `16:9` or `3:4` |
-| Cast portrait (full-body) | `9:16` |
+| Cast reference sheet (full-body three-view) | `16:9` |
+| Cast single full-body reference (fallback) | `9:16` |
 | Set establishing | `16:9` |
 | Prop (product-style) | `1:1` |
 
@@ -311,12 +316,12 @@ any scene that references them.
 - ❌ Don't put two prop states (intact + creased) in the same prop folder.
   Same reason.
 - ❌ Don't solve a costume change by writing "wearing XXX" in shot prompts.
-  Fork the cast portrait instead.
+  Fork the cast reference sheet instead.
 - ❌ Don't omit the mood_anchor in t2i prompts. Visual cohesion will
-  break across shots vs portraits.
+  break across shots vs cast references.
 - ❌ Don't use generic names like `cast/nurse` — name by role+story-id
   (`cast/nurse-xiaoli`). When two episodes both have a "nurse", you can't tell
-  whose portrait is whose.
+  whose cast reference is whose.
 - ❌ Don't generate reference images with `--watermark`. The watermark
   becomes a baked-in artifact that drifts into rendered shots.
 - ❌ Don't skip `scaffold.py *-init` after adding folders. The manifests

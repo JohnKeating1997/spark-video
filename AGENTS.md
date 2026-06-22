@@ -112,7 +112,7 @@ Run both after changing `lib/` models or `scripts/storyboard.py`.
   through `uv run scripts/storyboard.py compile` so validation runs.
 - **Consistency comes from assets, not prompts.** One folder = one
   visual state (`cast/<name>/`, `movie-set/<name>/`, `props/<name>/`).
-  Appearance (hair/costume/face) is locked by the reference portrait;
+  Appearance (hair/costume/face) is locked by the cast reference sheet;
   prompts describe only action + emotion. Don't "fix" drift by stuffing
   wardrobe text into prompts — fork the asset folder instead.
 - **Provider-agnostic core.** `lib/` and the director skill emit generic
@@ -130,7 +130,7 @@ Run both after changing `lib/` models or `scripts/storyboard.py`.
 The pre-commit hook (`scripts/pre-commit`) blocks these, but know them:
 
 - Anything under `cast/` or `projects/` except `.gitkeep` / `README.md`
-  (portraits, voices, rendered clips, frames, `cast.json`, `lore.md`, …
+  (cast reference images, voices, rendered clips, frames, `cast.json`, `lore.md`, …
   are all local-only).
 - Any blob > 5 MB.
 - Secrets — `.env`, API keys. Only `.env.example` is tracked.

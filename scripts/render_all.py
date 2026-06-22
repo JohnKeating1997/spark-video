@@ -71,7 +71,7 @@ def _load_json(p: Path):
 
 def _resolve_media(shot, scenes_by_id: dict, cast_index: dict,
                    set_index: dict, prop_index: dict) -> list[str]:
-    """Build the --media list for one shot: cast portraits → set image → props."""
+    """Build the --media list for one shot: cast references → set image → props."""
     if shot.kind == "t2v":
         return []
 
@@ -136,7 +136,7 @@ def _scan_first_image(folder: Path) -> str | None:
 
 
 def _build_cast_index(ep_dir: Path) -> dict[str, str]:
-    """Map character name → portrait path from cast.json, with folder fallback."""
+    """Map character name → cast reference image path from cast.json, with folder fallback."""
     proj_dir = ep_dir.parent
     data = _load_json(ep_dir / "cast.json")
     idx = {}

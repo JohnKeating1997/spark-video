@@ -184,7 +184,7 @@ uv run scripts/scaffold.py prop-init           # build props.json
 ```
 
 If the user's premise mentions new characters/locations not present,
-invoke `spark-video-cast` first to scaffold + generate portraits BEFORE
+invoke `spark-video-cast` first to scaffold + generate cast reference sheets BEFORE
 launching the screenwriter.
 
 ### Step 4 — Zone 1: per-scene editor ↔ director parallel

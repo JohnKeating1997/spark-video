@@ -4,20 +4,21 @@ Filesystem convention (one folder per character):
 
     projects/<id>/cast/<name>/             ← project-level (shared across episodes)
         cast.md                            ← soul card (front-matter + body)
-        <anything>.{jpg,png,webp}          ← portraits (>=1 required)
+        <anything>.{jpg,png,webp}          ← cast reference images (>=1 required)
         <anything>.{mp3,wav}               ← voice samples (optional)
 
     projects/<id>/<episode>/cast/<name>/   ← episode-level (NPCs unique to this episode)
         cast.md
-        <portrait>.png
+        <reference>.png
 
 The folder *name* is the character's display name. Anything inside the folder
 belongs to that character — no name-prefix matching needed.
 
-If a character has more than one portrait inside its own folder, the CLI builds
+If a character has more than one reference image inside its own folder, the CLI builds
 a grid composite (``<id>.grid.png``) and feeds that as ``reference_image`` to
 the active video provider. Both Wan and HappyHorse r2v accept multi-pane
-reference images. Grids are NEVER built across different characters.
+reference images. Full-body standing sheets / 三视图 are preferred for new
+cast assets. Grids are NEVER built across different characters.
 
 Two-tier discovery (per episode build):
 
@@ -153,7 +154,7 @@ def _scan_cast_root(root: Path, source: str) -> dict[str, dict[str, Any]]:
         images, audios, soul = _scan_character_folder(child)
         if not images and not soul:
             console.print(
-                f"[yellow]skip {source}/{child.name}: no portrait and no {SOUL_FILENAME}[/]"
+                f"[yellow]skip {source}/{child.name}: no cast reference image and no {SOUL_FILENAME}[/]"
             )
             continue
         out[child.name] = {
@@ -166,7 +167,7 @@ def _scan_cast_root(root: Path, source: str) -> dict[str, dict[str, Any]]:
 
 
 def _merge(project_buckets: dict, episode_buckets: dict) -> dict[str, dict[str, Any]]:
-    """Layered merge — episode overrides project, but never blends portraits
+    """Layered merge — episode overrides project, but never blends reference images
     across characters (grid building stays per-folder upstream).
 
     For a character present in both tiers:
@@ -205,7 +206,7 @@ def _merge(project_buckets: dict, episode_buckets: dict) -> dict[str, dict[str, 
 # ---------------------------------------------------------------------------
 
 def _build_grid(images: list[Path], out: Path, *, max_side: int = 1280) -> Path:
-    """Compose N (>=2) portraits *of the same character* into a grid PNG."""
+    """Compose N (>=2) reference images *of the same character* into a grid PNG."""
     if len(images) < 2:
         raise ValueError("_build_grid expects 2+ images of the same character.")
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -302,7 +303,7 @@ def discover(project_id: str, episode_id: str) -> list[Character]:
         images: list[Path] = b.get("images", []) or []
         audios: list[Path] = b.get("audios", []) or []
         if not images:
-            console.print(f"[yellow]skip {name}: no portrait[/]")
+            console.print(f"[yellow]skip {name}: no cast reference image[/]")
             continue
 
         soul_path: Path | None = b.get("soul")
@@ -357,7 +358,7 @@ def init_episode(
         ep = episode_cast_dir(project_id, episode_id)
         raise RuntimeError(
             f"no characters found in {proj} or {ep}. "
-            f"Drop a character folder (with cast.md + a portrait) into either."
+            f"Drop a character folder (with cast.md + a cast reference image) into either."
         )
 
     build_dir = state.episode_dir(project_id, episode_id) / "cast_built"
@@ -373,7 +374,7 @@ def init_episode(
             c.id = f"{c.id}_{extra}"
         seen_ids[c.id] = c.name
 
-        # ---------- portraits → 1 file (only same-character images merged) -
+        # ---------- cast references → 1 file (only same-character images merged) -
         if len(c.images_local) == 1:
             src = Path(c.images_local[0])
             c.image_local = str(_ensure_ascii_basename(src, build_dir, cid=c.id))

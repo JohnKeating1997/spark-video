@@ -59,7 +59,7 @@ This "push judgment to the Agent" design lets the pipeline handle infinitely man
 The full pipeline has 4+2 user confirmation gates (see §3.2 below). At each gate:
 
 - The user can say in natural language *"S03 pacing is too slow — cut the dialogue in half"* — the Agent locates `scenes/scene-03.md` and invokes the screenwriter Skill to rewrite.
-- The user can say *"郭芙蓉 wears a wedding dress this episode"* — the Agent forks `cast/郭芙蓉/` at the episode layer, regenerates portraits, and triggers re-renders for affected shots.
+- The user can say *"郭芙蓉 wears a wedding dress this episode"* — the Agent forks `cast/郭芙蓉/` at the episode layer, regenerates cast reference sheets, and triggers re-renders for affected shots.
 - After GATE 4 delivers `final.mp4`, the user can still say *"S05-002 expression is wrong — swap in another version"* — the Agent re-renders only that shot, then incrementally stitches.
 
 None of this requires rerunning the whole flow — the Agent reads `shots_state.json` and existing artifacts to know **what has already been done and what can be done incrementally**.
@@ -129,7 +129,7 @@ Video foundation models are **memoryless** — each shot is an independent reque
 ```mermaid
 flowchart LR
     subgraph Assets["External assets (one folder = one state)"]
-        Cast[cast/character/<br/>portrait + soul card + voice]
+        Cast[cast/character/<br/>reference sheet + soul card + voice]
         Set[movie-set/set/<br/>reference image + set.md]
         Prop[props/prop/<br/>reference image + prop.md]
         Lore[lore.md<br/>mood_anchor / palette / forbidden]
@@ -141,7 +141,7 @@ flowchart LR
     Render --> Clip[clip-verN.mp4]
     Clip --> LastFrame[extract last frame<br/>→ next shot's first_frame]
 
-    Clip --> Reviewer[bl omni<br/>6-axis scoring<br/>cast_match mandatory<br/>feed portrait back]
+    Clip --> Reviewer[bl omni<br/>6-axis scoring<br/>cast_match mandatory<br/>feed cast reference back]
     Reviewer -- < 7.0 --> Rewrite[auto rewrite]
     Reviewer -- >= 7.0 --> Winner[winner]
 ```
@@ -163,28 +163,28 @@ Each folder is one **soul card** (`cast.md` / `set.md` / `prop.md`, parsed by [`
 ```
 cast/郭芙蓉/
 ├── 郭芙蓉.md      ← soul card: age / catchphrases / visual anchors / do-don't
-├── 郭芙蓉.png     ← portrait
+├── 郭芙蓉.png     ← cast reference sheet (立绘 / 三视图 preferred)
 └── 郭芙蓉.mp3     ← reference_voice for r2v
 ```
 
 > Real example: [cast/郭芙蓉.md](https://github.com/JohnKeating1997/spark-video/blob/main/cast/%E9%83%AD%E8%8A%99%E8%93%89.md) — it pins `voice_style`, `catchphrases`, `mannerisms`, and other traits that recur in dialogue. Those fields are for the **LLM** (screenwriting / storyboarding), not the video model.
 
-### 3.3.2 Portraits Lock Appearance; Prompts Describe Action Only
+### 3.3.2 Cast Reference Sheets Lock Appearance; Prompts Describe Action Only
 
 One of the iron rules at the top of [SKILL.md](https://github.com/JohnKeating1997/spark-video/blob/main/SKILL.md):
 
-> Character costume / hair / makeup **do not go in the prompt** — the portrait locks them; the prompt describes action + expression only, with age on first appearance (e.g. "28-year-old 陆辰")
+> Character costume / hair / makeup **do not go in the prompt** — the cast reference sheet locks them; the prompt describes action + expression only, with age on first appearance (e.g. "28-year-old 陆辰")
 
-If the prompt says "white dress shirt" but the portrait shows a black hoodie, the video model **interpolates freely** between them — shot 1 gray tee, shot 2 white shirt, shot 3 black hoodie. **Making the portrait the sole authority on appearance** cuts off that drift path.
+If the prompt says "white dress shirt" but the cast reference shows a black hoodie, the video model **interpolates freely** between them — shot 1 gray tee, shot 2 white shirt, shot 3 black hoodie. **Making the cast reference the sole authority on appearance** cuts off that drift path.
 
-### 3.3.3 Multiple Portraits of One Character → Auto Grid; Never Mix Across Characters
+### 3.3.3 Multiple Reference Images of One Character → Auto Grid; Never Mix Across Characters
 
-[`lib/cast.py`](https://github.com/JohnKeating1997/spark-video/blob/main/lib/cast.py) `_build_grid`: when a character folder has ≥2 portraits, they are composited into one grid PNG for r2v (Wan and HappyHorse both support multi-panel references).
+[`lib/cast.py`](https://github.com/JohnKeating1997/spark-video/blob/main/lib/cast.py) `_build_grid`: when a character folder has ≥2 reference images, they are composited into one grid PNG for r2v (Wan and HappyHorse both support multi-panel references).
 
 ```python
 # lib/cast.py:207-235
 def _build_grid(images: list[Path], out: Path, *, max_side: int = 1280) -> Path:
-    """Compose N (>=2) portraits *of the same character* into a grid PNG."""
+    """Compose N (>=2) reference images *of the same character* into a grid PNG."""
     if len(images) < 2:
         raise ValueError("_build_grid expects 2+ images of the same character.")
 ```
@@ -232,7 +232,7 @@ If the next shot has `use_prev_last_frame_as_first=true`, the renderer feeds tha
 ### 3.3.7 Fixed Media List Order for r2v Renders
 
 ```
---media character-portrait1.png    ← cast.json
+--media character-portrait1.png    ← cast.json; prefix is historical, content should be a cast reference sheet
         character-portrait2.png
         movie-set.png              ← set reference from scene.set_id
         prop1.png                  ← props from shot.props[]
@@ -243,7 +243,7 @@ The fixed **cast → set → prop** order is convention in [references/spark-vid
 
 ### 3.3.8 Post-Render cast_match Scored Independently
 
-The critical backstop: [`rubric.md`](https://github.com/JohnKeating1997/spark-video/blob/main/references/spark-video-clip-review/rubric.md) has `bl omni` score on 6 axes; the `cast_match` axis **must feed the original portrait as `--image` to the reviewer model**:
+The critical backstop: [`rubric.md`](https://github.com/JohnKeating1997/spark-video/blob/main/references/spark-video-clip-review/rubric.md) has `bl omni` score on 6 axes; the `cast_match` axis **must feed the original cast reference as `--image` to the reviewer model**:
 
 ```bash
 ./scripts/bl omni \
@@ -332,7 +332,7 @@ The six scoring axes in [`rubric.md`](https://github.com/JohnKeating1997/spark-v
 | `proportion` | character scale / perspective errors |
 | `physics` | gravity / cloth / fluid violations |
 | `style` | `mood_anchor` / palette / `forbidden` consistency |
-| `cast_match` | face / hair / costume vs. portrait |
+| `cast_match` | face / hair / costume vs. cast reference |
 | `dialog_attribution` | A's line must not come from B's mouth |
 
 Review state machine:
@@ -408,7 +408,7 @@ flowchart LR
         Direction["Direction<br/>(director brief)"]
         Script["Script<br/>(merged script)"]
         Scenes["Scenes<br/>(per-scene structured data)"]
-        Cast["Cast<br/>(each character portrait + soul)"]
+        Cast["Cast<br/>(each character reference sheet + soul)"]
         Sets["Movie Sets<br/>(each set reference + description)"]
         Props["Props<br/>(key prop images + states)"]
         BGM["BGM<br/>(background music config)"]
@@ -424,7 +424,7 @@ What each section is for:
 | **Final cut** | Final stitched mp4, embedded player | Watch the finished piece |
 | **Premise / Lore / Direction** | Initial input and director brief | See *why* the film looks like this |
 | **Script / Scenes** | Screenwriter output + structured scene JSON | Compare script to shot execution |
-| **Cast / Sets / Props** | All three pillars' portraits + soul cards | See the consistency "foundation" at a glance |
+| **Cast / Sets / Props** | All three pillars' reference images + soul cards | See the consistency "foundation" at a glance |
 | **Shots** | **Every attempt version** per shot (not just winner) + 6-axis scores + critique | See where the model failed, why, and how it finally passed |
 | **Model calls** | Full `logs/model_calls.jsonl` | Every prompt is traceable — gold for prompt engineering |
 
@@ -456,7 +456,7 @@ Spark-Video does not try to make a video foundation model "more consistent". Ins
 - **Keeps human judgment at the 4+2 most irreversible gates**, and extends conversational control to any point in the flow.
 - **Packages the capability as Skills, not SaaS**, so any Agent framework can plug in and user dialogue can drive every change.
 
-The reason `final/<project>-<episode>.mp4` looks like one crew shot it: **lore.mood_anchor + cast portrait + set reference + scene.description + narrative_purpose + cast_match review** — six constraints repeatedly telling each shot "you must look like this, be this beat, carry this tone". Model freedom shrinks to **how to perform this moment** — which is exactly what it is good at.
+The reason `final/<project>-<episode>.mp4` looks like one crew shot it: **lore.mood_anchor + cast reference sheet + set reference + scene.description + narrative_purpose + cast_match review** — six constraints repeatedly telling each shot "you must look like this, be this beat, carry this tone". Model freedom shrinks to **how to perform this moment** — which is exactly what it is good at.
 
 ## 3.7 Outlook
 
@@ -478,15 +478,15 @@ Sora Storyboard (OpenAI) and Spark-Video look similar — both split a "long fil
 
 | Dimension | Sora Storyboard | Spark-Video |
 |---|---|---|
-| **Where consistency comes from** | Single large model's **internal cross-frame memory** + prompt gradients on timeline | External assets (portraits / set images / mood_anchor) + last-frame continuation + post-render review |
+| **Where consistency comes from** | Single large model's **internal cross-frame memory** + prompt gradients on timeline | External assets (cast reference sheets / set images / mood_anchor) + last-frame continuation + post-render review |
 | **Clip length** | Can output 20s+ at once; timeline cuts long video into "prompt anchors" | Bounded by current r2v limits (8–15s), so many shots + engineering stitch |
 | **Retry granularity** | Regenerate whole long clip — high cost | Single-shot retry — minimal blast radius |
 | **Edit path** | Edit timeline card → regenerate (change may ripple across film) | Edit scene/shot files → re-render only affected shots |
 | **Auditability** | Timeline in product; prompt history is a black box | Everything on disk (`model_calls.jsonl` / `shots_state.json` / `viewer.html`), git-diffable |
-| **Creator control** | High-level intent; model owns detail | Down to cast portrait, shot duration, narrative_purpose, shot group role |
+| **Creator control** | High-level intent; model owns detail | Down to cast reference sheet, shot duration, narrative_purpose, shot group role |
 | **Collaboration extensibility** | Tied to Sora platform | Skills + filesystem — Claude / AgentScope / LangGraph, etc. |
 
-**Key difference**: Sora bets "**models strong enough need no engineering**"; Spark-Video bets "**however strong the model, engineering is required because creation is structural**". Sora's built-in continuity is stronger, but failure debug is nearly a black box — change prompt and roll again; Spark-Video continuity is explicit constraint, and every failure can pinpoint "cast portrait issue", "mood_anchor drift", or "scene.description unclear".
+**Key difference**: Sora bets "**models strong enough need no engineering**"; Spark-Video bets "**however strong the model, engineering is required because creation is structural**". Sora's built-in continuity is stronger, but failure debug is nearly a black box — change prompt and roll again; Spark-Video continuity is explicit constraint, and every failure can pinpoint "cast reference issue", "mood_anchor drift", or "scene.description unclear".
 
 ### 3.7.3 As Generation Length Grows — How the Tool Evolves
 

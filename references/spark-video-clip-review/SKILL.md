@@ -23,7 +23,7 @@ export SPARK_VIDEO_PHASE=review
 **`render_shot.py` now scores every clip itself.** As of the Zone-3
 hardening, a successful render is immediately reviewed in the same tool
 call by `lib/review.py`: it builds the `bl omni` call, attaches the
-cast portraits for `shot.characters`, parses the 6-axis JSON, averages
+cast reference images for `shot.characters`, parses the 6-axis JSON, averages
 it, writes `reviews/<shot>-ver<N>.json`, embeds the review into
 `shots_state.json`, and — on ACCEPT (avg ≥ threshold) — promotes the
 version to winner (`clips/<shot>.mp4`). You do **not** hand-build the
@@ -91,7 +91,7 @@ uv run scripts/render_shot.py \
 ```
 
 In one call the script: writes `clips/S01-002-ver1.mp4`, extracts the
-last frame, scores the clip on the 6 axes (auto-resolving cast portraits
+last frame, scores the clip on the 6 axes (auto-resolving cast reference images
 from `cast.json`), writes `reviews/S01-002-ver1.json`, embeds the review
 into `shots_state.json`, and — if `verdict == ACCEPT` — promotes the
 version to winner (`clips/S01-002.mp4`). **You only read the verdict from
@@ -101,7 +101,7 @@ or copy the winner clip.
 Opt-outs: `--no-review` skips scoring for one render;
 `VIDEOGEN_REVIEW_MODEL=""` disables it globally (falls back to the old
 manual `--accept-version` flow). `--characters A B` overrides which cast
-portraits feed the `cast_match` axis (default: storyboard's
+reference images feed the `cast_match` axis (default: storyboard's
 `shot.characters`).
 
 ### 2. The review record (written for you)
@@ -159,7 +159,7 @@ Then write the escalation report (next section).
 ## Scoring rubric (6 axes)
 
 `bl omni` is asked for **six** sub-scores (each 0–10), then averaged
-into the headline `score`. Cast portraits for every character in
+into the headline `score`. Cast reference images for every character in
 `shot.characters[]` are attached so the model can match faces 1:1.
 
 | Axis | What it asks |
@@ -168,7 +168,7 @@ into the headline `score`. Cast portraits for every character in
 | **proportion** | Anatomy, character size relative to environment, perspective, hands / feet / facial proportions. |
 | **physics** | Gravity, collisions, momentum, cloth, hair, fluid behaviour. |
 | **style** | Matches `lore.mood_anchor` / `visual_style` / `palette`. No `forbidden` term/asset visible. |
-| **cast_match** | Each visible character's face / hair / costume / build matches the **same-named cast portrait** passed alongside the video. Drift / wrong identity → low score. Named characters not in cast → low score. |
+| **cast_match** | Each visible character's face / hair / costume / build matches the **same-named cast reference image** passed alongside the video. Drift / wrong identity → low score. Named characters not in cast → low score. |
 | **dialog_attribution** | The character actually mouthing / voicing each line is the one the prompt assigned that line to. **A's line delivered by B / B's mouth moves for A's line** is a hard 0-3. Shots with no dialog → 10. |
 
 **Default threshold**: `7.0` (env: `SPARK_VIDEO_REVIEW_THRESHOLD`).
@@ -301,7 +301,7 @@ chaining internally. You only intervene for prompt rewrites on REJECT.
   field). Structural changes are the director's job.
 - ❌ Don't override `winner_path` manually — `render_shot.py` maintains it.
 - ❌ Don't re-implement scoring by hand. `render_shot.py` already scores
-  every render via `lib/review.py` (cast portraits, 6-axis parse,
+  every render via `lib/review.py` (cast reference images, 6-axis parse,
   averaging, sidecar, promotion). Read the verdict from its stdout. The
   only reason to call the judge yourself is debugging.
 - ❌ Don't `--no-review` or set `VIDEOGEN_REVIEW_MODEL=""` to "speed

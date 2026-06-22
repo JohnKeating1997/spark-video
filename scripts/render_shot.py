@@ -163,7 +163,7 @@ def _extract_last_frame(video_path: Path, frame_path: Path) -> bool:
 def _shot_characters(ep_dir: Path, shot_id: str) -> list[str]:
     """Read shot.characters from storyboard.json (raw JSON — no pydantic).
 
-    Used to attach the right cast portraits to the review's cast_match axis
+    Used to attach the right cast reference images to the review's cast_match axis
     when the caller didn't pass --characters explicitly. Returns [] if the
     storyboard or shot is absent (review still runs, cast_match just weaker).
     """

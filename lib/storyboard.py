@@ -142,7 +142,7 @@ class Shot(BaseModel):
 
     # Key-prop references — names must match props.json. Each prop's
     # reference_image is appended to media[] for r2v shots, after cast
-    # portraits and after the scene's set image. Empty list = no prop
+    # cast references and after the scene's set image. Empty list = no prop
     # locking for this shot. The director SKILL forbids re-mentioning
     # the prop's appearance in the prompt — the reference image owns it.
     props: list[str] = Field(
@@ -330,7 +330,7 @@ class Scene(BaseModel):
             "``projects/<id>/<episode>/movie-set/<name>/``). When set, the "
             "renderer appends that set's reference image to every r2v shot "
             "in this scene, locking the location's appearance the same way "
-            "cast portraits lock characters. t2v shots can't take a "
+            "cast reference images lock characters. t2v shots can't take a "
             "reference image — for those, the director should still weave "
             "the set's textual description into the prompt."
         ),
