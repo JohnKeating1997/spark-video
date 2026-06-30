@@ -1,6 +1,6 @@
 ---
 name: spark-video-cast
-description: Scaffold and generate reference assets for characters (cast), locations (movie-set / set dressing), and key props — the three pillars of visual consistency in spark-video. Wraps bl image generate / edit for portrait creation. Use when adding new characters/locations/props or when costume/state changes are needed.
+description: Scaffold and generate reference assets for characters (cast), locations (movie-set / set dressing), and key props — the three pillars of visual consistency in spark-video. Wraps bl image generate / edit for cast reference-sheet creation. Use when adding new characters/locations/props or when costume/state changes are needed.
 ---
 
 # Cast / Set / Prop Skill — spark-video Art Department (all-in-one)
@@ -65,6 +65,21 @@ Naming convention: `<base_name>-<discriminator>`:
 
 ## Procedure 1 — scaffold a cast
 
+### Cast reference image contract
+
+Generated cast images should be **character reference sheets**, not
+single photoreal portraits. Seedance-style providers are less likely to
+reject an obviously synthetic character sheet than a realistic headshot.
+
+Every cast-image generation prompt MUST include this intent:
+
+> a three-view drawing of a person and annotate it with an AI-generated, non-real-person watermark on the bottom
+
+Make the sheet show the same character in front / side / back views,
+with consistent face, hair, costume, build, and a plain background. The
+bottom annotation is part of the image content for safety provenance;
+do **not** use provider watermark flags. Avoid any other readable text.
+
 ### 1.1 Lead / project-tier character
 
 ```bash
@@ -79,22 +94,24 @@ Then generate the portrait via bl:
 ```bash
 ./scripts/bl image generate \
   --model wan2.6-t2i \
-  --prompt "28-year-old man, short hair, dark T-shirt, photorealistic style, half-body portrait, $(uv run scripts/scaffold.py mood-anchor)" \
+  --prompt "a three-view drawing of a person and annotate it with an AI-generated, non-real-person watermark on the bottom, 28-year-old man, short hair, dark T-shirt, full-body character reference sheet, front view, side view, back view, same face and costume in all views, plain background, no other readable text, $(uv run scripts/scaffold.py mood-anchor)" \
   --size 16:9 \
   --out-dir projects/$SPARK_VIDEO_PROJECT/cast/陆辰/ \
   --out-prefix portrait
 ```
 
 Notes:
-- **Default model `wan2.6-t2i`**: produces stable cast portraits compatible
-  with downstream r2v. `qwen-image-2.0` is newer but visual style differs;
-  test before switching.
+- **Default model `wan2.6-t2i`**: produces stable cast reference sheets
+  compatible with downstream r2v. `qwen-image-2.0` is newer but visual
+  style differs; test before switching.
 - **Append `lore.mood_anchor`** to every portrait prompt so the visual
   style matches the rest of the production. The `scaffold.py mood-anchor`
   helper prints lore's mood_anchor for piping.
-- **Drop one ground-truth photo** into the folder if you have one (real
-  actor reference, hand-drawn concept art) — it overrides the generated
-  portrait at r2v time.
+- **Prefer generated / hand-drawn character sheets over real-person
+  photos** for providers with input privacy checks. If you drop a real
+  actor reference into the folder, make sure you have the right to use it
+  and that your target provider accepts real-person inputs; it overrides
+  the generated reference sheet at r2v time.
 
 Optional: voice reference for reference-voice r2v (Wan / bl both support):
 - Drop a 5–10s clean speech sample as `voice.mp3` in the cast folder.
@@ -107,7 +124,7 @@ uv run scripts/scaffold.py cast --name "钱夫人" --episode
 
 ./scripts/bl image generate \
   --model wan2.6-t2i \
-  --prompt "middle-aged woman, stout build, dark silk hanfu, gold hairpin, shrewd worldly expression, $(uv run scripts/scaffold.py mood-anchor)" \
+  --prompt "a three-view drawing of a person and annotate it with an AI-generated, non-real-person watermark on the bottom, middle-aged woman, stout build, dark silk hanfu, gold hairpin, shrewd worldly expression, full-body character reference sheet, front view, side view, back view, same face and costume in all views, plain background, no other readable text, $(uv run scripts/scaffold.py mood-anchor)" \
   --out-dir projects/$SPARK_VIDEO_PROJECT/episode-$SPARK_VIDEO_EPISODE/cast/钱夫人/ \
   --out-prefix portrait
 ```
@@ -129,7 +146,7 @@ uv run scripts/scaffold.py cast --fork --name "陆辰" --drop-portraits
 # Regenerate the portrait with the new appearance
 ./scripts/bl image edit \
   --image projects/$SPARK_VIDEO_PROJECT/cast/陆辰/portrait1.png \
-  --prompt "Change the character's outfit to a large red traditional Chinese wedding robe and red wedding cap; keep face and hairstyle unchanged, $(uv run scripts/scaffold.py mood-anchor)" \
+  --prompt "Create a three-view drawing of the same person and annotate it with an AI-generated, non-real-person watermark on the bottom. Change the character's outfit to a large red traditional Chinese wedding robe and red wedding cap; keep face and hairstyle unchanged. Output a full-body character reference sheet with front view, side view, back view, same face and costume in all views, plain background, no other readable text, $(uv run scripts/scaffold.py mood-anchor)" \
   --out-dir projects/$SPARK_VIDEO_PROJECT/episode-$SPARK_VIDEO_EPISODE/cast/陆辰/ \
   --out-prefix portrait
 
@@ -253,8 +270,8 @@ Without it, your asset visual style won't match the rendered shots.
 
 | Asset type | `--size` |
 |---|---|
-| Cast portrait (half-body) | `16:9` or `3:4` |
-| Cast portrait (full-body) | `9:16` |
+| Cast reference sheet (default) | `16:9` |
+| Legacy single cast portrait (only when provider accepts it) | `3:4` or `9:16` |
 | Set establishing | `16:9` |
 | Prop (product-style) | `1:1` |
 
@@ -317,7 +334,10 @@ any scene that references them.
 - ❌ Don't use generic names like `cast/nurse` — name by role+story-id
   (`cast/nurse-xiaoli`). When two episodes both have a "nurse", you can't tell
   whose portrait is whose.
-- ❌ Don't generate reference images with `--watermark`. The watermark
-  becomes a baked-in artifact that drifts into rendered shots.
+- ❌ Don't use provider / CLI watermark flags such as `--watermark`.
+  For generated **cast** sheets, ask for the bottom provenance
+  annotation in the prompt itself:
+  `AI-generated, non-real-person`. Keep it outside the character body
+  and avoid any other readable text.
 - ❌ Don't skip `scaffold.py *-init` after adding folders. The manifests
   are the only thing the rest of the pipeline reads.

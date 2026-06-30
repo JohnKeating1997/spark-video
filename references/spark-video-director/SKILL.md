@@ -80,6 +80,7 @@ Schema:
       "scene": "S<NN>",
       "narrative_purpose": "...",
       "prompt": "...",
+      "animatic_prompt": "...",
       "duration": 15,
       "kind": "r2v",
       "role": "drama",
@@ -106,6 +107,14 @@ uv run scripts/storyboard.py validate --scene $N
 
 **Use `kind`, NOT a vendor-specific model name.** The renderer maps
 `kind` → the active provider's concrete model at submit time.
+
+`animatic_prompt` is optional but recommended on visually tricky shots.
+It is the still-frame version of the shot for the pre-render comic
+storyboard preview. Keep it visual only: framing, character placement,
+action pose, mood, key prop/set presence. Omit dialog, voice, breath,
+sound effects, and camera motion that cannot be judged in a still image.
+If omitted, `storyboard.py animatic` derives the static panel from
+`prompt`.
 
 **Shot id convention**: `S<NN>-<ZZZ>` where `NN` is scene number and
 `ZZZ` is 1-based shot index inside that scene (`S01-001`, `S01-002`,
@@ -230,6 +239,55 @@ episode, switch to `图N` / `视频N` / `音频N` syntax.
 Append `lore.front.mood_anchor` **verbatim at the end of every shot
 prompt**. The renderer does NOT do this for you. Without it, every shot
 drifts visually.
+
+## Static storyboard preview before video render
+
+After compile, the producer generates 2-3 shots per comic-style preview
+image:
+
+```bash
+uv run scripts/storyboard.py animatic --generate --shots-per-image 3
+```
+
+The user must approve those images before video rendering:
+
+```bash
+uv run scripts/storyboard.py animatic --confirm
+```
+
+As director, write prompts so this preview is meaningful:
+
+1. Every shot must have a clear still-readable action pose and framing.
+2. Use `animatic_prompt` when the video prompt is mostly audio, dialog,
+   or camera movement; translate it into a single decisive frame.
+3. Do not use the static preview to solve consistency with extra wardrobe
+   or prop descriptions. Cast/set/prop references still own appearance.
+4. If the user rejects a panel sheet, edit the affected `scene-NN.json`
+   shots, re-compile, and regenerate the animatic before rendering.
+
+Video render is intentionally blocked until
+`storyboard-panels/CONFIRMED` exists.
+
+## Video prompt structure
+
+The renderer wraps each director prompt before sending it to the video
+model. The source `prompt` is still your creative contract, but the final
+provider prompt follows this stable structure:
+
+1. `Style` — same opening line every clip, derived from `lore.mood_anchor`
+   / `visual_style` unless overridden by `SPARK_VIDEO_PROMPT_STYLE`.
+2. `First frame note` — reference images are not literal first frames;
+   true first-frame chain inputs are called out separately.
+3. `Characters` — names from `Shot.characters`, no `@tags`.
+4. `Age and height` — keep age / relative height explicit and consistent
+   when people appear.
+5. `Voices` — yes when dialog, breath, or vocal reaction is specified.
+6. `Panel timing` — shot-local timing, e.g. `[0:00-0:09]`.
+7. `Audio` — no music; ambience and sound effects welcome.
+
+So your `prompt` should remain dense and shootable: action, camera,
+emotion, spoken text, and mood anchor. Do not hand-write the numbered
+wrapper unless you deliberately pass `render_shot.py --raw-prompt`.
 
 ## Character consistency — cast portrait does the work, prompt stays out
 

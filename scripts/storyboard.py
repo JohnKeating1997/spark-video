@@ -8,6 +8,7 @@ storyboard.py — storyboard operations (validate / compile / estimate / graph).
 Subcommands:
     validate            Validate per-scene JSON fragments and/or full storyboard.json
     compile             Merge scenes/scene-*.{md,json} → script.md + storyboard.json
+    animatic            Build/generate/confirm static storyboard panel sheets
     estimate            Print render duration & cost estimate. Exit 2 if over budget.
     graph               Print chain-DAG parallel groups (JSON array of arrays).
 
@@ -18,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -438,6 +440,264 @@ def cmd_compile(args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------------------------------------------------ animatic
+
+def _read_lore_front(ep_dir: Path) -> dict[str, str | list[str]]:
+    """Crude front-matter reader for lore.md without adding PyYAML here."""
+    lore_path = ep_dir.parent / "lore.md"
+    if not lore_path.exists():
+        return {}
+    text = lore_path.read_text(encoding="utf-8")
+    if not text.startswith("---"):
+        return {}
+    lines = text.splitlines()
+    front: dict[str, str | list[str]] = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if ":" not in line or line.startswith((" ", "\t")):
+            continue
+        key, raw = line.split(":", 1)
+        key = key.strip()
+        val = raw.strip().strip("'\"")
+        if not val:
+            continue
+        if val.startswith("[") and val.endswith("]"):
+            items = [x.strip().strip("'\"") for x in val[1:-1].split(",")]
+            front[key] = [x for x in items if x]
+        else:
+            front[key] = val
+    return front
+
+
+def _tc(seconds: int) -> str:
+    m, s = divmod(max(0, int(seconds)), 60)
+    return f"{m:02d}:{s:02d}"
+
+
+def _shot_offsets(sb: Storyboard) -> dict[str, tuple[int, int]]:
+    out: dict[str, tuple[int, int]] = {}
+    t = 0
+    for shot in sb.shots:
+        start = t
+        t += int(shot.duration)
+        out[shot.id] = (start, t)
+    return out
+
+
+def _chunks(seq: list[Shot], n: int) -> list[list[Shot]]:
+    return [seq[i:i + n] for i in range(0, len(seq), n)]
+
+
+def _animatic_panel_prompt(
+    *,
+    sb: Storyboard,
+    shots: list[Shot],
+    panel_no: int,
+    panel_count: int,
+    offsets: dict[str, tuple[int, int]],
+    lore_front: dict[str, str | list[str]],
+) -> str:
+    visual_style = str(lore_front.get("visual_style") or "").strip()
+    mood_anchor = str(lore_front.get("mood_anchor") or "").strip()
+    camera = str(lore_front.get("camera_language") or "").strip()
+    palette_raw = lore_front.get("palette") or []
+    palette = ", ".join(palette_raw) if isinstance(palette_raw, list) else str(palette_raw)
+
+    style_bits = [
+        "static comic storyboard sheet",
+        "cinematic blocking",
+        "clean black panel gutters",
+        "consistent characters and locations across panels",
+    ]
+    if visual_style:
+        style_bits.append(visual_style)
+    if camera:
+        style_bits.append(camera)
+    if palette:
+        style_bits.append(f"palette: {palette}")
+    if mood_anchor:
+        style_bits.append(mood_anchor)
+
+    lines = [
+        f"Create storyboard preview sheet {panel_no}/{panel_count}: "
+        f"{len(shots)} comic panels in one image.",
+        "",
+        "Style: " + "; ".join(style_bits) + ".",
+        "Layout: one sheet, separate panels, readable composition, no speech bubbles, no subtitles, no UI.",
+        "Purpose: static previsualization for user approval before paid video rendering.",
+        "",
+        "Panels:",
+    ]
+    for idx, shot in enumerate(shots, 1):
+        start, end = offsets[shot.id]
+        panel_prompt = (shot.animatic_prompt or shot.prompt).strip()
+        panel_prompt = " ".join(panel_prompt.split())
+        chars = ", ".join(shot.characters or []) or "none"
+        lines.extend([
+            f"{idx}. {shot.id} [{_tc(start)}-{_tc(end)}], {shot.kind}, {shot.duration}s",
+            f"   Characters: {chars}",
+            f"   Visual: {panel_prompt}",
+            f"   Narrative purpose: {shot.narrative_purpose or 'n/a'}",
+        ])
+    lines.extend([
+        "",
+        "Important: this is a still storyboard sheet, not a finished illustration. "
+        "Keep each panel clear enough to judge framing, action, mood, and continuity.",
+    ])
+    return "\n".join(lines).strip() + "\n"
+
+
+def _find_generated_panel_images(panel_dir: Path, prefix: str) -> list[Path]:
+    exts = {".png", ".jpg", ".jpeg", ".webp"}
+    return sorted(
+        p for p in panel_dir.glob(f"{prefix}*")
+        if p.is_file() and p.suffix.lower() in exts
+    )
+
+
+def cmd_animatic(args: argparse.Namespace) -> int:
+    ep_dir = _episode_dir()
+    sb_path = ep_dir / "storyboard.json"
+    if not sb_path.exists():
+        print("ERROR: storyboard.json not found. Run `storyboard.py compile` first.",
+              file=sys.stderr)
+        return 2
+
+    panel_dir = ep_dir / "storyboard-panels"
+    panel_dir.mkdir(parents=True, exist_ok=True)
+    confirm_path = panel_dir / "CONFIRMED"
+
+    if args.confirm:
+        manifest_path = panel_dir / "panels.json"
+        if not manifest_path.exists():
+            print(
+                f"ERROR: {manifest_path} missing. Run "
+                "`uv run scripts/storyboard.py animatic` first.",
+                file=sys.stderr,
+            )
+            return 2
+        confirm_path.write_text(
+            "User approved static storyboard panels for video rendering.\n",
+            encoding="utf-8",
+        )
+        print(f"confirmed {panel_dir}")
+        return 0
+
+    if args.unconfirm:
+        if confirm_path.exists():
+            confirm_path.unlink()
+        print(f"removed confirmation marker: {confirm_path}")
+        return 0
+
+    sb = Storyboard.model_validate(json.loads(sb_path.read_text(encoding="utf-8")))
+    lore_front = _read_lore_front(ep_dir)
+    offsets = _shot_offsets(sb)
+    groups = _chunks(sb.shots, args.shots_per_image)
+
+    manifest: dict = {
+        "storyboard": str(sb_path),
+        "shots_per_image": args.shots_per_image,
+        "model": args.model,
+        "size": args.size,
+        "panels": [],
+        "confirmed": confirm_path.exists(),
+    }
+
+    shell_lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        f"cd {shlex.quote(str(_HERE.parent))}",
+        f"export SPARK_VIDEO_PROJECT={shlex.quote(os.environ.get('SPARK_VIDEO_PROJECT', ''))}",
+        f"export SPARK_VIDEO_EPISODE={shlex.quote(os.environ.get('SPARK_VIDEO_EPISODE', ''))}",
+        "export SPARK_VIDEO_PHASE=animatic",
+        "",
+    ]
+
+    for i, shots in enumerate(groups, 1):
+        prefix = f"panel-{i:03d}"
+        prompt_path = panel_dir / f"{prefix}.prompt.txt"
+        prompt = _animatic_panel_prompt(
+            sb=sb,
+            shots=shots,
+            panel_no=i,
+            panel_count=len(groups),
+            offsets=offsets,
+            lore_front=lore_front,
+        )
+        prompt_path.write_text(prompt, encoding="utf-8")
+        out_images = _find_generated_panel_images(panel_dir, prefix)
+        manifest["panels"].append({
+            "id": prefix,
+            "shots": [s.id for s in shots],
+            "prompt": str(prompt_path),
+            "images": [str(p) for p in out_images],
+        })
+        shell_lines.extend([
+            f"echo '[animatic] {prefix}: {' '.join(s.id for s in shots)}'",
+            "./scripts/bl image generate "
+            f"--model {shlex.quote(args.model)} "
+            f"--prompt \"$(cat {shlex.quote(str(prompt_path))})\" "
+            f"--size {shlex.quote(args.size)} "
+            f"--out-dir {shlex.quote(str(panel_dir))} "
+            f"--out-prefix {shlex.quote(prefix)}",
+            "",
+        ])
+
+    manifest_path = panel_dir / "panels.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+
+    script_path = panel_dir / "generate-panels.sh"
+    script_path.write_text("\n".join(shell_lines).rstrip() + "\n", encoding="utf-8")
+    script_path.chmod(0o755)
+
+    if args.generate:
+        env = os.environ.copy()
+        env["SPARK_VIDEO_PHASE"] = "animatic"
+        for i, item in enumerate(manifest["panels"], 1):
+            prefix = item["id"]
+            if not args.force and _find_generated_panel_images(panel_dir, prefix):
+                print(f"[animatic] skip {prefix}: image already exists", file=sys.stderr)
+                continue
+            prompt_text = Path(item["prompt"]).read_text(encoding="utf-8")
+            cmd = [
+                str(_HERE / "bl"), "image", "generate",
+                "--model", args.model,
+                "--prompt", prompt_text,
+                "--size", args.size,
+                "--out-dir", str(panel_dir),
+                "--out-prefix", prefix,
+            ]
+            print(f"[animatic] generating {prefix} ({i}/{len(manifest['panels'])})",
+                  file=sys.stderr)
+            proc = subprocess.run(cmd, text=True, env=env, cwd=str(_HERE.parent))
+            if proc.returncode != 0:
+                print(f"ERROR: image generation failed for {prefix}", file=sys.stderr)
+                return proc.returncode
+
+        for item in manifest["panels"]:
+            item["images"] = [
+                str(p) for p in _find_generated_panel_images(panel_dir, item["id"])
+            ]
+        manifest["confirmed"] = confirm_path.exists()
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
+                                 encoding="utf-8")
+
+    print(json.dumps({
+        "panel_dir": str(panel_dir),
+        "manifest": str(manifest_path),
+        "generate_script": str(script_path),
+        "panels": len(groups),
+        "confirmed": confirm_path.exists(),
+        "next": (
+            "Review generated panel images, then run "
+            "`uv run scripts/storyboard.py animatic --confirm` before video render."
+        ),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 # ------------------------------------------------------------------ estimate
 
 def cmd_estimate(args: argparse.Namespace) -> int:
@@ -540,6 +800,23 @@ def main() -> int:
                        help="default: $SPARK_VIDEO_PROVIDER or 'bl'")
     p_cmp.add_argument("--narrator-voice", default=None)
     p_cmp.set_defaults(fn=cmd_compile)
+
+    p_anim = sub.add_parser("animatic")
+    p_anim.add_argument("--shots-per-image", type=int, choices=[2, 3], default=3,
+                        help="comic panels per generated storyboard image")
+    p_anim.add_argument("--model", default="wan2.6-t2i",
+                        help="image model for --generate")
+    p_anim.add_argument("--size", default="16:9",
+                        help="image aspect ratio / size passed to bl image generate")
+    p_anim.add_argument("--generate", action="store_true",
+                        help="call ./scripts/bl image generate for each panel sheet")
+    p_anim.add_argument("--force", action="store_true",
+                        help="regenerate panel images even if files already exist")
+    p_anim.add_argument("--confirm", action="store_true",
+                        help="mark generated panels approved for video rendering")
+    p_anim.add_argument("--unconfirm", action="store_true",
+                        help="remove the approval marker")
+    p_anim.set_defaults(fn=cmd_animatic)
 
     p_est = sub.add_parser("estimate")
     p_est.set_defaults(fn=cmd_estimate)

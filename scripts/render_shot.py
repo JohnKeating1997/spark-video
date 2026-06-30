@@ -25,7 +25,10 @@ Usage:
     uv run scripts/render_shot.py --shot S01-001 --kind r2v \\
         --prompt "..." --duration 12 --media a.png b.png \\
         [--voice cast.mp3] [--provider bl|wan27|seedance2] [--force] [--reset-attempts] \\
-        [--characters 陆辰 钱夫人] [--no-review]
+        [--characters 陆辰 钱夫人] [--no-review] [--skip-animatic-gate]
+
+By default, video rendering is blocked until the static storyboard panels
+have been approved via `uv run scripts/storyboard.py animatic --confirm`.
 
 Re-render flags:
     --force           render again even if a winner exists; keeps prior attempts
@@ -80,6 +83,15 @@ def _episode_dir() -> Path:
         sys.exit(2)
     ep_id = ep if ep.startswith("episode-") else f"episode-{ep}"
     return _projects_root() / proj / ep_id
+
+
+def _animatic_confirmed(ep_dir: Path) -> bool:
+    if os.environ.get("SPARK_VIDEO_SKIP_ANIMATIC_GATE", "").lower() in {
+        "1", "true", "yes", "y", "on",
+    }:
+        return True
+    panels_dir = ep_dir / "storyboard-panels"
+    return (panels_dir / "panels.json").exists() and (panels_dir / "CONFIRMED").exists()
 
 
 def _load_state(state_path: Path) -> dict:
@@ -182,6 +194,109 @@ def _shot_characters(ep_dir: Path, shot_id: str) -> list[str]:
     return []
 
 
+def _storyboard_shot(ep_dir: Path, shot_id: str) -> dict:
+    sb_path = ep_dir / "storyboard.json"
+    if not sb_path.exists():
+        return {}
+    try:
+        sb = json.loads(sb_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    for shot in sb.get("shots", []) or []:
+        if isinstance(shot, dict) and shot.get("id") == shot_id:
+            return shot
+    return {}
+
+
+def _read_lore_style(ep_dir: Path) -> dict[str, str]:
+    lore = ep_dir.parent / "lore.md"
+    if not lore.exists():
+        return {}
+    text = lore.read_text(encoding="utf-8")
+    if not text.startswith("---"):
+        return {}
+    out: dict[str, str] = {}
+    for line in text.splitlines()[1:]:
+        if line.strip() == "---":
+            break
+        if ":" not in line or line.startswith((" ", "\t")):
+            continue
+        key, raw = line.split(":", 1)
+        key = key.strip()
+        if key not in {"visual_style", "camera_language", "mood_anchor"}:
+            continue
+        val = raw.strip().strip("'\"")
+        if val:
+            out[key] = val
+    return out
+
+
+def _format_mmss(seconds: int) -> str:
+    m, s = divmod(max(0, int(seconds)), 60)
+    return f"{m:02d}:{s:02d}"
+
+
+def _structured_video_prompt(
+    *,
+    ep_dir: Path,
+    shot_id: str,
+    prompt: str,
+    duration: int,
+    media: list[str | Path],
+    first_frame: str | Path | None,
+    voice: str | Path | None,
+    characters: list[str],
+) -> str:
+    if prompt.lstrip().lower().startswith("style -"):
+        return prompt.rstrip()
+
+    style = _read_lore_style(ep_dir)
+    style_line = (
+        os.environ.get("SPARK_VIDEO_PROMPT_STYLE")
+        or style.get("mood_anchor")
+        or style.get("visual_style")
+        or "Cinematic live-action short film, consistent visual style across every clip."
+    )
+    camera = style.get("camera_language")
+    if camera and camera not in style_line:
+        style_line = f"{style_line}; {camera}"
+
+    shot = _storyboard_shot(ep_dir, shot_id)
+    char_names = characters or [
+        c for c in shot.get("characters", []) if isinstance(c, str)
+    ]
+    char_line = ", ".join(char_names) if char_names else "none"
+    if first_frame:
+        first_frame_note = "Use the provided first-frame input as the literal continuity bridge."
+    elif media:
+        first_frame_note = (
+            "DO NOT use uploaded reference images as the literal first frame; "
+            "treat them as identity, location, and prop references only."
+        )
+    else:
+        first_frame_note = "No uploaded reference image."
+
+    audio_line = (
+        "NO MUSIC. Sound effects, ambient audio, breath sounds, and spoken lines are welcome when specified."
+    )
+    if voice:
+        audio_line += " Match the provided reference voice."
+
+    sections = [
+        f"Style - {style_line}",
+        f"First frame note - {first_frame_note}",
+        f"Characters - {char_line}; describe by natural appearance only, no @tags or social handles.",
+        "Age and height - keep ages and relative heights explicit and consistent when the shot includes people.",
+        "Voices - yes when dialog, narration, breath, or vocal reactions are specified; keep voice continuity.",
+        f"Panel timing - [0:00-{_format_mmss(duration)}]",
+        f"Audio - {audio_line}",
+        "",
+        "Shot content -",
+        prompt.rstrip(),
+    ]
+    return "\n".join(sections).rstrip()
+
+
 def _load_provider(name: str):
     """Import scripts.providers.<name> dynamically."""
     try:
@@ -269,6 +384,12 @@ def main() -> int:
                     help="skip the automatic post-render clip review "
                          "(score + ACCEPT/REJECT). Also disabled globally "
                          "when VIDEOGEN_REVIEW_MODEL is set to empty string.")
+    ap.add_argument("--skip-animatic-gate", action="store_true",
+                    help="allow video rendering before static storyboard panels "
+                         "are confirmed (also SPARK_VIDEO_SKIP_ANIMATIC_GATE=1)")
+    ap.add_argument("--raw-prompt", action="store_true",
+                    help="send --prompt exactly as provided, without the "
+                         "standard video prompt structure")
     args = ap.parse_args()
 
     ep_dir = _episode_dir()
@@ -305,6 +426,18 @@ def main() -> int:
         print(json.dumps({"shot_id": args.shot, "winner_version": ver,
                           "winner_path": str(dst)}))
         return 0
+
+    if not args.skip_animatic_gate and not _animatic_confirmed(ep_dir):
+        print(
+            "ERROR: static storyboard panels are not confirmed. Run "
+            "`uv run scripts/storyboard.py animatic --generate`, review "
+            f"{ep_dir / 'storyboard-panels'}, then run "
+            "`uv run scripts/storyboard.py animatic --confirm`. "
+            "Pass --skip-animatic-gate only when you intentionally want to "
+            "spend video credits without that approval.",
+            file=sys.stderr,
+        )
+        return 2
 
     # Skip if winner exists, its file is still on disk, and not forced.
     # If the recorded winner_path is gone (user deleted the clip to retry),
@@ -396,6 +529,17 @@ def main() -> int:
 
     # Suppress model-generated BGM — cross-clip music can't be coherent.
     render_prompt = args.prompt.rstrip()
+    if not args.raw_prompt:
+        render_prompt = _structured_video_prompt(
+            ep_dir=ep_dir,
+            shot_id=args.shot,
+            prompt=render_prompt,
+            duration=args.duration,
+            media=media,
+            first_frame=first_frame,
+            voice=voice,
+            characters=args.characters or [],
+        )
     has_seedance_reference_audio = (
         provider_name == "seedance2"
         and any(_looks_like_audio_ref(ref) for ref in media)

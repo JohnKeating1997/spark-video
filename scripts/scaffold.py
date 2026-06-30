@@ -201,7 +201,7 @@ CAST_MD_TEMPLATE = """\
 name: "{name}"
 age: "TBD"
 gender: "TBD"
-visual_anchor: "TBD — one-line appearance for t2i"
+visual_anchor: "TBD — one-line appearance for cast reference-sheet t2i"
 voice_traits: "TBD"
 dont:
   - "forbidden looks / wardrobe"
@@ -216,7 +216,7 @@ dont:
 ## Visual anchor
 
 `visual_anchor` should paste directly into a t2i prompt.
-Example: "28-year-old man, short hair, dark T-shirt, photoreal, half-body portrait."
+Example: "a three-view drawing of a person and annotate it with an AI-generated, non-real-person watermark on the bottom, 28-year-old man, short hair, dark T-shirt, full-body character reference sheet, front view, side view, back view, same face and costume in all views, plain background, no other readable text."
 """
 
 
@@ -233,7 +233,7 @@ def cmd_cast(args: argparse.Namespace) -> int:
     md.write_text(CAST_MD_TEMPLATE.format(name=args.name))
     print(f"scaffolded {cast_dir}/")
     print(f"  → edit {md}")
-    print(f"  → drop one or more portrait images into {cast_dir}/")
+    print(f"  → drop one or more cast reference images into {cast_dir}/")
     print(f"  → then run: uv run scripts/scaffold.py cast-init")
     return 0
 

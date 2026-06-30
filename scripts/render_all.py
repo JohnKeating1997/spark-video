@@ -264,6 +264,7 @@ def _render_chain_group(
     ratio: str | None,
     provider: str | None,
     no_review: bool,
+    skip_animatic_gate: bool,
 ) -> list[dict]:
     """Render one chain group sequentially, passing first-frame between shots."""
     results = []
@@ -308,6 +309,8 @@ def _render_chain_group(
             cmd.extend(["--provider", provider])
         if no_review:
             cmd.append("--no-review")
+        if skip_animatic_gate:
+            cmd.append("--skip-animatic-gate")
         if shot.seed is not None:
             cmd.extend(["--seed", str(shot.seed)])
         if shot.negative_prompt:
@@ -371,6 +374,9 @@ def main() -> int:
     ap.add_argument("--ratio", default=None, help="aspect ratio override (e.g. 9:16)")
     ap.add_argument("--provider", default=None, help="provider override")
     ap.add_argument("--no-review", action="store_true", help="skip auto-review")
+    ap.add_argument("--skip-animatic-gate", action="store_true",
+                    help="allow video rendering before static storyboard panels "
+                         "are confirmed")
     args = ap.parse_args()
 
     if args.failed_only:
@@ -383,10 +389,29 @@ def main() -> int:
     ep_dir = _episode_dir()
     sb_path = ep_dir / "storyboard.json"
     state_path = ep_dir / "shots_state.json"
+    panels_dir = ep_dir / "storyboard-panels"
+    panels_manifest = panels_dir / "panels.json"
+    confirmed_path = panels_dir / "CONFIRMED"
 
     if not sb_path.exists():
         print("ERROR: storyboard.json not found. Run `storyboard.py compile` first.",
               file=sys.stderr)
+        return 2
+    if (
+        not args.skip_animatic_gate
+        and (not panels_manifest.exists() or not confirmed_path.exists())
+        and os.environ.get("SPARK_VIDEO_SKIP_ANIMATIC_GATE", "").lower()
+        not in {"1", "true", "yes", "y", "on"}
+    ):
+        print(
+            "ERROR: static storyboard panels are not confirmed. Run "
+            "`uv run scripts/storyboard.py animatic --generate`, review "
+            f"{ep_dir / 'storyboard-panels'}, then run "
+            "`uv run scripts/storyboard.py animatic --confirm`. "
+            "Pass --skip-animatic-gate only when you intentionally want to "
+            "spend video credits without that approval.",
+            file=sys.stderr,
+        )
         return 2
 
     sb = Storyboard.model_validate(json.loads(sb_path.read_text()))
@@ -439,6 +464,7 @@ def main() -> int:
                 mode=mode, target_shots=args.shot or None,
                 ratio=args.ratio, provider=provider,
                 no_review=args.no_review,
+                skip_animatic_gate=args.skip_animatic_gate,
             )
             futures[future] = i
 
