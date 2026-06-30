@@ -16,7 +16,7 @@ Set env vars at the top of every run:
 export SPARK_VIDEO_PROJECT=<project_id>
 export SPARK_VIDEO_EPISODE=<NN>
 export SPARK_VIDEO_PHASE=producer
-# SPARK_VIDEO_PROVIDER defaults to "bl"; only set if user opted for wan27
+# SPARK_VIDEO_PROVIDER defaults to "bl"; set only if user opted for wan27 or seedance2
 ```
 
 ## Inputs from the user
@@ -26,7 +26,7 @@ When invoked, the user gives you:
 2. **episode** (e.g. `001`)
 3. **premise** — one paragraph story idea
 4. (optional flags) `--vfx` to opt into pre-render VFX review,
-   `--mode=drama|narration` to skip GATE 0, `--provider=bl|wan27` to
+   `--mode=drama|narration` to skip GATE 0, `--provider=bl|wan27|seedance2` to
    skip provider selection.
 
 ## The 4+2 user-confirmation gates
@@ -330,7 +330,7 @@ back to the relevant step.
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `SPARK_VIDEO_PROVIDER` | `bl` | `bl` (default, covers happyhorse + wan2.6) or `wan27` (fallback for wan2.7 features) |
+| `SPARK_VIDEO_PROVIDER` | `bl` | `bl` (default, covers happyhorse + wan2.6), `wan27` (fallback for wan2.7 features), or `seedance2` (Volcengine Ark Seedance 2.0) |
 | `SPARK_VIDEO_MAX_CONCURRENCY` | `4` | Parallel chain groups / subagents |
 | `SPARK_VIDEO_REVIEW_THRESHOLD` | `7.0` | ACCEPT cutoff for clip-review |
 | `SPARK_VIDEO_MAX_RETRY` | `3` | Retry rounds per shot before escalation |

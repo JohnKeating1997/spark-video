@@ -152,7 +152,8 @@ For each shot prompt:
   vague (WARNING). Over 250 → diluted (WARNING).
 - Must contain: shot type (wide / medium / close / extreme close-up), action verb,
   character reference (`[Image 1]/[Image 2]` for bl/happyhorse r2v,
-  `图1/图2` for wan27).
+  `图1/图2` for wan27/seedance2, plus `视频N` / `音频N` when those
+  reference modalities are present).
 - Should NOT contain: wardrobe / hairstyle / makeup / accessories — these belong to the
   cast portrait, not the prompt. Repeating fights the reference image.
 - Should not contain: abstract emotions without physical actions
@@ -259,6 +260,9 @@ Check `Storyboard.provider` (or fall back to `$SPARK_VIDEO_PROVIDER`):
   **WARNING** (use `[Image 1]/[Image 2]` instead).
 - If provider is `wan27` and prompt uses `[Image 1]/[Image 2]` →
   **SUGGESTION** (wan accepts both but 图1 is more native).
+- If provider is `seedance2` and prompt uses `[Image 1]/[Image 2]` →
+  **WARNING** (Seedance 2 prompt rules expect `图N` / `视频N` / `音频N`
+  references by modality order).
 - Cap check: r2v shot with `cast count + (set ? 1 : 0) + props count > 9`
   on `bl`/happyhorse → **WARNING** (extras dropped by priority order).
 

@@ -457,7 +457,7 @@ def cmd_estimate(args: argparse.Namespace) -> int:
 
     long_confirm = int(os.environ.get("SPARK_VIDEO_LONG_CONFIRM_S", "600"))
 
-    provider = sb.provider or os.environ.get("VIDEOGEN_VIDEO_PROVIDER", "happyhorse")
+    provider = sb.provider or os.environ.get("VIDEOGEN_VIDEO_PROVIDER", "bl")
     resolution = sb.resolution
 
     duration_by_kind: dict[str, dict[str, int]] = {}
