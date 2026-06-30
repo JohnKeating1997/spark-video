@@ -24,7 +24,7 @@ when to escalate to the director.
 Usage:
     uv run scripts/render_shot.py --shot S01-001 --kind r2v \\
         --prompt "..." --duration 12 --media a.png b.png \\
-        [--voice cast.mp3] [--provider bl|wan27] [--force] [--reset-attempts] \\
+        [--voice cast.mp3] [--provider bl|wan27|seedance2] [--force] [--reset-attempts] \\
         [--characters 陆辰 钱夫人] [--no-review]
 
 Re-render flags:
@@ -59,6 +59,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
@@ -187,11 +188,50 @@ def _load_provider(name: str):
         mod = importlib.import_module(f"scripts.providers.{name}")
     except ImportError as e:
         raise SystemExit(
-            f"unknown provider '{name}'. Available: bl, dashscope_wan27"
+            f"unknown provider '{name}'. Available: bl, wan27, seedance2"
         ) from e
     if not hasattr(mod, "render"):
         raise SystemExit(f"provider '{name}' missing render() entrypoint")
     return mod
+
+
+_REMOTE_MEDIA_PREFIXES = ("http://", "https://", "asset://", "data:")
+_AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+
+
+def _is_remote_media_ref(value: str) -> bool:
+    return value.startswith(_REMOTE_MEDIA_PREFIXES)
+
+
+def _normalise_media_ref(value: str) -> str | Path:
+    if _is_remote_media_ref(value):
+        return value
+    return Path(value).expanduser().resolve()
+
+
+def _ref_suffix(value: str | Path) -> str:
+    if isinstance(value, Path):
+        return value.suffix.lower()
+    if value.startswith(("http://", "https://")):
+        return Path(urlparse(value).path).suffix.lower()
+    if value.startswith("data:audio/"):
+        return ".mp3"
+    return Path(value).suffix.lower()
+
+
+def _looks_like_audio_ref(value: str | Path) -> bool:
+    return _ref_suffix(value) in _AUDIO_EXTS
+
+
+def _normalise_provider_name(name: str) -> str:
+    value = (name or "bl").strip().lower()
+    return {
+        "happyhorse": "bl",
+        "wan": "dashscope_wan27",
+        "wan27": "dashscope_wan27",
+        "dashscope_wan27": "dashscope_wan27",
+        "seedance": "seedance2",
+    }.get(value, value)
 
 
 def main() -> int:
@@ -200,17 +240,21 @@ def main() -> int:
     ap.add_argument("--kind", required=True, choices=["t2v", "i2v", "r2v"])
     ap.add_argument("--prompt", required=True)
     ap.add_argument("--duration", type=int, default=5)
-    ap.add_argument("--media", nargs="*", default=[], help="reference image paths")
-    ap.add_argument("--voice", default=None, help="reference voice mp3")
+    ap.add_argument("--media", nargs="*", default=[],
+                    help="reference media paths; seedance2 also accepts "
+                         "http(s)://, asset://, and data: refs")
+    ap.add_argument("--voice", default=None,
+                    help="reference voice mp3 path; seedance2 also accepts "
+                         "http(s)://, asset://, and data: refs")
     ap.add_argument("--first-frame", default=None,
-                    help="prev shot's last frame (chain bridging, wan27 only)")
+                    help="prev shot's last frame (chain bridging, provider-specific)")
     ap.add_argument("--provider", default=None,
                     help="override SPARK_VIDEO_PROVIDER")
     ap.add_argument("--resolution", default="1080P")
     ap.add_argument("--ratio", default=None)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--negative-prompt", default=None,
-                    help="wan27 only; ignored on bl")
+                    help="providers with negative prompt support; ignored by bl")
     ap.add_argument("--accept-version", type=int, default=None,
                     help="don't render; just mark this version as winner")
     ap.add_argument("--force", action="store_true",
@@ -299,9 +343,9 @@ def main() -> int:
     os.environ["SPARK_VIDEO_ATTEMPT"] = str(version)
     os.environ.setdefault("SPARK_VIDEO_PHASE", "render")
 
-    provider_name = args.provider or os.environ.get("SPARK_VIDEO_PROVIDER", "bl")
-    if provider_name == "wan27":
-        provider_name = "dashscope_wan27"
+    provider_name = _normalise_provider_name(
+        args.provider or os.environ.get("SPARK_VIDEO_PROVIDER", "bl")
+    )
     mod = _load_provider(provider_name)
 
     clip_path = ep_dir / "clips" / f"{args.shot}-ver{version}.mp4"
@@ -314,26 +358,52 @@ def main() -> int:
     }
     if args.negative_prompt:
         extra["negative_prompt"] = args.negative_prompt
-    if args.first_frame:
-        extra["first_frame_url"] = args.first_frame
+    first_frame = _normalise_media_ref(args.first_frame) if args.first_frame else None
+    if first_frame:
+        extra["first_frame_url"] = (
+            first_frame if provider_name == "seedance2" else str(first_frame)
+        )
 
     # Resolve to absolute paths up front. Providers upload local files by
     # path, and a relative path resolved against a surprising cwd (e.g. when
     # the caller cd'd between collecting paths and invoking us) fails with
     # an opaque "Failed to download …" from the model API.
-    media = [Path(m).expanduser().resolve() for m in args.media]
-    voice = Path(args.voice).expanduser().resolve() if args.voice else None
+    media = [_normalise_media_ref(m) for m in args.media]
+    voice = _normalise_media_ref(args.voice) if args.voice else None
+
+    remote_refs = [
+        ref for ref in [*media, voice, first_frame]
+        if isinstance(ref, str) and ref is not None
+    ]
+    if remote_refs and provider_name != "seedance2":
+        print(
+            "ERROR: remote media references are currently only supported "
+            f"by --provider seedance2: {remote_refs[0]}",
+            file=sys.stderr,
+        )
+        return 2
+
     for m in media:
-        if not m.exists():
+        if isinstance(m, Path) and not m.exists():
             print(f"ERROR: --media file not found: {m}", file=sys.stderr)
             return 2
-    if voice and not voice.exists():
+    if isinstance(voice, Path) and not voice.exists():
         print(f"ERROR: --voice file not found: {voice}", file=sys.stderr)
+        return 2
+    if isinstance(first_frame, Path) and not first_frame.exists():
+        print(f"ERROR: --first-frame file not found: {first_frame}", file=sys.stderr)
         return 2
 
     # Suppress model-generated BGM — cross-clip music can't be coherent.
     render_prompt = args.prompt.rstrip()
-    if "no background music" not in render_prompt.lower():
+    has_seedance_reference_audio = (
+        provider_name == "seedance2"
+        and any(_looks_like_audio_ref(ref) for ref in media)
+    )
+    if (
+        "no background music" not in render_prompt.lower()
+        and not has_seedance_reference_audio
+    ):
         render_prompt += " No background music."
 
     started = datetime.now(timezone.utc).isoformat()

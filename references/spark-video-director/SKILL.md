@@ -212,18 +212,18 @@ fat at the storyboard level, not in post.**
 
 ## Provider capability table
 
-| Capability | bl (happyhorse + wan2.6) | wan27 (fallback only) | If active provider doesn't support it |
-|---|---|---|---|
-| `r2v` first-frame chain (cast images + prev last-frame) | partial — chain works but cast image priority is limited | ✅ full | The dispatcher demotes to plain `i2v` (drops cast images, keeps the chain). Prefer breaking the chain + fresh `r2v` if a key character must be visible. |
-| `r2v` reference voice (`--image-voice`) | ✅ | ✅ | n/a — both support it. |
-| `negative_prompt` | ❌ ignored by happyhorse | ✅ wan2.7 | Encode forbidden imagery in the positive prompt when on bl. |
-| `prompt_extend` | ❌ ignored | ✅ wan2.7 | Write fully-specified prompts; don't rely on auto-elaboration. |
-| Reference syntax in r2v prompts | `[Image 1] / [Image 2]` (happyhorse), `图1 / 图2` (wan2.6) | `图1 / 图2 / 视频1` (wan2.7) | Default to `[Image 1]` style when unsure — bl/happyhorse rejects 图1. |
-| Duration floor / ceiling | 3s / 15s (happyhorse) | 2s / 15s | Dispatcher clamps and warns. |
+| Capability | bl (happyhorse + wan2.6) | wan27 (fallback only) | seedance2 (Volcengine Ark) | If active provider doesn't support it |
+|---|---|---|---|---|
+| `r2v` first-frame chain (cast images + prev last-frame) | partial — chain works but cast image priority is limited | ✅ full | ✅ via `first_frame` plus references | The dispatcher demotes to plain `i2v` (drops cast images, keeps the chain). Prefer breaking the chain + fresh `r2v` if a key character must be visible. |
+| `r2v` reference voice (`--image-voice`) | ✅ | ✅ | ✅ as `reference_audio` URL / asset | n/a — all current providers support a voice/audio reference path, but seedance2 local audio must be uploaded first. |
+| `negative_prompt` | ❌ ignored by happyhorse | ✅ wan2.7 | ❌ ignored | Encode forbidden imagery in the positive prompt when unsupported. |
+| `prompt_extend` | ❌ ignored | ✅ wan2.7 | ❌ ignored | Write fully-specified prompts; don't rely on auto-elaboration. |
+| Reference syntax in r2v prompts | `[Image 1] / [Image 2]` (happyhorse), `图1 / 图2` (wan2.6) | `图1 / 图2 / 视频1` (wan2.7) | `图1 / 图2 / 视频1 / 音频1` | Default to `[Image 1]` style when unsure — bl/happyhorse rejects 图1. |
+| Duration floor / ceiling | 3s / 15s (happyhorse) | 2s / 15s | 2s / 15s | Dispatcher clamps and warns. |
 
 **Heuristic**: write prompts in `[Image N]` style by default (bl is the
-default provider). If the producer pins `wan27` for this episode, switch
-to `图N` syntax.
+default provider). If the producer pins `wan27` or `seedance2` for this
+episode, switch to `图N` / `视频N` / `音频N` syntax.
 
 ## Mood anchor (single biggest visual cohesion lever)
 
@@ -447,7 +447,7 @@ Naming: `<prop_name>-<state>` — `红包-完整`, `红包-起皱`, `红包-撕�
    state word ("creased red envelope" — never "large red hot-stamped envelope printed with 囍").
 
 6. **Provider image cap**: r2v media[] has a hard ceiling
-   (bl/happyhorse ~9, wan27 higher). Priority order: cast → set → props.
+   (bl/happyhorse ~9, wan27/seedance2 higher). Priority order: cast → set → props.
    If the cap is hit, the dispatcher drops props first with a warning.
    Mitigation:
    - Lower `Shot.characters` to who's actually visible in this beat.

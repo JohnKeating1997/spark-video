@@ -44,6 +44,12 @@ sys.path.insert(0, str(_HERE.parent))
 from lib.storyboard import Storyboard  # noqa: E402
 from lib.render_graph import compute_chain_groups  # noqa: E402
 
+_REMOTE_MEDIA_PREFIXES = ("http://", "https://", "asset://", "data:")
+
+
+def _is_remote_media_ref(value: str) -> bool:
+    return value.startswith(_REMOTE_MEDIA_PREFIXES)
+
 
 def _projects_root() -> Path:
     return Path(os.environ.get("VIDEOGEN_PROJECTS_DIR", "./projects")).resolve()
@@ -79,7 +85,7 @@ def _resolve_media(shot, scenes_by_id: dict, cast_index: dict,
 
     for char in shot.characters:
         path = cast_index.get(char)
-        if path and Path(path).exists():
+        if path and (_is_remote_media_ref(path) or Path(path).exists()):
             media.append(path)
 
     effective_set_id = shot.set_id
@@ -89,12 +95,12 @@ def _resolve_media(shot, scenes_by_id: dict, cast_index: dict,
             effective_set_id = scene.get("set_id")
     if effective_set_id and effective_set_id in set_index:
         path = set_index[effective_set_id]
-        if path and Path(path).exists():
+        if path and (_is_remote_media_ref(path) or Path(path).exists()):
             media.append(path)
 
     for prop_name in (shot.props or []):
         path = prop_index.get(prop_name)
-        if path and Path(path).exists():
+        if path and (_is_remote_media_ref(path) or Path(path).exists()):
             media.append(path)
 
     return media
@@ -384,6 +390,7 @@ def main() -> int:
         return 2
 
     sb = Storyboard.model_validate(json.loads(sb_path.read_text()))
+    provider = args.provider or sb.provider
 
     if mode == "reset" and not args.shot:
         state_path.write_text("{}")
@@ -417,7 +424,8 @@ def main() -> int:
 
     total_shots = sum(len(g) for g in groups)
     print(f"[render_all] {total_shots} shots in {len(groups)} chain groups, "
-          f"concurrency={max_workers}, mode={mode}")
+          f"concurrency={max_workers}, mode={mode}, "
+          f"provider={provider or os.environ.get('SPARK_VIDEO_PROVIDER', 'bl')}")
 
     all_results = []
 
@@ -429,7 +437,7 @@ def main() -> int:
                 group, shots_by_id, scenes_by_id,
                 cast_index, set_index, prop_index, state,
                 mode=mode, target_shots=args.shot or None,
-                ratio=args.ratio, provider=args.provider,
+                ratio=args.ratio, provider=provider,
                 no_review=args.no_review,
             )
             futures[future] = i
