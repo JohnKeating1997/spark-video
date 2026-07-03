@@ -5,10 +5,12 @@
 """
 render_all.py — batch-render all (or a subset of) shots in one command.
 
-Reads storyboard.json, resolves media from cast.json / movie_set.json /
-props.json, computes chain groups for parallelism, and invokes
-render_shot.py per shot with correct arguments. Chain groups run in
-parallel; shots within a chain run sequentially with first-frame bridging.
+Reads storyboard.json, resolves media from per-shot storyboard reference
+images + cast.json / movie_set.json / props.json, computes chain groups
+for parallelism, and invokes render_shot.py per shot with correct
+arguments. Chain groups run in parallel; shots within a chain run
+sequentially, with first-frame bridging skipped for shots that use an
+approved storyboard reference image.
 
 Usage:
     # Full reset — re-render everything from scratch:
@@ -75,13 +77,67 @@ def _load_json(p: Path):
         return None
 
 
-def _resolve_media(shot, scenes_by_id: dict, cast_index: dict,
-                   set_index: dict, prop_index: dict) -> list[str]:
-    """Build the --media list for one shot: cast portraits → set image → props."""
-    if shot.kind == "t2v":
-        return []
+def _build_animatic_index(ep_dir: Path) -> dict[str, str]:
+    """Map shot id -> approved per-shot storyboard reference image."""
+    manifest = _load_json(ep_dir / "storyboard-panels" / "panels.json") or {}
+    idx: dict[str, str] = {}
+    for item in manifest.get("panels", []) or []:
+        shots = item.get("shots") or []
+        if len(shots) != 1:
+            continue
+        shot_id = shots[0]
+        if not isinstance(shot_id, str) or not shot_id:
+            continue
+        for image in item.get("images", []) or []:
+            ref = str(image)
+            if _is_remote_media_ref(ref):
+                idx[shot_id] = ref
+                break
+            path = Path(ref)
+            if path.exists():
+                idx[shot_id] = str(path)
+                break
+    return idx
 
+
+def _with_storyboard_reference_note(prompt: str,
+                                    has_animatic_reference: bool) -> str:
+    """Tell the video model how to use the per-shot storyboard image."""
+    if not has_animatic_reference:
+        return prompt
+    marker = "Storyboard reference -"
+    if marker in prompt:
+        return prompt
+    note = (
+        "Storyboard reference - The first reference image is the approved "
+        "static storyboard reference for this clip. Follow its composition, "
+        "camera angle, character placement, framing, lighting, key action, "
+        "and mood. Use it as a storyboard/composition reference only; do not "
+        "treat it as a literal first frame. Do not copy labels, borders, "
+        "captions, or UI from the reference image."
+    )
+    return f"{note}\n\n{prompt.rstrip()}".rstrip()
+
+
+def _resolve_media(shot, scenes_by_id: dict, cast_index: dict,
+                   set_index: dict, prop_index: dict,
+                   animatic_index: dict[str, str] | None = None) -> list[str]:
+    """Build --media: storyboard reference image -> cast -> set -> props.
+
+    Keep this order stable: render_shot.py turns the actual uploaded image
+    order into Image 1 / Image 2 / ... reference-map text in the final
+    provider prompt.
+    """
     media = []
+    animatic_ref = (animatic_index or {}).get(shot.id)
+    has_animatic_ref = False
+    if animatic_ref and (_is_remote_media_ref(animatic_ref)
+                         or Path(animatic_ref).exists()):
+        media.append(animatic_ref)
+        has_animatic_ref = True
+
+    if shot.kind == "t2v" and not has_animatic_ref:
+        return []
 
     for char in shot.characters:
         path = cast_index.get(char)
@@ -135,82 +191,97 @@ def _scan_first_image(folder: Path) -> str | None:
     """Return the first image file in a folder, or None."""
     if not folder.is_dir():
         return None
+    for name in ("cast.png", "portrait.png", "set.png", "prop.png"):
+        preferred = folder / name
+        if preferred.is_file():
+            return str(preferred)
     for f in sorted(folder.iterdir()):
         if f.is_file() and f.suffix.lower() in _IMAGE_EXTS:
             return str(f)
     return None
 
 
+def _asset_records(data, plural_key: str) -> list[dict]:
+    if not isinstance(data, dict):
+        return []
+    value = data.get(plural_key)
+    if isinstance(value, list):
+        return [x for x in value if isinstance(x, dict)]
+    if isinstance(value, dict):
+        return [x for x in value.values() if isinstance(x, dict)]
+    return [x for x in data.values() if isinstance(x, dict)]
+
+
+def _first_record_image(record: dict) -> str | None:
+    for key in ("image_local", "image", "path"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            return value
+    for value in record.get("images", []) or []:
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _normalise_manifest_image(image: str) -> str | None:
+    if _is_remote_media_ref(image):
+        return image
+    path = Path(image).expanduser()
+    try:
+        return str(path.resolve()) if path.exists() else None
+    except OSError:
+        return None
+
+
+def _build_asset_index(
+    ep_dir: Path,
+    *,
+    json_name: str,
+    plural_key: str,
+    folder_name: str,
+) -> dict[str, str]:
+    """Map asset name to image path from manifest, with folder fallback."""
+    proj_dir = ep_dir.parent
+    idx: dict[str, str] = {}
+    for data_path in [ep_dir / json_name, proj_dir / json_name]:
+        data = _load_json(data_path)
+        for record in _asset_records(data, plural_key):
+            name = record.get("name")
+            image = _first_record_image(record)
+            ref = _normalise_manifest_image(image) if isinstance(image, str) else None
+            if isinstance(name, str) and ref and name not in idx:
+                idx[name] = ref
+    for folder in [ep_dir / folder_name, proj_dir / folder_name]:
+        if not folder.is_dir():
+            continue
+        for asset_dir in sorted(folder.iterdir()):
+            if not asset_dir.is_dir() or asset_dir.name in idx:
+                continue
+            image = _scan_first_image(asset_dir)
+            if image:
+                idx[asset_dir.name] = str(Path(image).expanduser().resolve())
+    return idx
+
+
 def _build_cast_index(ep_dir: Path) -> dict[str, str]:
     """Map character name → portrait path from cast.json, with folder fallback."""
-    proj_dir = ep_dir.parent
-    data = _load_json(ep_dir / "cast.json")
-    idx = {}
-    if data:
-        for c in data.get("characters", []) or []:
-            name = c.get("name")
-            img = c.get("image_local")
-            if name and img:
-                idx[name] = img
-    if not idx:
-        for d in [ep_dir / "cast", proj_dir / "cast"]:
-            if not d.is_dir():
-                continue
-            for char_dir in sorted(d.iterdir()):
-                if not char_dir.is_dir() or char_dir.name in idx:
-                    continue
-                img = _scan_first_image(char_dir)
-                if img:
-                    idx[char_dir.name] = img
-    return idx
+    return _build_asset_index(
+        ep_dir, json_name="cast.json", plural_key="characters", folder_name="cast"
+    )
 
 
 def _build_set_index(ep_dir: Path) -> dict[str, str]:
     """Map set name → set image path from movie_set.json, with folder fallback."""
-    proj_dir = ep_dir.parent
-    data = _load_json(ep_dir / "movie_set.json")
-    idx = {}
-    if data:
-        for s in data.get("sets", []) or []:
-            name = s.get("name")
-            img = s.get("image_local")
-            if name and img:
-                idx[name] = img
-    if not idx:
-        for d in [ep_dir / "movie-set", proj_dir / "movie-set"]:
-            if not d.is_dir():
-                continue
-            for set_dir in sorted(d.iterdir()):
-                if not set_dir.is_dir() or set_dir.name in idx:
-                    continue
-                img = _scan_first_image(set_dir)
-                if img:
-                    idx[set_dir.name] = img
-    return idx
+    return _build_asset_index(
+        ep_dir, json_name="movie_set.json", plural_key="sets", folder_name="movie-set"
+    )
 
 
 def _build_prop_index(ep_dir: Path) -> dict[str, str]:
     """Map prop name → prop image path from props.json, with folder fallback."""
-    proj_dir = ep_dir.parent
-    data = _load_json(ep_dir / "props.json")
-    idx = {}
-    if data:
-        for p in data.get("props", []) or []:
-            name = p.get("name")
-            img = p.get("image_local")
-            if name and img:
-                idx[name] = img
-    if not idx:
-        for d in [ep_dir / "props", proj_dir / "props"]:
-            if not d.is_dir():
-                continue
-            for prop_dir in sorted(d.iterdir()):
-                if not prop_dir.is_dir() or prop_dir.name in idx:
-                    continue
-                img = _scan_first_image(prop_dir)
-                if img:
-                    idx[prop_dir.name] = img
-    return idx
+    return _build_asset_index(
+        ep_dir, json_name="props.json", plural_key="props", folder_name="props"
+    )
 
 
 def _should_render(shot_id: str, state: dict, *, mode: str) -> bool:
@@ -257,6 +328,7 @@ def _render_chain_group(
     cast_index: dict,
     set_index: dict,
     prop_index: dict,
+    animatic_index: dict[str, str],
     state: dict,
     *,
     mode: str,
@@ -266,7 +338,7 @@ def _render_chain_group(
     no_review: bool,
     skip_animatic_gate: bool,
 ) -> list[dict]:
-    """Render one chain group sequentially, passing first-frame between shots."""
+    """Render one chain group sequentially, passing first-frame when safe."""
     results = []
     prev_last_frame: str | None = None
 
@@ -286,13 +358,21 @@ def _render_chain_group(
             results.append({"shot_id": shot_id, "error": "not in storyboard"})
             continue
 
-        media = _resolve_media(shot, scenes_by_id, cast_index, set_index, prop_index)
+        animatic_ref = animatic_index.get(shot_id)
+        has_animatic_reference = bool(animatic_ref)
+        media = _resolve_media(
+            shot, scenes_by_id, cast_index, set_index, prop_index, animatic_index
+        )
+        render_kind = "r2v" if has_animatic_reference else shot.kind
+        render_prompt = _with_storyboard_reference_note(
+            shot.prompt, has_animatic_reference
+        )
 
         cmd = [
             "uv", "run", str(_HERE / "render_shot.py"),
             "--shot", shot_id,
-            "--kind", shot.kind,
-            "--prompt", shot.prompt,
+            "--kind", render_kind,
+            "--prompt", render_prompt,
             "--duration", str(shot.duration),
         ]
         if mode == "reset" and not target_shots:
@@ -319,12 +399,15 @@ def _render_chain_group(
             cmd.append("--characters")
             cmd.extend(shot.characters)
 
-        if prev_last_frame and shot.use_prev_last_frame_as_first:
+        if (not has_animatic_reference
+                and prev_last_frame
+                and shot.use_prev_last_frame_as_first):
             if Path(prev_last_frame).exists():
                 cmd.extend(["--first-frame", prev_last_frame])
 
-        print(f"[render] {shot_id} ({shot.kind}, {shot.duration}s, "
-              f"{len(shot.characters)} chars)", flush=True)
+        ref_tag = ", storyboard-ref" if has_animatic_reference else ""
+        print(f"[render] {shot_id} ({render_kind}, {shot.duration}s, "
+              f"{len(shot.characters)} chars{ref_tag})", flush=True)
 
         try:
             proc = subprocess.run(
@@ -375,8 +458,8 @@ def main() -> int:
     ap.add_argument("--provider", default=None, help="provider override")
     ap.add_argument("--no-review", action="store_true", help="skip auto-review")
     ap.add_argument("--skip-animatic-gate", action="store_true",
-                    help="allow video rendering before static storyboard panels "
-                         "are confirmed")
+                    help="allow video rendering before static storyboard "
+                         "reference images are confirmed")
     args = ap.parse_args()
 
     if args.failed_only:
@@ -397,14 +480,18 @@ def main() -> int:
         print("ERROR: storyboard.json not found. Run `storyboard.py compile` first.",
               file=sys.stderr)
         return 2
+    animatic_gate_skipped = (
+        args.skip_animatic_gate
+        or os.environ.get("SPARK_VIDEO_SKIP_ANIMATIC_GATE", "").lower()
+        in {"1", "true", "yes", "y", "on"}
+    )
+
     if (
-        not args.skip_animatic_gate
+        not animatic_gate_skipped
         and (not panels_manifest.exists() or not confirmed_path.exists())
-        and os.environ.get("SPARK_VIDEO_SKIP_ANIMATIC_GATE", "").lower()
-        not in {"1", "true", "yes", "y", "on"}
     ):
         print(
-            "ERROR: static storyboard panels are not confirmed. Run "
+            "ERROR: static storyboard reference images are not confirmed. Run "
             "`uv run scripts/storyboard.py animatic --generate`, review "
             f"{ep_dir / 'storyboard-panels'}, then run "
             "`uv run scripts/storyboard.py animatic --confirm`. "
@@ -417,18 +504,10 @@ def main() -> int:
     sb = Storyboard.model_validate(json.loads(sb_path.read_text()))
     provider = args.provider or sb.provider
 
-    if mode == "reset" and not args.shot:
-        state_path.write_text("{}")
-        state = {}
-        print("[render_all] state reset — rendering all shots from scratch")
-    else:
-        state = _load_json(state_path) or {}
-        if args.shot:
-            print(f"[render_all] re-rendering {args.shot} (preserving version history)")
-
     cast_index = _build_cast_index(ep_dir)
     set_index = _build_set_index(ep_dir)
     prop_index = _build_prop_index(ep_dir)
+    animatic_index = _build_animatic_index(ep_dir)
 
     shots_by_id = {s.id: s for s in sb.shots}
     scenes_by_id = {sc.id: {"set_id": sc.set_id} for sc in sb.scenes}
@@ -443,6 +522,31 @@ def main() -> int:
             print(f"ERROR: none of {args.shot} found in storyboard chain groups",
                   file=sys.stderr)
             return 2
+
+    if not animatic_gate_skipped:
+        required_ids = [sid for group in groups for sid in group]
+        missing_refs = [sid for sid in required_ids if sid not in animatic_index]
+        if missing_refs:
+            preview = ", ".join(missing_refs[:12])
+            more = "" if len(missing_refs) <= 12 else f" (+{len(missing_refs) - 12} more)"
+            print(
+                "ERROR: confirmed storyboard references are not one-image-per-clip "
+                f"or are missing image files for: {preview}{more}. Regenerate with "
+                "`uv run scripts/storyboard.py animatic --generate --force`, review, "
+                "then confirm again. Storyboard reference images are passed as "
+                "reference_image media, never as first_frame.",
+                file=sys.stderr,
+            )
+            return 2
+
+    if mode == "reset" and not args.shot:
+        state_path.write_text("{}")
+        state = {}
+        print("[render_all] state reset — rendering all shots from scratch")
+    else:
+        state = _load_json(state_path) or {}
+        if args.shot:
+            print(f"[render_all] re-rendering {args.shot} (preserving version history)")
 
     max_workers = args.concurrency or int(
         os.environ.get("SPARK_VIDEO_MAX_CONCURRENCY", "4"))
@@ -460,11 +564,11 @@ def main() -> int:
             future = pool.submit(
                 _render_chain_group,
                 group, shots_by_id, scenes_by_id,
-                cast_index, set_index, prop_index, state,
+                cast_index, set_index, prop_index, animatic_index, state,
                 mode=mode, target_shots=args.shot or None,
                 ratio=args.ratio, provider=provider,
                 no_review=args.no_review,
-                skip_animatic_gate=args.skip_animatic_gate,
+                skip_animatic_gate=animatic_gate_skipped,
             )
             futures[future] = i
 

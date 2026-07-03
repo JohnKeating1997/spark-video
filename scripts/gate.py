@@ -163,15 +163,15 @@ def gate_storyboard(ep_dir: Path) -> GateResult:
         "1", "true", "yes", "y", "on",
     }
     if skip:
-        r.add("static storyboard panels confirmed", True,
+        r.add("static storyboard reference images confirmed", True,
               "skipped by SPARK_VIDEO_SKIP_ANIMATIC_GATE", severity="warn")
     else:
-        r.add("static storyboard panel manifest exists", manifest.exists(),
+        r.add("static storyboard reference manifest exists", manifest.exists(),
               str(manifest) if manifest.exists()
               else f"{manifest} missing — run `uv run scripts/storyboard.py animatic`")
-        r.add("static storyboard panels confirmed", confirmed.exists(),
+        r.add("static storyboard reference images confirmed", confirmed.exists(),
               str(confirmed) if confirmed.exists()
-              else f"{confirmed} missing — review panels, then run "
+              else f"{confirmed} missing — review reference images, then run "
               "`uv run scripts/storyboard.py animatic --confirm`")
     return r
 

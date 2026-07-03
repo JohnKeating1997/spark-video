@@ -595,8 +595,23 @@ const renderReview = (r) => {{
 
 const shotsHtml = (D.shots||[]).map((shot, si) => {{
   const versions = shot.versions || [];
+  const shotPromptBlock = shot.prompt
+    ? `<details open style="margin:8px 0"><summary>storyboard prompt (director's intent) · ${{(shot.prompt||'').length}} chars</summary><div class="md"><pre>${{esc(shot.prompt)}}</pre></div></details>`
+    : '';
+  const shotHead = `<div class="shot-head">
+      <span class="id">${{esc(shot.id)}}</span>
+      ${{shot.scene ? `<span class="pill">${{esc(shot.scene)}}</span>` : ''}}
+      ${{shot.kind ? `<span class="pill">${{esc(shot.kind)}}</span>` : ''}}
+      ${{shot.duration ? `<span class="pill">${{shot.duration}}s</span>` : ''}}
+      ${{(shot.characters||[]).map(c=>`<span class="kpill">${{esc(c)}}</span>`).join('')}}
+      ${{shot.narrative_purpose ? `<div class="purpose">${{esc(shot.narrative_purpose)}}</div>` : ''}}
+    </div>`;
   if (!versions.length) {{
-    return `<div class="shot"><div class="shot-head"><span class="id">${{esc(shot.id)}}</span><span class="pill">no clips</span></div></div>`;
+    return `<div class="shot">
+      ${{shotHead}}
+      ${{shotPromptBlock}}
+      <div class="empty">(no clips yet — storyboard only)</div>
+    </div>`;
   }}
   const winner = shot.winner_version;
   const tabs = versions.map(v => `<div class="tab ${{v.version===winner?'winner':''}}" data-shot="${{si}}" data-ver="${{v.version}}">v${{v.version}}</div>`).join('');
@@ -635,18 +650,8 @@ const shotsHtml = (D.shots||[]).map((shot, si) => {{
       <div>${{renderReview(v.review)}}</div>
     </div>
   </div>`).join('');
-  const shotPromptBlock = shot.prompt
-    ? `<details style="margin:8px 0"><summary>storyboard prompt (director's intent) · ${{(shot.prompt||'').length}} chars</summary><div class="md"><pre>${{esc(shot.prompt)}}</pre></div></details>`
-    : '';
   return `<div class="shot">
-    <div class="shot-head">
-      <span class="id">${{esc(shot.id)}}</span>
-      ${{shot.scene ? `<span class="pill">${{esc(shot.scene)}}</span>` : ''}}
-      ${{shot.kind ? `<span class="pill">${{esc(shot.kind)}}</span>` : ''}}
-      ${{shot.duration ? `<span class="pill">${{shot.duration}}s</span>` : ''}}
-      ${{(shot.characters||[]).map(c=>`<span class="kpill">${{esc(c)}}</span>`).join('')}}
-      ${{shot.narrative_purpose ? `<div class="purpose">${{esc(shot.narrative_purpose)}}</div>` : ''}}
-    </div>
+    ${{shotHead}}
     ${{shotPromptBlock}}
     <div class="tabs">${{tabs}}</div>
     ${{panels}}

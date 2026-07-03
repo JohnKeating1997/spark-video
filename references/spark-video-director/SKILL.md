@@ -242,11 +242,11 @@ drifts visually.
 
 ## Static storyboard preview before video render
 
-After compile, the producer generates 2-3 shots per comic-style preview
-image:
+After compile, the producer generates one static storyboard reference
+image per clip:
 
 ```bash
-uv run scripts/storyboard.py animatic --generate --shots-per-image 3
+uv run scripts/storyboard.py animatic --generate
 ```
 
 The user must approve those images before video rendering:
@@ -262,11 +262,20 @@ As director, write prompts so this preview is meaningful:
    or camera movement; translate it into a single decisive frame.
 3. Do not use the static preview to solve consistency with extra wardrobe
    or prop descriptions. Cast/set/prop references still own appearance.
-4. If the user rejects a panel sheet, edit the affected `scene-NN.json`
+4. Do not add a medium-specific style phrase such as "and 2D animation
+   style" unless the project or episode explicitly requires that style
+   for the clip.
+5. If the user rejects a reference image, edit the affected `scene-NN.json`
    shots, re-compile, and regenerate the animatic before rendering.
 
 Video render is intentionally blocked until
 `storyboard-panels/CONFIRMED` exists.
+
+During rendering, the approved storyboard image is passed as reference
+media / `reference_image` for the same clip. It is never used as
+`first_frame`; the render prompt should ask the model to follow
+composition, camera angle, character placement, framing, lighting, key
+action, and mood, not to copy the static image as frame 0.
 
 ## Video prompt structure
 

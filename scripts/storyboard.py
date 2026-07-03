@@ -8,7 +8,7 @@ storyboard.py — storyboard operations (validate / compile / estimate / graph).
 Subcommands:
     validate            Validate per-scene JSON fragments and/or full storyboard.json
     compile             Merge scenes/scene-*.{md,json} → script.md + storyboard.json
-    animatic            Build/generate/confirm static storyboard panel sheets
+    animatic            Build/generate/confirm per-shot static storyboard references
     estimate            Print render duration & cost estimate. Exit 2 if over budget.
     graph               Print chain-DAG parallel groups (JSON array of arrays).
 
@@ -442,33 +442,202 @@ def cmd_compile(args: argparse.Namespace) -> int:
 
 # ------------------------------------------------------------------ animatic
 
-def _read_lore_front(ep_dir: Path) -> dict[str, str | list[str]]:
-    """Crude front-matter reader for lore.md without adding PyYAML here."""
-    lore_path = ep_dir.parent / "lore.md"
-    if not lore_path.exists():
-        return {}
-    text = lore_path.read_text(encoding="utf-8")
-    if not text.startswith("---"):
-        return {}
-    lines = text.splitlines()
-    front: dict[str, str | list[str]] = {}
-    for line in lines[1:]:
-        if line.strip() == "---":
-            break
-        if ":" not in line or line.startswith((" ", "\t")):
-            continue
-        key, raw = line.split(":", 1)
-        key = key.strip()
-        val = raw.strip().strip("'\"")
-        if not val:
-            continue
-        if val.startswith("[") and val.endswith("]"):
-            items = [x.strip().strip("'\"") for x in val[1:-1].split(",")]
-            front[key] = [x for x in items if x]
-        else:
-            front[key] = val
-    return front
+_REMOTE_MEDIA_PREFIXES = ("http://", "https://", "asset://", "data:")
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 
+
+def _is_remote_media_ref(value: str) -> bool:
+    return value.startswith(_REMOTE_MEDIA_PREFIXES)
+
+
+def _scan_first_image(folder: Path) -> str | None:
+    if not folder.is_dir():
+        return None
+    for f in sorted(folder.iterdir()):
+        if f.is_file() and f.suffix.lower() in _IMAGE_EXTS:
+            return str(f)
+    return None
+
+
+def _normalise_media_ref(value: str) -> str | None:
+    if _is_remote_media_ref(value):
+        return value
+    path = Path(value).expanduser()
+    try:
+        return str(path.resolve()) if path.exists() else None
+    except OSError:
+        return None
+
+
+def _asset_records(data, plural_key: str) -> list[dict]:
+    if not isinstance(data, dict):
+        return []
+    if isinstance(data.get(plural_key), list):
+        return [x for x in data[plural_key] if isinstance(x, dict)]
+    if isinstance(data.get(plural_key), dict):
+        return [x for x in data[plural_key].values() if isinstance(x, dict)]
+    return [x for x in data.values() if isinstance(x, dict)]
+
+
+def _first_record_image(record: dict) -> str | None:
+    for key in ("image_local", "image", "path"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            return value
+    for value in record.get("images", []) or []:
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _build_asset_index(
+    ep_dir: Path,
+    *,
+    json_name: str,
+    plural_key: str,
+    folder_name: str,
+) -> dict[str, str]:
+    proj_dir = ep_dir.parent
+    idx: dict[str, str] = {}
+    for data_path in [ep_dir / json_name, proj_dir / json_name]:
+        data = _safe_load_json(data_path)
+        for record in _asset_records(data, plural_key):
+            name = record.get("name")
+            image = _first_record_image(record)
+            ref = _normalise_media_ref(image) if isinstance(image, str) else None
+            if isinstance(name, str) and ref and name not in idx:
+                idx[name] = ref
+    for folder in [ep_dir / folder_name, proj_dir / folder_name]:
+        if not folder.is_dir():
+            continue
+        for asset_dir in sorted(folder.iterdir()):
+            if not asset_dir.is_dir() or asset_dir.name in idx:
+                continue
+            image = _scan_first_image(asset_dir)
+            if image:
+                idx[asset_dir.name] = str(Path(image).expanduser().resolve())
+    return idx
+
+
+def _scene_set_id(sb: Storyboard, scene_id: str | None) -> str | None:
+    if not scene_id:
+        return None
+    for scene in sb.scenes:
+        if scene.id == scene_id:
+            return scene.set_id
+    return None
+
+
+def _add_reference_entry(
+    refs: list[dict[str, str]],
+    seen: set[str],
+    *,
+    path: str | None,
+    kind: str,
+    name: str,
+    instruction: str,
+) -> None:
+    if not path or path in seen:
+        return
+    seen.add(path)
+    refs.append({
+        "path": path,
+        "kind": kind,
+        "name": name,
+        "instruction": instruction,
+    })
+
+
+def _animatic_reference_entries(
+    ep_dir: Path,
+    sb: Storyboard,
+    shots: list[Shot],
+) -> list[dict[str, str]]:
+    cast_index = _build_asset_index(
+        ep_dir, json_name="cast.json", plural_key="characters", folder_name="cast"
+    )
+    set_index = _build_asset_index(
+        ep_dir, json_name="movie_set.json", plural_key="sets", folder_name="movie-set"
+    )
+    prop_index = _build_asset_index(
+        ep_dir, json_name="props.json", plural_key="props", folder_name="props"
+    )
+    refs: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for shot in shots:
+        for name in shot.characters or []:
+            _add_reference_entry(
+                refs,
+                seen,
+                path=cast_index.get(name),
+                kind="character",
+                name=name,
+                instruction=(
+                    f"Character reference for {name}. Preserve identity, face "
+                    "shape, hairstyle, costume, body type, and apparent age; "
+                    "adapt the rendering to the storyboard style. Do not copy "
+                    "photorealistic skin texture or live-action realism."
+                ),
+            )
+        set_id = shot.set_id or _scene_set_id(sb, shot.scene)
+        if set_id:
+            _add_reference_entry(
+                refs,
+                seen,
+                path=set_index.get(set_id),
+                kind="location",
+                name=set_id,
+                instruction=(
+                    f"Location reference for {set_id}. Preserve architecture, "
+                    "spatial layout, period details, lighting mood, and main "
+                    "environmental elements; adapt to the storyboard style."
+                ),
+            )
+        for name in shot.props or []:
+            _add_reference_entry(
+                refs,
+                seen,
+                path=prop_index.get(name),
+                kind="prop",
+                name=name,
+                instruction=(
+                    f"Prop reference for {name}. Preserve shape, material, "
+                    "color, texture, and scale; adapt to the storyboard style "
+                    "and do not override the shot action."
+                ),
+            )
+    return refs
+
+def _read_lore_front(ep_dir: Path) -> dict[str, str | list[str]]:
+    """Crude front-matter reader for project lore + episode override."""
+    def parse_front(lore_path: Path) -> dict[str, str | list[str]]:
+        if not lore_path.exists():
+            return {}
+        text = lore_path.read_text(encoding="utf-8")
+        if not text.startswith("---"):
+            return {}
+        lines = text.splitlines()
+        front: dict[str, str | list[str]] = {}
+        for line in lines[1:]:
+            if line.strip() == "---":
+                break
+            if ":" not in line or line.startswith((" ", "\t")):
+                continue
+            key, raw = line.split(":", 1)
+            key = key.strip()
+            val = raw.strip().strip("'\"")
+            if not val:
+                continue
+            if val.startswith("[") and val.endswith("]"):
+                items = [x.strip().strip("'\"") for x in val[1:-1].split(",")]
+                front[key] = [x for x in items if x]
+            else:
+                front[key] = val
+        return front
+
+    front = parse_front(ep_dir.parent / "lore.md")
+    front.update(parse_front(ep_dir / "lore.md"))
+    return front
 
 def _tc(seconds: int) -> str:
     m, s = divmod(max(0, int(seconds)), 60)
@@ -491,6 +660,7 @@ def _chunks(seq: list[Shot], n: int) -> list[list[Shot]]:
 
 def _animatic_panel_prompt(
     *,
+    ep_dir: Path,
     sb: Storyboard,
     shots: list[Shot],
     panel_no: int,
@@ -505,10 +675,10 @@ def _animatic_panel_prompt(
     palette = ", ".join(palette_raw) if isinstance(palette_raw, list) else str(palette_raw)
 
     style_bits = [
-        "static comic storyboard sheet",
+        "static storyboard reference image",
         "cinematic blocking",
-        "clean black panel gutters",
-        "consistent characters and locations across panels",
+        "clear composition",
+        "consistent characters, locations, and props",
     ]
     if visual_style:
         style_bits.append(visual_style)
@@ -520,15 +690,29 @@ def _animatic_panel_prompt(
         style_bits.append(mood_anchor)
 
     lines = [
-        f"Create storyboard preview sheet {panel_no}/{panel_count}: "
-        f"{len(shots)} comic panels in one image.",
+        f"Create static storyboard reference image {panel_no}/{panel_count} "
+        f"for one video clip.",
         "",
         "Style: " + "; ".join(style_bits) + ".",
-        "Layout: one sheet, separate panels, readable composition, no speech bubbles, no subtitles, no UI.",
+        "Layout: one still image for exactly one clip, readable composition, no speech bubbles, no subtitles, no UI, no panel labels.",
         "Purpose: static previsualization for user approval before paid video rendering.",
         "",
-        "Panels:",
+        "Clip:",
     ]
+    reference_entries = _animatic_reference_entries(ep_dir, sb, shots)
+    if reference_entries:
+        lines.extend([
+            "",
+            "Reference image map:",
+        ])
+        for idx, ref in enumerate(reference_entries, 1):
+            lines.append(f"Image {idx}: {ref['instruction']}")
+        lines.extend([
+            "The image numbers must exactly match the uploaded reference image order. Use each image only for its assigned role. These images are references for the static storyboard composition and continuity; do not copy labels, borders, captions, UI, photorealistic skin texture, or live-action camera realism.",
+            "",
+            "When generating the still storyboard, follow the reference images for identity, location, and prop continuity while prioritizing this clip's composition, action, mood, and declared visual style.",
+            "",
+        ])
     for idx, shot in enumerate(shots, 1):
         start, end = offsets[shot.id]
         panel_prompt = (shot.animatic_prompt or shot.prompt).strip()
@@ -542,17 +726,23 @@ def _animatic_panel_prompt(
         ])
     lines.extend([
         "",
-        "Important: this is a still storyboard sheet, not a finished illustration. "
-        "Keep each panel clear enough to judge framing, action, mood, and continuity.",
+        "Important: this is a still storyboard reference for one video clip, "
+        "not a finished illustration and not a video first frame. Keep it clear "
+        "enough to judge framing, action, mood, and continuity.",
     ])
     return "\n".join(lines).strip() + "\n"
 
 
 def _find_generated_panel_images(panel_dir: Path, prefix: str) -> list[Path]:
     exts = {".png", ".jpg", ".jpeg", ".webp"}
+    exact_stems = {prefix, f"{prefix}-openai"}
     return sorted(
         p for p in panel_dir.glob(f"{prefix}*")
-        if p.is_file() and p.suffix.lower() in exts
+        if (
+            p.is_file()
+            and p.suffix.lower() in exts
+            and p.stem in exact_stems
+        )
     )
 
 
@@ -578,7 +768,7 @@ def cmd_animatic(args: argparse.Namespace) -> int:
             )
             return 2
         confirm_path.write_text(
-            "User approved static storyboard panels for video rendering.\n",
+            "User approved per-shot static storyboard reference images for video rendering.\n",
             encoding="utf-8",
         )
         print(f"confirmed {panel_dir}")
@@ -593,11 +783,18 @@ def cmd_animatic(args: argparse.Namespace) -> int:
     sb = Storyboard.model_validate(json.loads(sb_path.read_text(encoding="utf-8")))
     lore_front = _read_lore_front(ep_dir)
     offsets = _shot_offsets(sb)
-    groups = _chunks(sb.shots, args.shots_per_image)
+    if args.shots_per_image != 1:
+        print(
+            "WARN: --shots-per-image is deprecated; animatic now always "
+            "generates one static storyboard reference image per clip.",
+            file=sys.stderr,
+        )
+    groups = _chunks(sb.shots, 1)
 
     manifest: dict = {
         "storyboard": str(sb_path),
-        "shots_per_image": args.shots_per_image,
+        "shots_per_image": 1,
+        "mode": "per_shot_reference_image",
         "model": args.model,
         "size": args.size,
         "panels": [],
@@ -613,11 +810,26 @@ def cmd_animatic(args: argparse.Namespace) -> int:
         "export SPARK_VIDEO_PHASE=animatic",
         "",
     ]
+    openai_image_model = args.model.strip().lower() in {
+        "openai",
+        "openai-image",
+        "openai-image-placeholder",
+        "gpt-image-1",
+    }
+    if openai_image_model:
+        shell_lines.extend([
+            "echo 'This episode is configured for OpenAI image generation.'",
+            "echo 'Use the per-shot .prompt.txt files plus panels.json reference_images order with the OpenAI image generator.'",
+            "echo 'The BL image helper is intentionally disabled for this animatic run.'",
+            "exit 2",
+            "",
+        ])
 
     for i, shots in enumerate(groups, 1):
-        prefix = f"panel-{i:03d}"
+        prefix = shots[0].id if len(shots) == 1 else f"panel-{i:03d}"
         prompt_path = panel_dir / f"{prefix}.prompt.txt"
         prompt = _animatic_panel_prompt(
+            ep_dir=ep_dir,
             sb=sb,
             shots=shots,
             panel_no=i,
@@ -632,17 +844,19 @@ def cmd_animatic(args: argparse.Namespace) -> int:
             "shots": [s.id for s in shots],
             "prompt": str(prompt_path),
             "images": [str(p) for p in out_images],
+            "reference_images": _animatic_reference_entries(ep_dir, sb, shots),
         })
-        shell_lines.extend([
-            f"echo '[animatic] {prefix}: {' '.join(s.id for s in shots)}'",
-            "./scripts/bl image generate "
-            f"--model {shlex.quote(args.model)} "
-            f"--prompt \"$(cat {shlex.quote(str(prompt_path))})\" "
-            f"--size {shlex.quote(args.size)} "
-            f"--out-dir {shlex.quote(str(panel_dir))} "
-            f"--out-prefix {shlex.quote(prefix)}",
-            "",
-        ])
+        if not openai_image_model:
+            shell_lines.extend([
+                f"echo '[animatic] {prefix}: {' '.join(s.id for s in shots)}'",
+                "./scripts/bl image generate "
+                f"--model {shlex.quote(args.model)} "
+                f"--prompt \"$(cat {shlex.quote(str(prompt_path))})\" "
+                f"--size {shlex.quote(args.size)} "
+                f"--out-dir {shlex.quote(str(panel_dir))} "
+                f"--out-prefix {shlex.quote(prefix)}",
+                "",
+            ])
 
     manifest_path = panel_dir / "panels.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
@@ -653,6 +867,14 @@ def cmd_animatic(args: argparse.Namespace) -> int:
     script_path.chmod(0o755)
 
     if args.generate:
+        if openai_image_model:
+            print(
+                "ERROR: --generate with OpenAI image models is not supported "
+                "by the BL helper. Use the emitted prompt files and "
+                "panels.json reference_images with the OpenAI image generator.",
+                file=sys.stderr,
+            )
+            return 2
         env = os.environ.copy()
         env["SPARK_VIDEO_PHASE"] = "animatic"
         for i, item in enumerate(manifest["panels"], 1):
@@ -802,18 +1024,18 @@ def main() -> int:
     p_cmp.set_defaults(fn=cmd_compile)
 
     p_anim = sub.add_parser("animatic")
-    p_anim.add_argument("--shots-per-image", type=int, choices=[2, 3], default=3,
-                        help="comic panels per generated storyboard image")
+    p_anim.add_argument("--shots-per-image", type=int, choices=[1, 2, 3], default=1,
+                        help="deprecated; animatic always generates one image per shot")
     p_anim.add_argument("--model", default="wan2.6-t2i",
                         help="image model for --generate")
     p_anim.add_argument("--size", default="16:9",
                         help="image aspect ratio / size passed to bl image generate")
     p_anim.add_argument("--generate", action="store_true",
-                        help="call ./scripts/bl image generate for each panel sheet")
+                        help="call ./scripts/bl image generate for each clip reference image")
     p_anim.add_argument("--force", action="store_true",
-                        help="regenerate panel images even if files already exist")
+                        help="regenerate reference images even if files already exist")
     p_anim.add_argument("--confirm", action="store_true",
-                        help="mark generated panels approved for video rendering")
+                        help="mark generated reference images approved for video rendering")
     p_anim.add_argument("--unconfirm", action="store_true",
                         help="remove the approval marker")
     p_anim.set_defaults(fn=cmd_animatic)
