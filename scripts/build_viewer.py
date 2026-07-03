@@ -150,6 +150,97 @@ def _collect_entities(parent: Path, ep_dir: Path, md_name: str) -> list[dict]:
     return out
 
 
+def _path_source(path: Path, proj_dir: Path) -> str:
+    try:
+        return str(path.relative_to(proj_dir.parent))
+    except ValueError:
+        return str(path)
+
+
+def _collect_entity_group(
+    *,
+    scope: str,
+    label: str,
+    parent: Path,
+    ep_dir: Path,
+    proj_dir: Path,
+    md_name: str,
+    manifest_path: Path,
+) -> dict | None:
+    """Collect one source tier for cast/set/prop assets."""
+    entities = _collect_entities(parent, ep_dir, md_name)
+    has_folder = parent.exists()
+    has_manifest = manifest_path.exists()
+    if not entities and not has_folder and not has_manifest:
+        return None
+    for entity in entities:
+        entity["scope"] = scope
+        entity["source_root"] = _path_source(parent, proj_dir)
+    return {
+        "scope": scope,
+        "label": label,
+        "source_root": _path_source(parent, proj_dir),
+        "source_url": _rel(parent, ep_dir) if has_folder else None,
+        "manifest": _path_source(manifest_path, proj_dir) if has_manifest else None,
+        "manifest_url": _rel(manifest_path, ep_dir) if has_manifest else None,
+        "entities": entities,
+    }
+
+
+def _collect_entity_groups(
+    *,
+    proj_dir: Path,
+    ep_dir: Path,
+    folder_name: str,
+    md_name: str,
+    manifest_name: str,
+) -> list[dict]:
+    """Return episode-local assets first, then project-global assets."""
+    groups = []
+    for scope, label, root in [
+        ("episode", "Episode local", ep_dir),
+        ("global", "Project global", proj_dir),
+    ]:
+        group = _collect_entity_group(
+            scope=scope,
+            label=label,
+            parent=root / folder_name,
+            ep_dir=ep_dir,
+            proj_dir=proj_dir,
+            md_name=md_name,
+            manifest_path=root / manifest_name,
+        )
+        if group:
+            groups.append(group)
+    return groups
+
+
+def _flatten_entity_groups(groups: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for group in groups:
+        out.extend(group.get("entities", []))
+    return out
+
+
+def _collect_lore_sections(proj_dir: Path, ep_dir: Path) -> list[dict]:
+    sections = []
+    for scope, label, path in [
+        ("episode", "Episode override", ep_dir / "lore.md"),
+        ("global", "Project story bible", proj_dir / "lore.md"),
+    ]:
+        body = _read_text(path)
+        if not body or not body.strip():
+            continue
+        sections.append({
+            "scope": scope,
+            "label": label,
+            "source": _path_source(path, proj_dir),
+            "url": _rel(path, ep_dir),
+            "body": body,
+        })
+    return sections
+
+
 def _collect_scenes(ep_dir: Path) -> list[dict]:
     out = []
     scenes_dir = ep_dir / "scenes"
@@ -428,6 +519,15 @@ details {{ background:var(--panel); border:1px solid var(--border); border-radiu
 details > summary {{ cursor:pointer; color:var(--mute); font-size:13px; user-select:none; }}
 details[open] > summary {{ color: var(--fg); margin-bottom: 8px; }}
 .grid {{ display:grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:14px; }}
+.scope-block {{ margin-bottom: 20px; }}
+.scope-head {{ display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin: 8px 0 10px; }}
+.scope-head h3 {{ margin:0; font-size:15px; color:var(--fg); }}
+.scope-badge {{ display:inline-block; font-size:11px; padding:2px 8px; border-radius:4px;
+  background:var(--panel2); color:var(--mute); }}
+.scope-badge.episode {{ background:#123a52; color:#9bd7ff; }}
+.scope-badge.global {{ background:#3b2f16; color:#ffd479; }}
+.source-line {{ font-size:11px; color:var(--mute); margin: -4px 0 10px; }}
+.source-line code {{ background:var(--code); padding:1px 4px; border-radius:3px; }}
 .entity {{ background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:12px; }}
 .entity img {{ width:100%; height:180px; object-fit:contain; border-radius:6px; background:var(--bg); }}
 .entity h4 {{ margin: 10px 0 4px; font-size: 15px; }}
@@ -505,9 +605,9 @@ details[open] > summary {{ color: var(--fg); margin-bottom: 8px; }}
   <section id="direction"><h2>Direction</h2><div id="x-direction"></div></section>
   <section id="script"><h2>Script</h2><div id="x-script"></div></section>
   <section id="scenes"><h2>Scenes</h2><div id="x-scenes"></div></section>
-  <section id="cast"><h2>Cast</h2><div id="x-cast" class="grid"></div></section>
-  <section id="sets"><h2>Movie sets</h2><div id="x-sets" class="grid"></div></section>
-  <section id="props"><h2>Props</h2><div id="x-props" class="grid"></div></section>
+  <section id="cast"><h2>Cast</h2><div id="x-cast"></div></section>
+  <section id="sets"><h2>Movie sets</h2><div id="x-sets"></div></section>
+  <section id="props"><h2>Props</h2><div id="x-props"></div></section>
   <section id="bgm"><h2>BGM</h2><div id="x-bgm"></div></section>
   <section id="shots"><h2>Shots</h2><div id="x-shots"></div></section>
   <section id="calls"><h2>Model calls</h2><div id="x-calls" class="calls"></div></section>
@@ -533,7 +633,21 @@ $('x-premise').innerHTML = D.premise
   ? `<div class="md">${{md(D.premise)}}</div>` +
     (D.premise_source ? `<div style="margin-top:6px;font-size:11px;color:var(--mute)">source · <code>${{esc(D.premise_source)}}</code></div>` : '')
   : missing('(no initialPrompt.md / premise.md found in project or episode dir)');
-$('x-lore').innerHTML = D.lore ? `<div class="md">${{md(D.lore)}}</div>` : missing('(no lore.md found)');
+const renderLoreSections = () => {{
+  const sections = D.lore_sections || [];
+  if (sections.length) {{
+    return sections.map(s => `<div class="scope-block">
+      <div class="scope-head">
+        <h3>${{esc(s.label || s.scope || 'Lore')}}</h3>
+        <span class="scope-badge ${{esc(s.scope || '')}}">${{esc(s.scope || '')}}</span>
+      </div>
+      ${{s.source ? `<div class="source-line">source · <code>${{esc(s.source)}}</code></div>` : ''}}
+      <div class="md">${{md(s.body)}}</div>
+    </div>`).join('');
+  }}
+  return D.lore ? `<div class="md">${{md(D.lore)}}</div>` : missing('(no lore.md found)');
+}};
+$('x-lore').innerHTML = renderLoreSections();
 $('x-script').innerHTML = D.script ? `<div class="md">${{md(D.script)}}</div>` : missing('(no script.md found)');
 
 // ---- direction
@@ -574,9 +688,34 @@ const renderEntity = (e, basePath) => {{
     ${{(e.images||[]).length > 1 ? `<details><summary>${{e.images.length}} images</summary>${{e.images.map(u=>`<img class="thumb" src="${{u}}">`).join('')}}</details>` : ''}}
   </div>`;
 }};
-$('x-cast').innerHTML = (D.cast||[]).length ? D.cast.map(c => renderEntity(c)).join('') : missing('(no cast)');
-$('x-sets').innerHTML = (D.sets||[]).length ? D.sets.map(c => renderEntity(c)).join('') : missing('(no movie-set/)');
-$('x-props').innerHTML = (D.props||[]).length ? D.props.map(c => renderEntity(c)).join('') : missing('(no props/)');
+const renderEntityGroups = (groups, fallbackItems, emptyMsg) => {{
+  groups = groups || [];
+  if (!groups.length && (fallbackItems||[]).length) {{
+    return `<div class="grid">${{fallbackItems.map(e => renderEntity(e)).join('')}}</div>`;
+  }}
+  if (!groups.length) return missing(emptyMsg);
+  return groups.map(g => {{
+    const items = g.entities || [];
+    const manifest = g.manifest
+      ? `<span>manifest · <code>${{esc(g.manifest)}}</code></span>`
+      : '';
+    const root = g.source_root
+      ? `<span>folder · <code>${{esc(g.source_root)}}</code></span>`
+      : '';
+    return `<div class="scope-block">
+      <div class="scope-head">
+        <h3>${{esc(g.label || g.scope || 'Assets')}}</h3>
+        <span class="scope-badge ${{esc(g.scope || '')}}">${{esc(g.scope || '')}}</span>
+        <span class="kpill">${{items.length}} items</span>
+      </div>
+      ${{(root || manifest) ? `<div class="source-line">${{[root, manifest].filter(Boolean).join(' · ')}}</div>` : ''}}
+      ${{items.length ? `<div class="grid">${{items.map(e => renderEntity(e)).join('')}}</div>` : `<div class="empty">(manifest or folder exists, but no entity folders were found)</div>`}}
+    </div>`;
+  }}).join('');
+}};
+$('x-cast').innerHTML = renderEntityGroups(D.cast_groups, D.cast, '(no cast)');
+$('x-sets').innerHTML = renderEntityGroups(D.set_groups, D.sets, '(no movie-set/)');
+$('x-props').innerHTML = renderEntityGroups(D.prop_groups, D.props, '(no props/)');
 
 // ---- bgm
 $('x-bgm').innerHTML = (D.bgm||[]).length ? D.bgm.map(b => `<div class="card"><b>${{esc(b.name)}}</b><br><audio controls src="${{b.url}}" style="width:100%"></audio></div>`).join('') : missing('(no bgm/)');
@@ -736,21 +875,45 @@ def main() -> int:
             premise_source = str(cand.relative_to(proj_dir.parent))
             break
 
+    lore_sections = _collect_lore_sections(proj_dir, ep_dir)
+    cast_groups = _collect_entity_groups(
+        proj_dir=proj_dir,
+        ep_dir=ep_dir,
+        folder_name="cast",
+        md_name="cast.md",
+        manifest_name="cast.json",
+    )
+    set_groups = _collect_entity_groups(
+        proj_dir=proj_dir,
+        ep_dir=ep_dir,
+        folder_name="movie-set",
+        md_name="set.md",
+        manifest_name="movie_set.json",
+    )
+    prop_groups = _collect_entity_groups(
+        proj_dir=proj_dir,
+        ep_dir=ep_dir,
+        folder_name="props",
+        md_name="prop.md",
+        manifest_name="props.json",
+    )
+
     payload = {
         "project": project,
         "episode": ep_norm,
         "premise": premise_text,
         "premise_source": premise_source,
         "lore": _read_text(proj_dir / "lore.md"),
+        "lore_sections": lore_sections,
         "direction": _load_json(ep_dir / "direction.json"),
         "script": _read_text(ep_dir / "script.md"),
         "scenes": _collect_scenes(ep_dir),
-        "cast": (
-            _collect_entities(proj_dir / "cast", ep_dir, "cast.md")
-            + _collect_entities(ep_dir / "cast", ep_dir, "cast.md")
-        ),
-        "sets": _collect_entities(proj_dir / "movie-set", ep_dir, "set.md"),
-        "props": _collect_entities(proj_dir / "props", ep_dir, "prop.md"),
+        "cast_groups": cast_groups,
+        "set_groups": set_groups,
+        "prop_groups": prop_groups,
+        "cast": _flatten_entity_groups(cast_groups),
+        "sets": _flatten_entity_groups(set_groups),
+        "props": _flatten_entity_groups(prop_groups),
         "bgm": _collect_bgm(proj_dir, ep_dir),
         "shots": _collect_shots(
             ep_dir, storyboard, calls.get("sent_by_shot_ver"),
