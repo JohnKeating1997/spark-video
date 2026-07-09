@@ -9,9 +9,9 @@ Uses Volcengine Ark's async content generation API:
     POST /api/v3/contents/generations/tasks
     GET  /api/v3/contents/generations/tasks/{task_id}
 
-Local image references are encoded as data:image/... URLs, which Ark accepts
-for image_url.url. Local video/audio files are intentionally rejected: upload
-them to Ark assets or provide an http(s):// / asset:// URL.
+Local image/audio references are encoded as data:... URLs, which Ark accepts
+for image_url.url / audio_url.url. Local video files are intentionally
+rejected: upload them to Ark assets or provide an http(s):// / asset:// URL.
 
 Public API:
     render(kind, prompt, media, voice, duration, out_path, extra) -> dict
@@ -116,6 +116,17 @@ def _image_data_url(path: Path) -> str:
     return f"data:{mime};base64,{data}"
 
 
+def _audio_data_url(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix not in _AUDIO_EXTS:
+        raise ValueError(
+            f"seedance2 local audio references only support audio files; got {path}"
+        )
+    mime = mimetypes.guess_type(str(path))[0] or "audio/mpeg"
+    data = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{data}"
+
+
 def _ref_url(ref: str | Path, *, expected: str) -> str:
     if isinstance(ref, str) and _is_remote_ref(ref):
         return ref
@@ -124,8 +135,10 @@ def _ref_url(ref: str | Path, *, expected: str) -> str:
         raise FileNotFoundError(f"media file not found: {path}")
     if expected == "image":
         return _image_data_url(path)
+    if expected == "audio":
+        return _audio_data_url(path)
     raise ValueError(
-        "seedance2 only auto-embeds local image files. "
+        "seedance2 only auto-embeds local image/audio files. "
         f"Upload local {expected} files to Ark assets or pass an http(s):// "
         f"/ asset:// URL: {path}"
     )

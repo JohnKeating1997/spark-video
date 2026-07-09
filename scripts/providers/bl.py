@@ -46,6 +46,7 @@ def _bl_cmd() -> list[str]:
 # NOT retry (they'll fail identically and waste quota).
 _TRANSIENT_PATTERNS = (
     "EBADF",
+    "Network request failed",
     "Connection reset",
     "ConnectionError",
     "ConnectionResetError",
@@ -97,6 +98,47 @@ def _run(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess:
     raise last_err
 
 
+def _json_stdout(proc: subprocess.CompletedProcess) -> dict:
+    try:
+        data = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise RuntimeError(
+            f"bl returned non-JSON stdout\nCMD: {' '.join(proc.args)}\n"
+            f"STDOUT:\n{proc.stdout[-2000:]}\nSTDERR:\n{proc.stderr[-2000:]}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"bl returned unexpected JSON: {data!r}")
+    return data
+
+
+def _wait_and_download(task_id: str, out_path: Path, *, timeout_s: int) -> None:
+    deadline = time.time() + timeout_s
+    poll_s = int(os.environ.get("SPARK_VIDEO_RENDER_POLL_S", "15"))
+
+    while True:
+        if time.time() > deadline:
+            raise RuntimeError(f"video task {task_id} timed out after {timeout_s}s")
+
+        proc = _run(
+            [*_bl_cmd(), "--output", "json", "video", "task", "get",
+             "--task-id", task_id],
+            timeout=60,
+        )
+        data = _json_stdout(proc)
+        status = str(data.get("task_status") or data.get("status") or "").upper()
+        if status in {"SUCCEEDED", "SUCCESS", "FINISHED", "COMPLETED"}:
+            break
+        if status in {"FAILED", "FAILURE", "CANCELED", "CANCELLED"}:
+            raise RuntimeError(f"video task {task_id} failed: {json.dumps(data, ensure_ascii=False)}")
+        time.sleep(max(3, poll_s))
+
+    _run(
+        [*_bl_cmd(), "--output", "json", "video", "download",
+         "--task-id", task_id, "--out", str(out_path)],
+        timeout=300,
+    )
+
+
 def render(
     *,
     kind: Literal["t2v", "i2v", "r2v"],
@@ -145,8 +187,11 @@ def render(
     else:
         raise ValueError(f"unknown kind: {kind}")
 
-    # Common flags (skip Nones — argparse defaults pass them through)
-    cmd += ["--download", str(out_path)]
+    # Common flags (skip Nones — argparse defaults pass them through).
+    # Use async submission plus explicit task polling/download. In some
+    # environments the CLI's long synchronous wait can lose the network socket
+    # after a task was successfully submitted.
+    cmd += ["--no-wait"]
     # happyhorse-1.0-t2v rejects `parameters.resolution`. Skip it for t2v —
     # the model picks a default. Keep --resolution for i2v/r2v which do accept it.
     if extra.get("resolution") and kind != "t2v":
@@ -163,7 +208,15 @@ def render(
 
     started = time.time()
     timeout_s = int(os.environ.get("SPARK_VIDEO_RENDER_TIMEOUT_S", "900"))
-    proc = _run(cmd, timeout=timeout_s)
+    proc = _run(cmd, timeout=120)
+    data = _json_stdout(proc)
+    task_id = data.get("task_id")
+    if not task_id:
+        raise RuntimeError(
+            f"bl async submit returned no task_id\nSTDOUT:\n{proc.stdout[-2000:]}"
+        )
+
+    _wait_and_download(str(task_id), out_path, timeout_s=timeout_s)
     elapsed = time.time() - started
 
     if not out_path.exists():
@@ -171,19 +224,13 @@ def render(
             f"bl returned exit 0 but no video at {out_path}\nSTDOUT:\n{proc.stdout[-2000:]}"
         )
 
-    # Best-effort: extract task_id / model from bl's JSON stdout
     model = extra.get("model") or _infer_default_model(kind)
-    try:
-        data = json.loads(proc.stdout)
-        if isinstance(data, dict):
-            model = data.get("model", model)
-    except (json.JSONDecodeError, ValueError):
-        pass
 
     return {
         "video_path": str(out_path),
         "model": model,
         "elapsed_s": round(elapsed, 2),
+        "task_id": str(task_id),
     }
 
 

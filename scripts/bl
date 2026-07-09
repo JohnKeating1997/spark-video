@@ -15,25 +15,96 @@
 set -o pipefail
 
 # Locate the real bl binary, skipping our own wrapper if it's earlier in PATH.
+# Agent subprocesses often do not inherit interactive-shell PATH setup
+# (notably nvm). Fall back to common install locations and, as a last resort,
+# the user's interactive shell.
 self_path="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0")"
 real_bl=""
-# Split PATH and look for each `bl` candidate; pick the first one that isn't us.
-IFS=':' read -r -a _path_arr <<< "$PATH"
-for _dir in "${_path_arr[@]}"; do
-  candidate="$_dir/bl"
-  [ -x "$candidate" ] || continue
-  resolved="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$candidate")"
-  if [ "$resolved" != "$self_path" ]; then
-    real_bl="$candidate"
-    break
+
+resolve_path() {
+  python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null
+}
+
+is_real_bl_candidate() {
+  local candidate="$1"
+  local resolved
+  [ -n "$candidate" ] || return 1
+  [ -x "$candidate" ] || return 1
+  resolved="$(resolve_path "$candidate")"
+  [ -n "$resolved" ] || return 1
+  [ "$resolved" != "$self_path" ] || return 1
+}
+
+find_real_bl_in_path() {
+  local search_path="${1:-}"
+  local dir candidate
+  IFS=':' read -r -a _path_arr <<< "$search_path"
+  for dir in "${_path_arr[@]}"; do
+    [ -n "$dir" ] || dir="."
+    candidate="$dir/bl"
+    if is_real_bl_candidate "$candidate"; then
+      real_bl="$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_real_bl_in_common_locations() {
+  local candidate
+  shopt -s nullglob
+  local candidates=(
+    "$HOME/.nvm/versions/node"/*/bin/bl
+    "$HOME/.bun/bin/bl"
+    "$HOME/.local/bin/bl"
+    "$HOME/Library/pnpm/bl"
+    "/opt/homebrew/bin/bl"
+    "/usr/local/bin/bl"
+  )
+  shopt -u nullglob
+  for candidate in "${candidates[@]}"; do
+    if is_real_bl_candidate "$candidate"; then
+      real_bl="$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_real_bl_from_interactive_shell() {
+  local shell_path="${SHELL:-/bin/zsh}"
+  local detected
+  [ -x "$shell_path" ] || shell_path="/bin/zsh"
+  [ -x "$shell_path" ] || return 1
+  detected="$("$shell_path" -ilc 'command -v bl' 2>/dev/null | tail -n 1 || true)"
+  case "$detected" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  if is_real_bl_candidate "$detected"; then
+    real_bl="$detected"
+    return 0
   fi
-done
+  return 1
+}
+
+find_real_bl_in_path "$PATH" \
+  || find_real_bl_in_common_locations \
+  || find_real_bl_from_interactive_shell
+
 if [ -z "$real_bl" ]; then
   echo "scripts/bl: real 'bl' CLI not found in PATH. Install via:" >&2
   echo "  # Follow https://bailian.aliyun.com/cli/install.md, or:" >&2
   echo "  npm install -g bailian-cli && npx skills add modelstudioai/skills --all -g" >&2
   exit 127
 fi
+
+# nvm-installed bl uses /usr/bin/env node; make sure that node is visible too.
+real_bl_dir="$(cd "$(dirname "$real_bl")" && pwd -P)"
+case ":$PATH:" in
+  *":$real_bl_dir:"*) ;;
+  *) export PATH="$real_bl_dir:$PATH" ;;
+esac
 
 # Determine log directory. Project root honors VIDEOGEN_PROJECTS_DIR
 # (matches lib/config.py); defaults to ./projects relative to cwd.

@@ -138,7 +138,7 @@ showing the gate. Full schema validation still comes from
                                   │
                             [GATE 1: script.md]
                                   │
-                            [GATE 2: storyboard.json]
+                   [GATE 2: storyboard.json + static panels]
                                   │
             optional: spark-video-vfx-review (when --vfx)
                                   │
@@ -241,7 +241,7 @@ sets, props at this stage). Wait for approval.
 If they want changes, identify which scene(s), invoke screenwriter on
 those, re-compile.
 
-### Step 6 — GATE 2: storyboard.json
+### Step 6 — GATE 2: storyboard.json + static reference images
 Print the storyboard summary:
 - Total shots, breakdown by kind (t2v / i2v / r2v)
 - Parallel chain group count (from `storyboard.py graph`)
@@ -266,14 +266,35 @@ Print the storyboard summary:
 If `--vfx`, run `spark-video-vfx-review` and show its report alongside.
 
 ```bash
-uv run scripts/gate.py check storyboard   # structural completeness
-uv run scripts/storyboard.py validate     # full schema lint
+uv run scripts/storyboard.py animatic --generate
+uv run scripts/storyboard.py validate
 uv run scripts/build_viewer.py            # opens viewer.html — now includes scenes + shots
 ```
 
-Wait for approval (viewer.html shows the full storyboard breakdown).
+Show the user `projects/<p>/<ep>/storyboard-panels/`: each generated
+image is one static storyboard reference for exactly one clip. These
+images are the cheap visual approval gate before expensive video
+rendering, and `render_all.py` passes each approved image as the first
+reference image for that same clip.
+
+Wait for approval of both the storyboard breakdown and the per-clip
+static reference images. If approved:
+
+```bash
+uv run scripts/storyboard.py animatic --confirm
+uv run scripts/gate.py check storyboard
+```
+
+The approved storyboard reference image is never used as `first_frame`.
+Across providers, it is passed as reference media / `reference_image`;
+when a clip has that reference, `render_all.py` renders it in reference
+mode and suppresses previous-last-frame first-frame bridging for that
+clip.
+
 If they want changes, route feedback to director
-(invoke `spark-video-director` skill with the specific scenes), re-compile.
+(invoke `spark-video-director` skill with the specific scenes),
+re-compile, regenerate the animatic, and ask again. Do not render video
+until `storyboard-panels/CONFIRMED` exists.
 
 ### Step 7 — Zone 2 + 3: render all shots
 
