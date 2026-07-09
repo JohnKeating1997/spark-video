@@ -114,6 +114,15 @@ class Shot(BaseModel):
         description="seconds. Default = 15. Auto-clamped to provider ceiling/floor at render time.",
     )
     prompt: str = Field(description="video prompt — describe action, camera, mood")
+    animatic_prompt: str | None = Field(
+        default=None,
+        description=(
+            "Optional static storyboard / animatic panel prompt. If omitted, "
+            "storyboard.py animatic derives a still-frame panel from ``prompt``. "
+            "Use this when the moving-video prompt contains audio or motion "
+            "instructions that should be simplified for a comic-style preview."
+        ),
+    )
     negative_prompt: str | None = Field(
         default=None,
         description=(
