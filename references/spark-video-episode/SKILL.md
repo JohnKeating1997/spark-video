@@ -11,6 +11,29 @@ the other 5 sub-skills (`spark-video-screenwriter`, `spark-video-director`,
 and the deterministic scripts under `scripts/`. Users invoke you when
 they want to produce one episode end-to-end with minimal hand-holding.
 
+## Runtime workspace
+
+Keep the shell's current working directory as the user's video workspace.
+Do not `cd` into the installed skill directory for normal operation. Resolve
+the installed skill directory as `SPARK_VIDEO_SKILL_DIR`, then run scripts
+by absolute path:
+
+```bash
+export SPARK_VIDEO_SKILL_DIR=<installed spark-video skill directory>
+"$SPARK_VIDEO_SKILL_DIR/scripts/doctor.sh"
+uv run "$SPARK_VIDEO_SKILL_DIR/scripts/scaffold.py" episode --init
+```
+
+When examples in this skill or spark-video references show
+`uv run scripts/...` or `./scripts/...`, interpret them as the same script
+under `$SPARK_VIDEO_SKILL_DIR`.
+
+Runtime state lives under the current working directory:
+- `projects/` (or `$VIDEOGEN_PROJECTS_DIR`) for episode state and outputs.
+- `.env` for local configuration and secrets.
+- `.spark-video/references/shanyin/` for optional Shanyin craft references,
+  unless `$SPARK_VIDEO_SHANYIN_DIR` is set.
+
 Set env vars at the top of every run:
 ```bash
 export SPARK_VIDEO_PROJECT=<project_id>
@@ -123,11 +146,11 @@ showing the gate. Full schema validation still comes from
 
 ### Step 0 — preflight
 ```bash
-./scripts/doctor.sh                           # bl + ffmpeg + uv present
-uv run scripts/scaffold.py episode --init     # mkdir scaffold if not exists
+"$SPARK_VIDEO_SKILL_DIR/scripts/doctor.sh"                 # bl + ffmpeg + uv present
+uv run "$SPARK_VIDEO_SKILL_DIR/scripts/scaffold.py" episode --init
 # Check lore.md exists; if not:
 test -f projects/$SPARK_VIDEO_PROJECT/lore.md || \
-  uv run scripts/scaffold.py lore --title "<premise's first noun phrase>"
+  uv run "$SPARK_VIDEO_SKILL_DIR/scripts/scaffold.py" lore --title "<premise's first noun phrase>"
 # Tell user lore.md was scaffolded with mood_anchor=TBD; ask to fill it
 # OR auto-fill it from the premise using bl text chat
 ```
@@ -338,6 +361,7 @@ back to the relevant step.
 | `SPARK_VIDEO_NARRATOR_TTS_MODEL` | `cosyvoice-v3-flash` | Narration TTS via bl |
 | `SPARK_VIDEO_NARRATOR_VOICE` | `longanyang` | Default narrator voice |
 | `SPARK_VIDEO_NARRATOR_SPEECH_RATE` | `1.2` | Default speech rate (0.5–2.0) |
+| `SPARK_VIDEO_SHANYIN_DIR` | `$PWD/.spark-video/references/shanyin` | Optional Shanyin craft reference clone location |
 
 ## Handling user "no" at any gate
 

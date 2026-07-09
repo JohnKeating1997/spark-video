@@ -64,7 +64,10 @@ from urllib.parse import urlparse
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
+from lib.env import load_pwd_dotenv  # noqa: E402
 from lib import review as review_mod  # noqa: E402
+
+load_pwd_dotenv()
 
 
 def _projects_root() -> Path:

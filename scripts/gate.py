@@ -45,6 +45,13 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE.parent))
+
+from lib.env import load_pwd_dotenv  # noqa: E402
+
+load_pwd_dotenv()
+
 GATES = ("script", "storyboard", "render", "final")
 
 

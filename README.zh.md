@@ -129,7 +129,8 @@ Codex / …)。
 3. 新会话里读 `spark-video/SKILL.md`,跑 `./scripts/doctor.sh`,
    用我系统的包管理器装上缺的依赖(`bl` / `ffmpeg` / `uv`),
    每条命令都先问我确认。
-4. 问我要不要顺手 `./scripts/install-deps.sh` 拉 山音 craft 引用
+4. 问我要不要顺手 `./scripts/install-deps.sh` 把山音 craft 引用拉到
+   当前工作目录的 `.spark-video/references/shanyin/`
    (失败不影响主流程)。
 5. 再跑一次 doctor,全绿后告诉我可以开工了。
 ```

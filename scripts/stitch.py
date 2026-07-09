@@ -32,6 +32,7 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
+from lib.env import load_pwd_dotenv                 # noqa: E402
 from lib.storyboard import Storyboard       # noqa: E402
 from lib.ffmpeg_helpers import (              # noqa: E402
     concat as concat_clips,
@@ -42,6 +43,8 @@ from lib.ffmpeg_helpers import (              # noqa: E402
     xfade_continuation,
 )
 from lib.bgm import resolve_track             # noqa: E402
+
+load_pwd_dotenv()
 
 
 _CONTINUATION_XFADE_S = 1.0

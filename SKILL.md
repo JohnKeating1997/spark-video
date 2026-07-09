@@ -23,6 +23,28 @@ if the local copy has diverged it silently skips the update. Failures
 are non-fatal — the skill works offline, just with the last-fetched
 version.
 
+# Runtime workspace
+
+Keep the shell's current working directory as the user's video workspace.
+Do not `cd` into the installed skill directory for normal operation. Run
+scripts by absolute path from the resolved skill directory, for example:
+
+```bash
+export SPARK_VIDEO_SKILL_DIR="$SKILL_DIR"
+"$SPARK_VIDEO_SKILL_DIR/scripts/doctor.sh"
+uv run "$SPARK_VIDEO_SKILL_DIR/scripts/scaffold.py" episode --init
+```
+
+When examples in this skill or spark-video references show
+`uv run scripts/...` or `./scripts/...`, interpret them as the same script
+under `$SPARK_VIDEO_SKILL_DIR`.
+
+Runtime state lives under the current working directory:
+- `projects/` (or `$VIDEOGEN_PROJECTS_DIR`) for episode state and outputs.
+- `.env` for local configuration and secrets.
+- `.spark-video/references/shanyin/` for optional Shanyin craft references,
+  unless `$SPARK_VIDEO_SHANYIN_DIR` is set.
+
 # Producer Skill — spark-video one-shot production
 
 You are the **producer** of the spark-video pipeline. You orchestrate
@@ -123,8 +145,8 @@ re-show, ask again.
 
 ### Step 0 — preflight
 ```bash
-./scripts/doctor.sh                           # bl + ffmpeg + uv present
-uv run scripts/scaffold.py episode --init     # mkdir scaffold if not exists
+"$SPARK_VIDEO_SKILL_DIR/scripts/doctor.sh"                 # bl + ffmpeg + uv present
+uv run "$SPARK_VIDEO_SKILL_DIR/scripts/scaffold.py" episode --init
 
 # Persist the user's raw premise to disk BEFORE any other work. This is
 # the single source of truth for "what did the user actually ask for?"
@@ -352,6 +374,7 @@ back to the relevant step.
 | `SPARK_VIDEO_NARRATOR_TTS_MODEL` | `cosyvoice-v3-flash` | Narration TTS via bl |
 | `SPARK_VIDEO_NARRATOR_VOICE` | `longanyang` | Default narrator voice |
 | `SPARK_VIDEO_NARRATOR_SPEECH_RATE` | `1.2` | Default speech rate (0.5–2.0) |
+| `SPARK_VIDEO_SHANYIN_DIR` | `$PWD/.spark-video/references/shanyin` | Optional Shanyin craft reference clone location |
 
 ## Handling user "no" at any gate
 

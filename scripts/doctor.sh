@@ -70,10 +70,11 @@ fi
 
 # Shanyin references (optional)
 echo "[shanyin craft references — optional]"
-sh_sw="$(dirname "$self_dir")/references/shanyin/screenwriting-master/SKILL.md"
-sh_dir="$(dirname "$self_dir")/references/shanyin/director-master/SKILL.md"
-[ -f "$sh_sw" ] && good "shanyin-screenwriting-master present" || echo "  · not installed (optional). Run: ./scripts/install-deps.sh"
-[ -f "$sh_dir" ] && good "shanyin-director-master present"     || echo "  · not installed (optional). Run: ./scripts/install-deps.sh"
+sh_root="${SPARK_VIDEO_SHANYIN_DIR:-$(pwd -P)/.spark-video/references/shanyin}"
+sh_sw="$sh_root/screenwriting-master/SKILL.md"
+sh_dir="$sh_root/director-master/SKILL.md"
+[ -f "$sh_sw" ] && good "shanyin-screenwriting-master present ($sh_root)" || echo "  · not installed at $sh_root (optional). Run: ./scripts/install-deps.sh"
+[ -f "$sh_dir" ] && good "shanyin-director-master present ($sh_root)"     || echo "  · not installed at $sh_root (optional). Run: ./scripts/install-deps.sh"
 
 # sub-skills present
 echo "[sub-skills]"

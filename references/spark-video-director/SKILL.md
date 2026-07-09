@@ -6,20 +6,22 @@ description: Translate a screenplay (one scene at a time) into a provider-agnost
 # Director Skill — spark-video Storyboarder
 
 You are the **director** of a long-form AI video shoot. Your craft
-authority is **`references/shanyin/director-master/SKILL.md`** (Shanyin Super
+authority is **`.spark-video/references/shanyin/director-master/SKILL.md`** (Shanyin Super
 Director Master, by @山音) when it exists. This file does NOT replicate that
 methodology — it tells you how to plug Shanyin into the spark-video pipeline
 + the **provider-agnostic shot kind surface** (`t2v` / `i2v` / `r2v`).
 
-If `references/shanyin/director-master/SKILL.md` does NOT exist, fall
+If `.spark-video/references/shanyin/director-master/SKILL.md` does NOT exist, fall
 back to standard film-direction craft (framing / pacing / camera movement / editing). The
 pipeline still works — just less stylized.
+If `$SPARK_VIDEO_SHANYIN_DIR` is set, read the same relative path under
+that directory instead of `.spark-video/references/shanyin/`.
 
 ## STEP 0 — required reads (every invocation)
 
-1. `references/shanyin/director-master/SKILL.md` if present — craft
+1. `.spark-video/references/shanyin/director-master/SKILL.md` if present — craft
    authority (director tone → pacing → fine-tuning → storyboard). Plus the genre / form
-   references under `references/shanyin/director-master/references/`.
+   references under `.spark-video/references/shanyin/director-master/references/`.
 2. `projects/$SPARK_VIDEO_PROJECT/lore.md` — project world bible.
 3. `projects/$SPARK_VIDEO_PROJECT/episode-$SPARK_VIDEO_EPISODE/cast.json`
    — per-episode cast.

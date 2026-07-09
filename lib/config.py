@@ -4,9 +4,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
+from lib.env import load_pwd_dotenv
 
-load_dotenv()
+load_pwd_dotenv(Path.cwd() / ".env")
 
 
 def _normalise_provider(value: str) -> str:

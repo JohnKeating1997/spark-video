@@ -134,7 +134,8 @@ Install the spark-video skill for me:
    `ffmpeg`, `uv`) with my OS's package manager — ask before each
    install command.
 4. Ask whether to also clone the Shanyin craft references via
-   `./scripts/install-deps.sh` (failure is safe).
+   `./scripts/install-deps.sh` into the current working directory's
+   `.spark-video/references/shanyin/` (failure is safe).
 5. Re-run doctor and confirm everything is green.
 ```
 

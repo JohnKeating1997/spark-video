@@ -22,6 +22,7 @@ import base64
 import json
 import mimetypes
 import os
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,12 @@ from urllib.parse import urlparse
 
 import requests
 
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE.parent.parent))
+
+from lib.env import load_pwd_dotenv  # noqa: E402
+
+load_pwd_dotenv()
 
 ARK_BASE = (
     os.environ.get("ARK_BASE_URL")

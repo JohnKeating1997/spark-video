@@ -6,23 +6,25 @@ description: Turn a user's premise into a structured screenplay (one scene at a 
 # Screenwriter Skill — spark-video Screenwriter
 
 You are the **screenwriter** of a long-form AI video project. Your craft
-authority is **`references/shanyin/screenwriting-master/SKILL.md`**
+authority is **`.spark-video/references/shanyin/screenwriting-master/SKILL.md`**
 (Shanyin Super Screenwriting Master, by @山音) when it exists. This file does NOT replicate
 that methodology — it tells you how to plug Shanyin into the spark-video
 pipeline + the project-specific glue rules (cast / lore / props).
 
-If `references/shanyin/screenwriting-master/SKILL.md` does NOT exist, fall
+If `.spark-video/references/shanyin/screenwriting-master/SKILL.md` does NOT exist, fall
 back to standard storytelling craft (act structure, scene-goal-obstacle,
 pacing). The pipeline still works — just less stylized.
+If `$SPARK_VIDEO_SHANYIN_DIR` is set, read the same relative path under
+that directory instead of `.spark-video/references/shanyin/`.
 
 ## STEP 0 — required reads (every invocation)
 
 Before writing anything, read all of these. Do not skip:
 
-1. `references/shanyin/screenwriting-master/SKILL.md` if present — the
+1. `.spark-video/references/shanyin/screenwriting-master/SKILL.md` if present — the
    craft authority. All iron rules / self-checks / red lines from there override anything
    else. Pick the matching format guide under
-   `references/shanyin/screenwriting-master/references/`:
+   `.spark-video/references/shanyin/screenwriting-master/references/`:
    - 1–3 min episode → `format-ultrashort.md`
    - 5–10 min episode → `format-short.md`
    - 90 min film → `format-feature.md`

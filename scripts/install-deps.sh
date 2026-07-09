@@ -4,10 +4,9 @@
 # back to their baked-in reference.md).
 
 set -u
-self_dir="$(cd "$(dirname "$0")" && pwd)"
-repo_root="$(dirname "$self_dir")"
-mkdir -p "$repo_root/references/shanyin"
-cd "$repo_root/references/shanyin"
+target_root="${SPARK_VIDEO_SHANYIN_DIR:-$(pwd -P)/.spark-video/references/shanyin}"
+mkdir -p "$target_root"
+cd "$target_root"
 
 clone_or_pull() {
   local url="$1" target="$2"
@@ -36,4 +35,4 @@ clone_or_pull \
   "director-master"
 
 echo
-echo "Done. Verify with: ls $repo_root/references/shanyin/"
+echo "Done. Verify with: ls $target_root/"
