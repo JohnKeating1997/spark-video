@@ -1,6 +1,6 @@
 ---
-name: spark-video-episode
-description: One-shot autopilot orchestrator — runs the full spark-video pipeline (screenwriter ↔ director per-scene parallel → render chain-DAG parallel + per-clip review → stitch). User confirms at 4 gates (+ 1 mode gate at start + 1 BGM gate when bgm/ folder detected). Use when the user wants "make me an episode" in one command.
+name: spark-video
+description: Install, set up, diagnose, and run the full spark-video AI video production pipeline from premise to screenplay, storyboard, render, review, and final mp4. Use when the user mentions spark-video, wants to make an AI video, episode, short, ad, or recap, or asks to install, update, repair, or run the spark-video workflow.
 ---
 
 # Self-update
@@ -31,7 +31,7 @@ scripts by absolute path from the resolved skill directory, for example:
 
 ```bash
 export SPARK_VIDEO_SKILL_DIR="$SKILL_DIR"
-"$SPARK_VIDEO_SKILL_DIR/scripts/doctor.sh"
+"$SPARK_VIDEO_SKILL_DIR/scripts/doctor.sh" --quick --json
 uv run "$SPARK_VIDEO_SKILL_DIR/scripts/scaffold.py" episode --init
 ```
 
@@ -44,6 +44,25 @@ Runtime state lives under the current working directory:
 - `.env` for local configuration and secrets.
 - `.spark-video/references/shanyin/` for optional Shanyin craft references,
   unless `$SPARK_VIDEO_SHANYIN_DIR` is set.
+
+# Mandatory lightweight preflight
+
+Run the quick doctor once per user request that invokes spark-video,
+before the first spark-video script call:
+
+```bash
+preflight_json="$("$SPARK_VIDEO_SKILL_DIR/scripts/doctor.sh" --quick --json)"
+```
+
+If the JSON has `"ok": true`, continue silently; do not paste the full
+JSON into the conversation. Optional Shanyin warnings do not block use.
+Do not repeat the quick doctor inside the same user request unless an
+install or repair command was run, or a dependency-related command fails.
+
+If `"ok": false`, or if the user asks to install, set up, repair, or
+diagnose spark-video, read `$SPARK_VIDEO_SKILL_DIR/references/setup.md`, run
+`"$SPARK_VIDEO_SKILL_DIR/scripts/doctor.sh" --install-plan --json`, ask
+before each command, then re-run the quick doctor.
 
 # Producer Skill — spark-video one-shot production
 
@@ -96,7 +115,7 @@ re-show, ask again.
 
 ```
                   ╔══════════════════════════════════════════╗
-                  ║  YOU (spark-video-episode / producer)    ║
+                  ║  YOU (spark-video / producer)            ║
                   ╚══════════════════════════════════════════╝
                                   │
                             [GATE 0: mode]
@@ -145,7 +164,7 @@ re-show, ask again.
 
 ### Step 0 — preflight
 ```bash
-"$SPARK_VIDEO_SKILL_DIR/scripts/doctor.sh"                 # bl + ffmpeg + uv present
+"$SPARK_VIDEO_SKILL_DIR/scripts/doctor.sh" --quick --json  # follow references/setup.md if ok=false
 uv run "$SPARK_VIDEO_SKILL_DIR/scripts/scaffold.py" episode --init
 
 # Persist the user's raw premise to disk BEFORE any other work. This is

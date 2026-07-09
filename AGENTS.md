@@ -30,7 +30,7 @@ SKILL.md                     ← root router skill (runtime entry point + instal
 README.md / README.zh.md     ← user-facing intro (EN / Chinese)
 docs/architecture.md         ← the "why" — design philosophy & consistency model
 references/
-  spark-video-episode/       ← producer (one-shot orchestrator, the 4+2 gates)
+  spark-video-producer/      ← producer (one-shot orchestrator, the 4+2 gates)
   spark-video-screenwriter/  ← premise → scene-NN.md
   spark-video-director/      ← scene-NN.md → scene-NN.json (storyboard fragment)
   spark-video-cast/          ← cast / movie-set / prop reference-asset generation
@@ -63,9 +63,11 @@ lib/                         ← Pydantic data models + infra (storyboard, lore,
   declares its own deps in a `# /// script` header.
 
 ```bash
-./scripts/doctor.sh                 # verify bl + ffmpeg + uv + python + sub-skills
-uv run scripts/storyboard.py --help # run any script (uv resolves inline deps)
-cp .env.example .env                # in the runtime cwd; then fill in DASHSCOPE_API_KEY
+./scripts/doctor.sh --quick --json        # fast agent preflight
+./scripts/doctor.sh --install-plan --json # machine-readable repair plan
+./scripts/doctor.sh                       # human-readable full report
+uv run scripts/storyboard.py --help       # run any script (uv resolves inline deps)
+cp .env.example .env                      # in the runtime cwd; then fill in DASHSCOPE_API_KEY
 ```
 
 - Runtime config is read from env vars in [`lib/config.py`](lib/config.py)
@@ -84,7 +86,8 @@ There is no test suite or `pyproject.toml`. The closest things to CI are:
   cross-artifact completeness check (every clip scored + won, viewer fresh,
   …). stdlib-only; `--json` for a dashboard. This is the deterministic
   backstop for "an agent skipped a step".
-- `./scripts/doctor.sh` — environment + sub-skill presence check.
+- `./scripts/doctor.sh --quick --json` — fast environment + sub-skill
+  presence check; `--install-plan --json` suggests repair commands.
 
 Run both after changing `lib/` models or `scripts/storyboard.py`.
 
