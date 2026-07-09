@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -51,6 +52,17 @@ _REMOTE_MEDIA_PREFIXES = ("http://", "https://", "asset://", "data:")
 
 def _is_remote_media_ref(value: str) -> bool:
     return value.startswith(_REMOTE_MEDIA_PREFIXES)
+
+
+def _normalise_provider_name(name: str | None) -> str:
+    value = (name or "bl").strip().lower()
+    return {
+        "happyhorse": "bl",
+        "wan": "dashscope_wan27",
+        "wan27": "dashscope_wan27",
+        "dashscope_wan27": "dashscope_wan27",
+        "seedance": "seedance2",
+    }.get(value, value)
 
 
 def _projects_root() -> Path:
@@ -163,6 +175,7 @@ def _resolve_media(shot, scenes_by_id: dict, cast_index: dict,
 
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+_AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 
 
 def _parse_render_stdout(stdout: str) -> dict | None:
@@ -201,6 +214,20 @@ def _scan_first_image(folder: Path) -> str | None:
     return None
 
 
+def _scan_first_audio(folder: Path) -> str | None:
+    """Return the preferred voice sample in a folder, or None."""
+    if not folder.is_dir():
+        return None
+    for name in ("voice.mp3", "voice.wav", "voice.m4a"):
+        preferred = folder / name
+        if preferred.is_file():
+            return str(preferred)
+    for f in sorted(folder.iterdir()):
+        if f.is_file() and f.suffix.lower() in _AUDIO_EXTS:
+            return str(f)
+    return None
+
+
 def _asset_records(data, plural_key: str) -> list[dict]:
     if not isinstance(data, dict):
         return []
@@ -223,14 +250,31 @@ def _first_record_image(record: dict) -> str | None:
     return None
 
 
-def _normalise_manifest_image(image: str) -> str | None:
-    if _is_remote_media_ref(image):
-        return image
-    path = Path(image).expanduser()
+def _record_audio_refs(record: dict) -> list[str]:
+    refs: list[str] = []
+    for key in ("audio_local", "audio_url", "audio", "voice", "voice_local"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            refs.append(value)
+    for key in ("voices", "audios", "audios_local"):
+        for value in record.get(key, []) or []:
+            if isinstance(value, str) and value:
+                refs.append(value)
+    return refs
+
+
+def _normalise_manifest_ref(ref: str) -> str | None:
+    if _is_remote_media_ref(ref):
+        return ref
+    path = Path(ref).expanduser()
     try:
         return str(path.resolve()) if path.exists() else None
     except OSError:
         return None
+
+
+def _normalise_manifest_image(image: str) -> str | None:
+    return _normalise_manifest_ref(image)
 
 
 def _build_asset_index(
@@ -268,6 +312,178 @@ def _build_cast_index(ep_dir: Path) -> dict[str, str]:
     return _build_asset_index(
         ep_dir, json_name="cast.json", plural_key="characters", folder_name="cast"
     )
+
+
+def _build_cast_voice_index(ep_dir: Path) -> dict[str, list[str]]:
+    """Map character name -> available voice reference paths."""
+    proj_dir = ep_dir.parent
+    idx: dict[str, list[str]] = {}
+    for data_path in [ep_dir / "cast.json", proj_dir / "cast.json"]:
+        data = _load_json(data_path)
+        for record in _asset_records(data, "characters"):
+            name = record.get("name")
+            if not isinstance(name, str) or name in idx:
+                continue
+            refs = [
+                ref for raw in _record_audio_refs(record)
+                if (ref := _normalise_manifest_ref(raw))
+            ]
+            if refs:
+                idx[name] = refs
+    for folder in [ep_dir / "cast", proj_dir / "cast"]:
+        if not folder.is_dir():
+            continue
+        for asset_dir in sorted(folder.iterdir()):
+            if not asset_dir.is_dir() or asset_dir.name in idx:
+                continue
+            audio = _scan_first_audio(asset_dir)
+            if audio:
+                idx[asset_dir.name] = [str(Path(audio).expanduser().resolve())]
+    return idx
+
+
+def _shot_speakers(shot) -> list[str]:
+    """Infer speaking characters from prompt text.
+
+    Voice references should guide generated dialogue, not silent background
+    characters. If the shot has dialogue but we cannot infer speakers, fall
+    back to all characters so older storyboards still get a voice cue.
+    """
+    prompt = getattr(shot, "prompt", "") or ""
+    has_dialogue = any(mark in prompt for mark in ("：“", ":\"", "：\"", "“"))
+    char_names = list(shot.characters)
+    speakers: list[str] = []
+    seen: set[str] = set()
+
+    def add(name: str | None) -> None:
+        if name and name in char_names and name not in seen:
+            speakers.append(name)
+            seen.add(name)
+
+    def last_char(text: str) -> str | None:
+        positions = [
+            (text.rfind(name), name)
+            for name in char_names
+            if text.rfind(name) >= 0
+        ]
+        if not positions:
+            return None
+        return max(positions, key=lambda item: item[0])[1]
+
+    # Explicit script hints like "only X speaks" are more reliable than
+    # grammatical inference from long Chinese blocking sentences.
+    for name in char_names:
+        if re.search(rf"(?:只有|只由){re.escape(name)}(?:一个人)?(?:开口|说话)", prompt):
+            add(name)
+
+    for match in re.finditer(r"[：:]\s*[“\"]", prompt):
+        prefix = prompt[:match.start()]
+        boundary = max(
+            prefix.rfind(mark)
+            for mark in ("。", "；", ";", "！", "？", "”", "\"", "\n")
+        )
+        clause = prefix[boundary + 1:]
+
+        # "A ... 向/看着 B ... 说" means A speaks to B; the nearest name
+        # before the verb may be B, so handle these constructions first.
+        for marker in ("向", "看着", "望着", "对着"):
+            idx = clause.rfind(marker)
+            if idx > 0:
+                speaker = last_char(clause[:idx])
+                if speaker:
+                    add(speaker)
+                    break
+        else:
+            add(last_char(clause))
+
+    if speakers:
+        return speakers
+    return list(shot.characters) if has_dialogue else []
+
+
+def _resolve_voice_media_entries(
+    shot,
+    cast_voice_index: dict[str, list[str]],
+) -> list[tuple[str, str]]:
+    """Return de-duplicated (character, voice-ref) pairs in speaking order."""
+    entries: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for char in _shot_speakers(shot):
+        for ref in cast_voice_index.get(char, []) or []:
+            if ref in seen:
+                continue
+            if _is_remote_media_ref(ref) or Path(ref).exists():
+                entries.append((char, ref))
+                seen.add(ref)
+    return entries
+
+
+def _resolve_voice_media(shot, cast_voice_index: dict[str, list[str]]) -> list[str]:
+    """Return de-duplicated voice refs in speaking-character order."""
+    return [ref for _, ref in _resolve_voice_media_entries(shot, cast_voice_index)]
+
+
+def _audio_duration_s(ref: str) -> float | None:
+    if _is_remote_media_ref(ref):
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                ref,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return float(proc.stdout.strip())
+    except Exception:
+        return None
+
+
+def _fit_seedance_voice_refs(
+    ep_dir: Path,
+    shot_id: str,
+    entries: list[tuple[str, str]],
+    *,
+    max_total_s: float = 14.0,
+) -> list[str]:
+    """Trim local multi-voice references under Seedance's total duration cap."""
+    if len(entries) <= 1:
+        return [ref for _, ref in entries]
+
+    durations = [_audio_duration_s(ref) for _, ref in entries]
+    known_total = sum(d for d in durations if d is not None)
+    if known_total <= max_total_s:
+        return [ref for _, ref in entries]
+
+    per_ref_s = max_total_s / len(entries)
+    out_dir = ep_dir / "voice-refs" / shot_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fitted: list[str] = []
+    for (char, ref), duration in zip(entries, durations):
+        if _is_remote_media_ref(ref) or duration is None or duration <= per_ref_s:
+            fitted.append(ref)
+            continue
+        out = out_dir / f"{char}.mp3"
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", ref,
+                "-t", f"{per_ref_s:.3f}",
+                "-ac", "1", "-ar", "24000",
+                "-c:a", "libmp3lame", "-b:a", "128k",
+                str(out),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+        fitted.append(str(out))
+    return fitted
 
 
 def _build_set_index(ep_dir: Path) -> dict[str, str]:
@@ -323,9 +539,11 @@ def _should_render(shot_id: str, state: dict, *, mode: str) -> bool:
 
 def _render_chain_group(
     group: list[str],
+    ep_dir: Path,
     shots_by_id: dict,
     scenes_by_id: dict,
     cast_index: dict,
+    cast_voice_index: dict,
     set_index: dict,
     prop_index: dict,
     animatic_index: dict[str, str],
@@ -363,6 +581,18 @@ def _render_chain_group(
         media = _resolve_media(
             shot, scenes_by_id, cast_index, set_index, prop_index, animatic_index
         )
+        voice_entries = _resolve_voice_media_entries(shot, cast_voice_index)
+        provider_name = _normalise_provider_name(
+            provider or os.environ.get("SPARK_VIDEO_PROVIDER", "bl")
+        )
+        voice_arg: str | None = None
+        voice_refs = [ref for _, ref in voice_entries]
+        if voice_refs:
+            if provider_name == "seedance2":
+                voice_refs = _fit_seedance_voice_refs(ep_dir, shot_id, voice_entries)
+                media.extend(voice_refs)
+            else:
+                voice_arg = voice_refs[0]
         render_kind = "r2v" if has_animatic_reference else shot.kind
         render_prompt = _with_storyboard_reference_note(
             shot.prompt, has_animatic_reference
@@ -383,6 +613,8 @@ def _render_chain_group(
         if media:
             cmd.append("--media")
             cmd.extend(media)
+        if voice_arg:
+            cmd.extend(["--voice", voice_arg])
         if ratio:
             cmd.extend(["--ratio", ratio])
         if provider:
@@ -406,8 +638,9 @@ def _render_chain_group(
                 cmd.extend(["--first-frame", prev_last_frame])
 
         ref_tag = ", storyboard-ref" if has_animatic_reference else ""
+        voice_tag = f", {len(voice_refs)} voice-ref" if voice_refs else ""
         print(f"[render] {shot_id} ({render_kind}, {shot.duration}s, "
-              f"{len(shot.characters)} chars{ref_tag})", flush=True)
+              f"{len(shot.characters)} chars{ref_tag}{voice_tag})", flush=True)
 
         try:
             proc = subprocess.run(
@@ -505,6 +738,7 @@ def main() -> int:
     provider = args.provider or sb.provider
 
     cast_index = _build_cast_index(ep_dir)
+    cast_voice_index = _build_cast_voice_index(ep_dir)
     set_index = _build_set_index(ep_dir)
     prop_index = _build_prop_index(ep_dir)
     animatic_index = _build_animatic_index(ep_dir)
@@ -563,8 +797,9 @@ def main() -> int:
         for i, group in enumerate(groups):
             future = pool.submit(
                 _render_chain_group,
-                group, shots_by_id, scenes_by_id,
-                cast_index, set_index, prop_index, animatic_index, state,
+                group, ep_dir, shots_by_id, scenes_by_id,
+                cast_index, cast_voice_index, set_index, prop_index,
+                animatic_index, state,
                 mode=mode, target_shots=args.shot or None,
                 ratio=args.ratio, provider=provider,
                 no_review=args.no_review,

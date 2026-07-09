@@ -283,9 +283,14 @@ def _structured_video_prompt(
     voice: str | Path | None,
     characters: list[str],
     reference_image_map: str | None = None,
+    reference_audio_map: str | None = None,
 ) -> str:
     if prompt.lstrip().lower().startswith("style -"):
-        return _insert_reference_image_map(prompt, reference_image_map)
+        return _insert_reference_maps(
+            prompt,
+            reference_image_map=reference_image_map,
+            reference_audio_map=reference_audio_map,
+        )
 
     style = _read_lore_style(ep_dir)
     style_line = (
@@ -317,8 +322,11 @@ def _structured_video_prompt(
     audio_line = (
         "NO MUSIC. Sound effects, ambient audio, breath sounds, and spoken lines are welcome when specified."
     )
-    if voice:
-        audio_line += " Match the provided reference voice."
+    if voice or reference_audio_map:
+        audio_line += (
+            " Match each provided reference voice to its corresponding "
+            "speaking character."
+        )
 
     sections = [
         f"Style - {style_line}",
@@ -326,6 +334,8 @@ def _structured_video_prompt(
     ]
     if reference_image_map:
         sections.append(reference_image_map)
+    if reference_audio_map:
+        sections.append(reference_audio_map)
     sections.extend([
         f"Characters - {char_line}; describe by natural appearance only, no @tags or social handles.",
         "Age and height - keep ages and relative heights explicit and consistent when the shot includes people.",
@@ -363,6 +373,12 @@ REFERENCE_IMAGE_MAP_RULE = (
     "image order. Use each image only for its assigned role. Unless an image "
     "is explicitly labeled as a first-frame input, do not treat any reference "
     "image as the video's first frame."
+)
+REFERENCE_AUDIO_MAP_HEADER = "Reference audio map:"
+REFERENCE_AUDIO_MAP_RULE = (
+    "Use reference audio only for character voice timbre and speaking style. "
+    "Do not treat any reference audio as background music, soundtrack, or a "
+    "line that must be repeated verbatim."
 )
 
 
@@ -439,6 +455,19 @@ def _scan_first_image(folder: Path) -> str | None:
     return None
 
 
+def _scan_first_audio(folder: Path) -> str | None:
+    if not folder.is_dir():
+        return None
+    for name in ("voice.mp3", "voice.wav", "voice.m4a"):
+        preferred = folder / name
+        if preferred.is_file():
+            return str(preferred)
+    for f in sorted(folder.iterdir()):
+        if f.is_file() and f.suffix.lower() in _AUDIO_EXTS:
+            return str(f)
+    return None
+
+
 def _asset_records(data, plural_key: str) -> list[dict]:
     if not isinstance(data, dict):
         return []
@@ -456,6 +485,19 @@ def _first_record_image(record: dict) -> str | None:
         if isinstance(value, str) and value:
             return value
     return None
+
+
+def _record_audio_refs(record: dict) -> list[str]:
+    refs: list[str] = []
+    for key in ("audio_local", "audio_url", "audio", "voice", "voice_local"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            refs.append(value)
+    for key in ("voices", "audios", "audios_local"):
+        for value in record.get(key, []) or []:
+            if isinstance(value, str) and value:
+                refs.append(value)
+    return refs
 
 
 def _build_asset_index(
@@ -485,6 +527,34 @@ def _build_asset_index(
             image = _scan_first_image(asset_dir)
             if image:
                 idx[asset_dir.name] = str(Path(image).expanduser().resolve())
+    return idx
+
+
+def _build_audio_index(ep_dir: Path) -> dict[str, list[str]]:
+    proj_dir = ep_dir.parent
+    idx: dict[str, list[str]] = {}
+    for data_path in [ep_dir / "cast.json", proj_dir / "cast.json"]:
+        data = _load_json(data_path)
+        for record in _asset_records(data, "characters"):
+            name = record.get("name")
+            if not isinstance(name, str) or name in idx:
+                continue
+            refs: list[str] = []
+            for raw in _record_audio_refs(record):
+                ref = _normalise_media_ref(raw)
+                if isinstance(ref, str) or ref.exists():
+                    refs.append(str(ref))
+            if refs:
+                idx[name] = refs
+    for folder in [ep_dir / "cast", ep_dir.parent / "cast"]:
+        if not folder.is_dir():
+            continue
+        for asset_dir in sorted(folder.iterdir()):
+            if not asset_dir.is_dir() or asset_dir.name in idx:
+                continue
+            audio = _scan_first_audio(asset_dir)
+            if audio:
+                idx[asset_dir.name] = [str(Path(audio).expanduser().resolve())]
     return idx
 
 
@@ -560,6 +630,32 @@ def _reference_labels_for_shot(ep_dir: Path, shot_id: str) -> dict[str, str]:
     return labels
 
 
+def _reference_audio_labels_for_shot(ep_dir: Path, shot_id: str) -> dict[str, str]:
+    shot = _storyboard_shot(ep_dir, shot_id)
+    labels: dict[str, str] = {}
+    audio_index = _build_audio_index(ep_dir)
+    for name in shot.get("characters", []) or []:
+        if not isinstance(name, str):
+            continue
+        for ref in audio_index.get(name, []) or []:
+            labels[_ref_key(ref)] = (
+                f"Reference voice for {name}. Use this audio only for that "
+                "character's voice timbre, age, emotional color, and speaking "
+                "rhythm. Do not copy its words unless the shot prompt says so."
+            )
+        voice_ref_dir = ep_dir / "voice-refs" / shot_id
+        if voice_ref_dir.is_dir():
+            for ref in voice_ref_dir.glob(f"{name}.*"):
+                if ref.is_file() and ref.suffix.lower() in _AUDIO_EXTS:
+                    labels[_ref_key(ref)] = (
+                        f"Reference voice for {name}. Use this trimmed audio "
+                        "only for that character's voice timbre, age, emotional "
+                        "color, and speaking rhythm. Do not copy its words "
+                        "unless the shot prompt says so."
+                    )
+    return labels
+
+
 def _build_reference_image_map(
     *,
     ep_dir: Path,
@@ -585,12 +681,55 @@ def _build_reference_image_map(
     return "\n".join(lines)
 
 
+def _build_reference_audio_map(
+    *,
+    ep_dir: Path,
+    shot_id: str,
+    media: list[str | Path],
+    voice: str | Path | None,
+) -> str | None:
+    audio_refs = [ref for ref in media if _looks_like_audio_ref(ref)]
+    if voice:
+        audio_refs.append(voice)
+    if not audio_refs:
+        return None
+
+    labels = _reference_audio_labels_for_shot(ep_dir, shot_id)
+    lines = [REFERENCE_AUDIO_MAP_HEADER]
+    for idx, ref in enumerate(audio_refs, 1):
+        label = labels.get(_ref_key(ref))
+        if not label:
+            label = (
+                "Additional reference voice. Use it only for voice timbre "
+                "consistency relevant to this clip; do not add music."
+            )
+        lines.append(f"Audio {idx}: {label}")
+    lines.append(REFERENCE_AUDIO_MAP_RULE)
+    return "\n".join(lines)
+
+
 def _insert_reference_image_map(prompt: str,
                                 reference_image_map: str | None) -> str:
     prompt = prompt.rstrip()
     if not reference_image_map or REFERENCE_IMAGE_MAP_HEADER in prompt:
         return prompt
     return f"{reference_image_map}\n\n{prompt}".rstrip()
+
+
+def _insert_reference_audio_map(prompt: str,
+                                reference_audio_map: str | None) -> str:
+    prompt = prompt.rstrip()
+    if not reference_audio_map or REFERENCE_AUDIO_MAP_HEADER in prompt:
+        return prompt
+    return f"{reference_audio_map}\n\n{prompt}".rstrip()
+
+
+def _insert_reference_maps(prompt: str,
+                           *,
+                           reference_image_map: str | None,
+                           reference_audio_map: str | None) -> str:
+    prompt = _insert_reference_image_map(prompt, reference_image_map)
+    return _insert_reference_audio_map(prompt, reference_audio_map)
 
 
 def _with_storyboard_reference_note(prompt: str) -> str:
@@ -841,11 +980,21 @@ def main() -> int:
         shot_id=args.shot,
         media=media,
     )
+    reference_audio_map = _build_reference_audio_map(
+        ep_dir=ep_dir,
+        shot_id=args.shot,
+        media=media,
+        voice=voice,
+    )
     render_prompt = args.prompt.rstrip()
     if storyboard_ref_used:
         render_prompt = _with_storyboard_reference_note(render_prompt)
     if args.raw_prompt:
-        render_prompt = _insert_reference_image_map(render_prompt, reference_image_map)
+        render_prompt = _insert_reference_maps(
+            render_prompt,
+            reference_image_map=reference_image_map,
+            reference_audio_map=reference_audio_map,
+        )
     else:
         render_prompt = _structured_video_prompt(
             ep_dir=ep_dir,
@@ -857,6 +1006,7 @@ def main() -> int:
             voice=voice,
             characters=args.characters or [],
             reference_image_map=reference_image_map,
+            reference_audio_map=reference_audio_map,
         )
     has_seedance_reference_audio = (
         provider_name == "seedance2"
