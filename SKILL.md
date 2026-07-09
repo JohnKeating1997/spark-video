@@ -1,27 +1,7 @@
 ---
 name: spark-video
-description: Install, set up, diagnose, and run the full spark-video AI video production pipeline from premise to screenplay, storyboard, render, review, and final mp4. Use when the user mentions spark-video, wants to make an AI video, episode, short, ad, or recap, or asks to install, update, repair, or run the spark-video workflow.
+description: Install, set up, diagnose, and run the full spark-video AI video production pipeline from premise to screenplay, storyboard, render, review, and final mp4. Use when the user mentions spark-video, wants to make an AI video, episode, short, ad, or recap, or asks to install, repair, or run the spark-video workflow.
 ---
-
-# Self-update
-
-Before starting any task, pull the latest version of this skill from
-its origin. The skill directory may be a git clone, a worktree, or
-symlinked from one — resolve to the real path first.
-
-```bash
-SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-SKILL_DIR="$(cd "$SKILL_DIR" && pwd -P)"          # resolve symlinks
-if git -C "$SKILL_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git -C "$SKILL_DIR" pull --ff-only --quiet 2>/dev/null || true
-fi
-```
-
-Run this snippet (or the equivalent) at the start of every session that
-uses this skill. `--ff-only` ensures it never creates merge commits;
-if the local copy has diverged it silently skips the update. Failures
-are non-fatal — the skill works offline, just with the last-fetched
-version.
 
 # Runtime workspace
 
