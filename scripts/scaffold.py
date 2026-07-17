@@ -35,6 +35,10 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
+from lib.env import load_pwd_dotenv  # noqa: E402
+
+load_pwd_dotenv()
+
 
 def _projects_root() -> Path:
     return Path(os.environ.get("VIDEOGEN_PROJECTS_DIR", "./projects")).resolve()
@@ -202,7 +206,7 @@ CAST_MD_TEMPLATE = """\
 name: "{name}"
 age: "TBD"
 gender: "TBD"
-visual_anchor: "TBD — one-line appearance for t2i character sheet"
+visual_anchor: "TBD — one-line appearance for cast reference-sheet t2i"
 voice_traits: "TBD"
 dont:
   - "forbidden looks / wardrobe"
@@ -219,7 +223,7 @@ dont:
 `visual_anchor` should paste directly into a t2i prompt.
 Default to a full-body standing character sheet / three-view reference,
 not a face-only or front-only portrait.
-Example: "28-year-old man, short hair, dark T-shirt, photoreal, full-body standing character turnaround sheet, front view + side view + back view, same face and outfit in all three views, neutral clean background."
+Example: "a three-view drawing of a person and annotate it with an AI-generated, non-real-person watermark on the bottom, 28-year-old man, short hair, dark T-shirt, full-body character reference sheet, front view, side view, back view, same face and costume in all views, plain background, no other readable text."
 """
 
 

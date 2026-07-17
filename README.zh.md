@@ -126,16 +126,19 @@ Codex / …)。
    `https://github.com/JohnKeating1997/spark-video.git` clone 到那里,
    目录名叫 `spark-video`。
 2. 提醒我新开一个会话,让 skill 被加载。
-3. 新会话里读 `spark-video/SKILL.md`,跑 `./scripts/doctor.sh`,
-   用我系统的包管理器装上缺的依赖(`bl` / `ffmpeg` / `uv`),
-   每条命令都先问我确认。
-4. 问我要不要顺手 `./scripts/install-deps.sh` 拉 山音 craft 引用
+3. 新会话里读 `spark-video/SKILL.md`,跑
+   `./scripts/doctor.sh --quick --json`。如果不是全绿,再跑
+   `./scripts/doctor.sh --install-plan --json`,用我系统的包管理器装上
+   缺的依赖(`bl` / `ffmpeg` / `uv`),每条命令都先问我确认。
+4. 问我要不要顺手 `./scripts/install-deps.sh` 把可选的山音 craft 引用拉到
+   当前工作目录的 `.spark-video/references/shanyin/`
    (失败不影响主流程)。
-5. 再跑一次 doctor,全绿后告诉我可以开工了。
+5. 再跑一次 `./scripts/doctor.sh --quick --json`,必需项全绿后告诉我
+   可以开工了。
 ```
 
 完事。不需要记路径,也不需要复制 platform-specific 的命令 —— agent 读
-`SKILL.md`(里面有完整的安装 runbook)自己驱动后面的步骤。
+`SKILL.md`,只有需要时才展开 setup reference,自己驱动后面的步骤。
 
 <details>
 <summary>手动 fallback(如果你的 agent 不识别 skills)</summary>
@@ -186,7 +189,7 @@ projects/<project>/<episode>/
 - 安装后 agent 不认识 `spark-video` → 重启 agent / 新开会话
 - `bl: command not found` → `npm install -g bailian-cli && npx skills add modelstudioai/skills --all -g && bl auth login`
   (完整安装说明：<https://bailian.aliyun.com/cli/install.md>)
-- `Permission denied: scripts/bl` → `chmod +x scripts/*.sh scripts/bl`
+- `Permission denied: scripts/bl` → `./scripts/doctor.sh --install-plan`
 - 渲染卡住 → `tail -f projects/<p>/<e>/logs/model_calls.jsonl | jq .`
 
 ## 更新 / 卸载

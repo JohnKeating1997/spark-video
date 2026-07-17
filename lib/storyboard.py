@@ -63,7 +63,13 @@ def estimate_narration_audio_seconds(
 
 
 ShotKind = Literal["t2v", "i2v", "r2v"]
-ProviderName = Literal["bl", "wan27"]
+ProviderName = Literal["bl", "wan27", "seedance2"]
+PROVIDER_ALIASES = {
+    "happyhorse": "bl",
+    "wan": "wan27",
+    "dashscope_wan27": "wan27",
+    "seedance": "seedance2",
+}
 
 # Episode-level mode. ``drama`` (default): the video model generates both
 # picture AND audio (including dialog / voiceover / sound effects) from
@@ -108,6 +114,15 @@ class Shot(BaseModel):
         description="seconds. Default = 15. Auto-clamped to provider ceiling/floor at render time.",
     )
     prompt: str = Field(description="video prompt — describe action, camera, mood")
+    animatic_prompt: str | None = Field(
+        default=None,
+        description=(
+            "Optional static storyboard / animatic panel prompt. If omitted, "
+            "storyboard.py animatic derives a still-frame panel from ``prompt``. "
+            "Use this when the moving-video prompt contains audio or motion "
+            "instructions that should be simplified for a comic-style preview."
+        ),
+    )
     negative_prompt: str | None = Field(
         default=None,
         description=(
@@ -165,7 +180,7 @@ class Shot(BaseModel):
     kind: ShotKind = Field(
         default="r2v",
         description=(
-            "Generic shot kind. The active provider (wan / happyhorse) maps "
+            "Generic shot kind. The active provider maps "
             "this to a concrete model name at render time. Choose r2v for "
             "character-driven shots with cast references, t2v for "
             "establishing shots with no cast lock, i2v for first-frame "
@@ -444,7 +459,7 @@ class Storyboard(BaseModel):
     provider: ProviderName | None = Field(
         default=None,
         description=(
-            "Video model family for this episode (bl | wan27). When absent, "
+            "Video model family for this episode (bl | wan27 | seedance2). When absent, "
             "the renderer falls back to the SPARK_VIDEO_PROVIDER env var, then "
             "the built-in default (bl)."
         ),
@@ -495,6 +510,8 @@ class Storyboard(BaseModel):
         if not isinstance(data, dict):
             return data
         if data.get("provider"):
+            provider = str(data["provider"]).strip().lower()
+            data["provider"] = PROVIDER_ALIASES.get(provider, provider)
             return data
         for shot in data.get("shots") or []:
             if isinstance(shot, dict) and shot.get("model"):

@@ -6,20 +6,22 @@ description: Translate a screenplay (one scene at a time) into a provider-agnost
 # Director Skill — spark-video Storyboarder
 
 You are the **director** of a long-form AI video shoot. Your craft
-authority is **`references/shanyin/director-master/SKILL.md`** (Shanyin Super
+authority is **`.spark-video/references/shanyin/director-master/SKILL.md`** (Shanyin Super
 Director Master, by @山音) when it exists. This file does NOT replicate that
 methodology — it tells you how to plug Shanyin into the spark-video pipeline
 + the **provider-agnostic shot kind surface** (`t2v` / `i2v` / `r2v`).
 
-If `references/shanyin/director-master/SKILL.md` does NOT exist, fall
+If `.spark-video/references/shanyin/director-master/SKILL.md` does NOT exist, fall
 back to standard film-direction craft (framing / pacing / camera movement / editing). The
 pipeline still works — just less stylized.
+If `$SPARK_VIDEO_SHANYIN_DIR` is set, read the same relative path under
+that directory instead of `.spark-video/references/shanyin/`.
 
 ## STEP 0 — required reads (every invocation)
 
-1. `references/shanyin/director-master/SKILL.md` if present — craft
+1. `.spark-video/references/shanyin/director-master/SKILL.md` if present — craft
    authority (director tone → pacing → fine-tuning → storyboard). Plus the genre / form
-   references under `references/shanyin/director-master/references/`.
+   references under `.spark-video/references/shanyin/director-master/references/`.
 2. `projects/$SPARK_VIDEO_PROJECT/lore.md` — project world bible.
 3. `projects/$SPARK_VIDEO_PROJECT/episode-$SPARK_VIDEO_EPISODE/cast.json`
    — per-episode cast.
@@ -80,6 +82,7 @@ Schema:
       "scene": "S<NN>",
       "narrative_purpose": "...",
       "prompt": "...",
+      "animatic_prompt": "...",
       "duration": 15,
       "kind": "r2v",
       "role": "drama",
@@ -106,6 +109,14 @@ uv run scripts/storyboard.py validate --scene $N
 
 **Use `kind`, NOT a vendor-specific model name.** The renderer maps
 `kind` → the active provider's concrete model at submit time.
+
+`animatic_prompt` is optional but recommended on visually tricky shots.
+It is the still-frame version of the shot for the pre-render comic
+storyboard preview. Keep it visual only: framing, character placement,
+action pose, mood, key prop/set presence. Omit dialog, voice, breath,
+sound effects, and camera motion that cannot be judged in a still image.
+If omitted, `storyboard.py animatic` derives the static panel from
+`prompt`.
 
 **Shot id convention**: `S<NN>-<ZZZ>` where `NN` is scene number and
 `ZZZ` is 1-based shot index inside that scene (`S01-001`, `S01-002`,
@@ -212,24 +223,82 @@ fat at the storyboard level, not in post.**
 
 ## Provider capability table
 
-| Capability | bl (happyhorse + wan2.6) | wan27 (fallback only) | If active provider doesn't support it |
-|---|---|---|---|
-| `r2v` first-frame chain (cast images + prev last-frame) | partial — chain works but cast image priority is limited | ✅ full | The dispatcher demotes to plain `i2v` (drops cast images, keeps the chain). Prefer breaking the chain + fresh `r2v` if a key character must be visible. |
-| `r2v` reference voice (`--image-voice`) | ✅ | ✅ | n/a — both support it. |
-| `negative_prompt` | ❌ ignored by happyhorse | ✅ wan2.7 | Encode forbidden imagery in the positive prompt when on bl. |
-| `prompt_extend` | ❌ ignored | ✅ wan2.7 | Write fully-specified prompts; don't rely on auto-elaboration. |
-| Reference syntax in r2v prompts | `[Image 1] / [Image 2]` (happyhorse), `图1 / 图2` (wan2.6) | `图1 / 图2 / 视频1` (wan2.7) | Default to `[Image 1]` style when unsure — bl/happyhorse rejects 图1. |
-| Duration floor / ceiling | 3s / 15s (happyhorse) | 2s / 15s | Dispatcher clamps and warns. |
+| Capability | bl (happyhorse + wan2.6) | wan27 (fallback only) | seedance2 (Volcengine Ark) | If active provider doesn't support it |
+|---|---|---|---|---|
+| `r2v` first-frame chain (cast images + prev last-frame) | partial — chain works but cast image priority is limited | ✅ full | ✅ via `first_frame` plus references | The dispatcher demotes to plain `i2v` (drops cast images, keeps the chain). Prefer breaking the chain + fresh `r2v` if a key character must be visible. |
+| `r2v` reference voice (`--image-voice`) | ✅ | ✅ | ✅ as `reference_audio` URL / asset | n/a — all current providers support a voice/audio reference path, but seedance2 local audio must be uploaded first. |
+| `negative_prompt` | ❌ ignored by happyhorse | ✅ wan2.7 | ❌ ignored | Encode forbidden imagery in the positive prompt when unsupported. |
+| `prompt_extend` | ❌ ignored | ✅ wan2.7 | ❌ ignored | Write fully-specified prompts; don't rely on auto-elaboration. |
+| Reference syntax in r2v prompts | `[Image 1] / [Image 2]` (happyhorse), `图1 / 图2` (wan2.6) | `图1 / 图2 / 视频1` (wan2.7) | `图1 / 图2 / 视频1 / 音频1` | Default to `[Image 1]` style when unsure — bl/happyhorse rejects 图1. |
+| Duration floor / ceiling | 3s / 15s (happyhorse) | 2s / 15s | 2s / 15s | Dispatcher clamps and warns. |
 
 **Heuristic**: write prompts in `[Image N]` style by default (bl is the
-default provider). If the producer pins `wan27` for this episode, switch
-to `图N` syntax.
+default provider). If the producer pins `wan27` or `seedance2` for this
+episode, switch to `图N` / `视频N` / `音频N` syntax.
 
 ## Mood anchor (single biggest visual cohesion lever)
 
 Append `lore.front.mood_anchor` **verbatim at the end of every shot
 prompt**. The renderer does NOT do this for you. Without it, every shot
 drifts visually.
+
+## Static storyboard preview before video render
+
+After compile, the producer generates one static storyboard reference
+image per clip:
+
+```bash
+uv run scripts/storyboard.py animatic --generate
+```
+
+The user must approve those images before video rendering:
+
+```bash
+uv run scripts/storyboard.py animatic --confirm
+```
+
+As director, write prompts so this preview is meaningful:
+
+1. Every shot must have a clear still-readable action pose and framing.
+2. Use `animatic_prompt` when the video prompt is mostly audio, dialog,
+   or camera movement; translate it into a single decisive frame.
+3. Do not use the static preview to solve consistency with extra wardrobe
+   or prop descriptions. Cast/set/prop references still own appearance.
+4. Do not add a medium-specific style phrase such as "and 2D animation
+   style" unless the project or episode explicitly requires that style
+   for the clip.
+5. If the user rejects a reference image, edit the affected `scene-NN.json`
+   shots, re-compile, and regenerate the animatic before rendering.
+
+Video render is intentionally blocked until
+`storyboard-panels/CONFIRMED` exists.
+
+During rendering, the approved storyboard image is passed as reference
+media / `reference_image` for the same clip. It is never used as
+`first_frame`; the render prompt should ask the model to follow
+composition, camera angle, character placement, framing, lighting, key
+action, and mood, not to copy the static image as frame 0.
+
+## Video prompt structure
+
+The renderer wraps each director prompt before sending it to the video
+model. The source `prompt` is still your creative contract, but the final
+provider prompt follows this stable structure:
+
+1. `Style` — same opening line every clip, derived from `lore.mood_anchor`
+   / `visual_style` unless overridden by `SPARK_VIDEO_PROMPT_STYLE`.
+2. `First frame note` — reference images are not literal first frames;
+   true first-frame chain inputs are called out separately.
+3. `Characters` — names from `Shot.characters`, no `@tags`.
+4. `Age and height` — keep age / relative height explicit and consistent
+   when people appear.
+5. `Voices` — yes when dialog, breath, or vocal reaction is specified.
+6. `Panel timing` — shot-local timing, e.g. `[0:00-0:09]`.
+7. `Audio` — no music; ambience and sound effects welcome.
+
+So your `prompt` should remain dense and shootable: action, camera,
+emotion, spoken text, and mood anchor. Do not hand-write the numbered
+wrapper unless you deliberately pass `render_shot.py --raw-prompt`.
 
 ## Character consistency — cast reference sheet does the work, prompt stays out
 
@@ -447,7 +516,7 @@ Naming: `<prop_name>-<state>` — `红包-完整`, `红包-起皱`, `红包-撕�
    state word ("creased red envelope" — never "large red hot-stamped envelope printed with 囍").
 
 6. **Provider image cap**: r2v media[] has a hard ceiling
-   (bl/happyhorse ~9, wan27 higher). Priority order: cast → set → props.
+   (bl/happyhorse ~9, wan27/seedance2 higher). Priority order: cast → set → props.
    If the cap is hit, the dispatcher drops props first with a warning.
    Mitigation:
    - Lower `Shot.characters` to who's actually visible in this beat.

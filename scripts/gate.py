@@ -20,7 +20,7 @@ mandatory artifact is missing. Full schema validation still lives in
 
 Gates (mirror the producer's user-confirmation gates):
     script      GATE 1 — script.md present
-    storyboard  GATE 2 — storyboard.json present + structurally sane
+    storyboard  GATE 2 — storyboard.json present + static panels confirmed
     render      GATE 3 — every shot rendered, scored, and won (or escalated)
     final       GATE 4 — final mp4 + a fresh viewer.html exist
     all         run every gate and report a matrix
@@ -44,6 +44,13 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE.parent))
+
+from lib.env import load_pwd_dotenv  # noqa: E402
+
+load_pwd_dotenv()
 
 GATES = ("script", "storyboard", "render", "final")
 
@@ -155,6 +162,24 @@ def gate_storyboard(ep_dir: Path) -> GateResult:
     r.add("no duplicate shot ids", not dupes, f"dupes: {dupes}" if dupes else "")
     r.add("run `storyboard.py validate` for full schema lint", True,
           "reminder", severity="warn")
+
+    panels_dir = ep_dir / "storyboard-panels"
+    manifest = panels_dir / "panels.json"
+    confirmed = panels_dir / "CONFIRMED"
+    skip = os.environ.get("SPARK_VIDEO_SKIP_ANIMATIC_GATE", "").lower() in {
+        "1", "true", "yes", "y", "on",
+    }
+    if skip:
+        r.add("static storyboard reference images confirmed", True,
+              "skipped by SPARK_VIDEO_SKIP_ANIMATIC_GATE", severity="warn")
+    else:
+        r.add("static storyboard reference manifest exists", manifest.exists(),
+              str(manifest) if manifest.exists()
+              else f"{manifest} missing — run `uv run scripts/storyboard.py animatic`")
+        r.add("static storyboard reference images confirmed", confirmed.exists(),
+              str(confirmed) if confirmed.exists()
+              else f"{confirmed} missing — review reference images, then run "
+              "`uv run scripts/storyboard.py animatic --confirm`")
     return r
 
 

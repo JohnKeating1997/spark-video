@@ -1,6 +1,6 @@
 ---
-name: spark-video-episode
-description: One-shot autopilot orchestrator — runs the full spark-video pipeline (screenwriter ↔ director per-scene parallel → render chain-DAG parallel + per-clip review → stitch). User confirms at 4 gates (+ 1 mode gate at start + 1 BGM gate when bgm/ folder detected). Use when the user wants "make me an episode" in one command.
+name: spark-video-producer
+description: Producer stage for the spark-video pipeline. Orchestrates screenwriter, director, cast, VFX review, clip review, render chain DAGs, and final stitching with the 4+2 user confirmation gates. Use internally when running the end-to-end spark-video production workflow.
 ---
 
 # Producer Skill — spark-video One-Shot Production
@@ -11,12 +11,54 @@ the other 5 sub-skills (`spark-video-screenwriter`, `spark-video-director`,
 and the deterministic scripts under `scripts/`. Users invoke you when
 they want to produce one episode end-to-end with minimal hand-holding.
 
+## Runtime workspace
+
+Keep the shell's current working directory as the user's video workspace.
+Do not `cd` into the installed skill directory for normal operation. Resolve
+the installed skill directory as `SPARK_VIDEO_SKILL_DIR`, then run scripts
+by absolute path:
+
+```bash
+export SPARK_VIDEO_SKILL_DIR=<installed spark-video skill directory>
+"$SPARK_VIDEO_SKILL_DIR/scripts/doctor.sh" --quick --json
+uv run "$SPARK_VIDEO_SKILL_DIR/scripts/scaffold.py" episode --init
+```
+
+When examples in this skill or spark-video references show
+`uv run scripts/...` or `./scripts/...`, interpret them as the same script
+under `$SPARK_VIDEO_SKILL_DIR`.
+
+Runtime state lives under the current working directory:
+- `projects/` (or `$VIDEOGEN_PROJECTS_DIR`) for episode state and outputs.
+- `.env` for local configuration and secrets.
+- `.spark-video/references/shanyin/` for optional Shanyin craft references,
+  unless `$SPARK_VIDEO_SHANYIN_DIR` is set.
+
+## Mandatory lightweight preflight
+
+Run the quick doctor once per user request that invokes spark-video,
+before the first spark-video script call:
+
+```bash
+preflight_json="$("$SPARK_VIDEO_SKILL_DIR/scripts/doctor.sh" --quick --json)"
+```
+
+If the JSON has `"ok": true`, continue silently; do not paste the full
+JSON into the conversation. Optional Shanyin warnings do not block use.
+Do not repeat the quick doctor inside the same user request unless an
+install or repair command was run, or a dependency-related command fails.
+
+If `"ok": false`, or if the user asks to install, set up, repair, or
+diagnose spark-video, read `$SPARK_VIDEO_SKILL_DIR/references/setup.md`, run
+`"$SPARK_VIDEO_SKILL_DIR/scripts/doctor.sh" --install-plan --json`, ask
+before each command, then re-run the quick doctor.
+
 Set env vars at the top of every run:
 ```bash
 export SPARK_VIDEO_PROJECT=<project_id>
 export SPARK_VIDEO_EPISODE=<NN>
 export SPARK_VIDEO_PHASE=producer
-# SPARK_VIDEO_PROVIDER defaults to "bl"; only set if user opted for wan27
+# SPARK_VIDEO_PROVIDER defaults to "bl"; set only if user opted for wan27 or seedance2
 ```
 
 ## Inputs from the user
@@ -26,7 +68,7 @@ When invoked, the user gives you:
 2. **episode** (e.g. `001`)
 3. **premise** — one paragraph story idea
 4. (optional flags) `--vfx` to opt into pre-render VFX review,
-   `--mode=drama|narration` to skip GATE 0, `--provider=bl|wan27` to
+   `--mode=drama|narration` to skip GATE 0, `--provider=bl|wan27|seedance2` to
    skip provider selection.
 
 ## The 4+2 user-confirmation gates
@@ -74,7 +116,7 @@ showing the gate. Full schema validation still comes from
 
 ```
                   ╔══════════════════════════════════════════╗
-                  ║  YOU (spark-video-episode / producer)    ║
+                  ║  YOU (spark-video producer)              ║
                   ╚══════════════════════════════════════════╝
                                   │
                             [GATE 0: mode]
@@ -96,7 +138,7 @@ showing the gate. Full schema validation still comes from
                                   │
                             [GATE 1: script.md]
                                   │
-                            [GATE 2: storyboard.json]
+                   [GATE 2: storyboard.json + static panels]
                                   │
             optional: spark-video-vfx-review (when --vfx)
                                   │
@@ -123,11 +165,11 @@ showing the gate. Full schema validation still comes from
 
 ### Step 0 — preflight
 ```bash
-./scripts/doctor.sh                           # bl + ffmpeg + uv present
-uv run scripts/scaffold.py episode --init     # mkdir scaffold if not exists
+"$SPARK_VIDEO_SKILL_DIR/scripts/doctor.sh" --quick --json  # follow references/setup.md if ok=false
+uv run "$SPARK_VIDEO_SKILL_DIR/scripts/scaffold.py" episode --init
 # Check lore.md exists; if not:
 test -f projects/$SPARK_VIDEO_PROJECT/lore.md || \
-  uv run scripts/scaffold.py lore --title "<premise's first noun phrase>"
+  uv run "$SPARK_VIDEO_SKILL_DIR/scripts/scaffold.py" lore --title "<premise's first noun phrase>"
 # Tell user lore.md was scaffolded with mood_anchor=TBD; ask to fill it
 # OR auto-fill it from the premise using bl text chat
 ```
@@ -199,7 +241,7 @@ sets, props at this stage). Wait for approval.
 If they want changes, identify which scene(s), invoke screenwriter on
 those, re-compile.
 
-### Step 6 — GATE 2: storyboard.json
+### Step 6 — GATE 2: storyboard.json + static reference images
 Print the storyboard summary:
 - Total shots, breakdown by kind (t2v / i2v / r2v)
 - Parallel chain group count (from `storyboard.py graph`)
@@ -224,14 +266,35 @@ Print the storyboard summary:
 If `--vfx`, run `spark-video-vfx-review` and show its report alongside.
 
 ```bash
-uv run scripts/gate.py check storyboard   # structural completeness
-uv run scripts/storyboard.py validate     # full schema lint
+uv run scripts/storyboard.py animatic --generate
+uv run scripts/storyboard.py validate
 uv run scripts/build_viewer.py            # opens viewer.html — now includes scenes + shots
 ```
 
-Wait for approval (viewer.html shows the full storyboard breakdown).
+Show the user `projects/<p>/<ep>/storyboard-panels/`: each generated
+image is one static storyboard reference for exactly one clip. These
+images are the cheap visual approval gate before expensive video
+rendering, and `render_all.py` passes each approved image as the first
+reference image for that same clip.
+
+Wait for approval of both the storyboard breakdown and the per-clip
+static reference images. If approved:
+
+```bash
+uv run scripts/storyboard.py animatic --confirm
+uv run scripts/gate.py check storyboard
+```
+
+The approved storyboard reference image is never used as `first_frame`.
+Across providers, it is passed as reference media / `reference_image`;
+when a clip has that reference, `render_all.py` renders it in reference
+mode and suppresses previous-last-frame first-frame bridging for that
+clip.
+
 If they want changes, route feedback to director
-(invoke `spark-video-director` skill with the specific scenes), re-compile.
+(invoke `spark-video-director` skill with the specific scenes),
+re-compile, regenerate the animatic, and ask again. Do not render video
+until `storyboard-panels/CONFIRMED` exists.
 
 ### Step 7 — Zone 2 + 3: render all shots
 
@@ -330,7 +393,7 @@ back to the relevant step.
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `SPARK_VIDEO_PROVIDER` | `bl` | `bl` (default, covers happyhorse + wan2.6) or `wan27` (fallback for wan2.7 features) |
+| `SPARK_VIDEO_PROVIDER` | `bl` | `bl` (default, covers happyhorse + wan2.6), `wan27` (fallback for wan2.7 features), or `seedance2` (Volcengine Ark Seedance 2.0) |
 | `SPARK_VIDEO_MAX_CONCURRENCY` | `4` | Parallel chain groups / subagents |
 | `SPARK_VIDEO_REVIEW_THRESHOLD` | `7.0` | ACCEPT cutoff for clip-review |
 | `SPARK_VIDEO_MAX_RETRY` | `3` | Retry rounds per shot before escalation |
@@ -338,6 +401,7 @@ back to the relevant step.
 | `SPARK_VIDEO_NARRATOR_TTS_MODEL` | `cosyvoice-v3-flash` | Narration TTS via bl |
 | `SPARK_VIDEO_NARRATOR_VOICE` | `longanyang` | Default narrator voice |
 | `SPARK_VIDEO_NARRATOR_SPEECH_RATE` | `1.2` | Default speech rate (0.5–2.0) |
+| `SPARK_VIDEO_SHANYIN_DIR` | `$PWD/.spark-video/references/shanyin` | Optional Shanyin craft reference clone location |
 
 ## Handling user "no" at any gate
 

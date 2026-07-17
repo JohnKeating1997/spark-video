@@ -19,8 +19,8 @@ What stays the agent's job (NOT here):
 Design notes:
   * This module is imported by ``scripts/render_shot.py``, whose uv env
     only declares ``requests`` — so we deliberately avoid importing
-    ``lib.config`` (it pulls in ``python-dotenv``). Config is read straight
-    from the environment here.
+    ``lib.config``. Config is read straight from the environment here,
+    after loading ``Path.cwd() / ".env"`` via the stdlib-only helper.
   * We NEVER write ``shots_state.json`` (that file has exactly one writer,
     ``render_shot.py``, guarded by flock). We only write the per-attempt
     sidecar ``reviews/<shot>-ver<N>.json`` and return the review dict for
@@ -44,6 +44,10 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _BL_WRAPPER = _REPO_ROOT / "scripts" / "bl"
 _RUBRIC = _REPO_ROOT / "references" / "spark-video-clip-review" / "rubric.md"
+
+from lib.env import load_pwd_dotenv  # noqa: E402
+
+load_pwd_dotenv()
 
 # The six axes, in the canonical order the rubric emits them.
 AXES = ("logic", "proportion", "physics", "style", "cast_match", "dialog_attribution")

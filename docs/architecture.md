@@ -13,7 +13,7 @@ Spark-Video's entire product shape is a stack of `SKILL.md` files plus determini
 videoGen/
 ├── SKILL.md                                ← router / root Skill
 ├── references/
-│   ├── spark-video-episode/SKILL.md        ← producer (one-shot production)
+│   ├── spark-video-producer/SKILL.md       ← producer (one-shot production)
 │   ├── spark-video-screenwriter/SKILL.md   ← screenwriter
 │   ├── spark-video-director/SKILL.md       ← director / storyboarder
 │   ├── spark-video-cast/SKILL.md           ← art (cast/set/prop)
@@ -69,7 +69,7 @@ None of this requires rerunning the whole flow — the Agent reads `shots_state.
 ```mermaid
 flowchart TB
     User([User premise])
-    User --> Producer[producer<br/>spark-video-episode]
+    User --> Producer[producer<br/>spark-video]
 
     Producer --> G0{{GATE 0<br/>mode: drama / narration}}
     G0 --> G05{{GATE 0.5<br/>BGM mode}}
@@ -506,7 +506,7 @@ Concrete evolution:
 - **When in-shot consistency is model-guaranteed**: cast/set/prop pillars do not vanish — **scope widens** — from "feed every shot" to "feed every scene", with less last-frame chaining and less repeated environment text inside a scene.
 - **When one prompt drives minutes of video**: structured narrative fields like `narrative_purpose` and `shot_group_role` matter more — the model needs a longer "script" to sustain a long shot; structured fields are the micro-screenplay the model reads.
 - **chain-DAG upgrades to scene-DAG**: today groups split on `use_prev_last_frame_as_first` (physical continuity); future split on "is this narrative unit independent". But [`lib/render_graph.py`](https://github.com/JohnKeating1997/spark-video/blob/main/lib/render_graph.py) data structures need not change — serial semantics inside a group shift from "last-frame link" to "story continuity".
-- **Provider abstraction pays off more**: [`scripts/providers/`](https://github.com/JohnKeating1997/spark-video/tree/main/scripts/providers) plugin layout today supports bl and wan27; when Sora API, Veo, Kling, 可灵 2, Runway Gen-4 open up, **provider abstraction becomes the most valuable layer** — same `storyboard.json` on different models, user picks. Spark-Video is already set up for that.
+- **Provider abstraction pays off more**: [`scripts/providers/`](https://github.com/JohnKeating1997/spark-video/tree/main/scripts/providers) plugin layout today supports bl, wan27, and seedance2; when Sora API, Veo, Kling, 可灵 2, Runway Gen-4 open up, **provider abstraction becomes the most valuable layer** — same `storyboard.json` on different models, user picks. Spark-Video is already set up for that.
 - **viewer.html evolves into a creation IDE**: today read-only dashboard; tomorrow "Premiere/DaVinci substitute for long-form generative video" — all assets, versions, prompts, review scores in one page; in-editor re-render and remix.
 
 Deeper bet: **video model capability approaches an "infinite sound stage", but creation stays a finite engineering problem**. A 10-minute short does not need "a model that generates 10 minutes" — it needs clear lore, precise scene splits, fast failure ID, calm version comparison. Those are engineering problems, not model problems. Spark-Video bets that line, so whatever the base model becomes, the job stays the same — **translate human creative intent into structured constraints the model can execute, and digest model uncertainty inside an engineering loop**.
