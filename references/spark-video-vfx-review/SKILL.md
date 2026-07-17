@@ -96,10 +96,10 @@ For each shot, find its parent `scene` (via `shot.scene` → `scenes[].id`).
 Cross-reference each character mentioned in a shot with their soul card:
 
 - Does the prompt's character description match the soul card's appearance?
-- If a character is described with different clothing than their portrait /
+- If a character is described with different clothing than their cast reference /
   soul card within the same scene → **CRITICAL**.
 - Worse, if a shot prompt writes wardrobe / hairstyle / makeup explicitly when the
-  cast portrait already encodes it → **CRITICAL** (this fights the
+  cast reference already encodes it → **CRITICAL** (this fights the
   reference image; see director SKILL.md § "Character consistency").
 - Pay special attention to NPC characters — most likely to drift.
 
@@ -155,7 +155,7 @@ For each shot prompt:
   `图1/图2` for wan27/seedance2, plus `视频N` / `音频N` when those
   reference modalities are present).
 - Should NOT contain: wardrobe / hairstyle / makeup / accessories — these belong to the
-  cast portrait, not the prompt. Repeating fights the reference image.
+  cast reference, not the prompt. Repeating fights the reference image.
 - Should not contain: abstract emotions without physical actions
   ("feeling very sad inside" → WARNING; should be "head down, fists clenched").
 

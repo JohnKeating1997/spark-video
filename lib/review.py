@@ -2,7 +2,7 @@
 review.py — deterministic per-clip scoring (the engineering spine of Zone 3).
 
 Historically the *mechanics* of scoring a rendered clip (build the
-``./scripts/bl omni`` call, attach the right cast portraits, parse the
+``./scripts/bl omni`` call, attach the right cast reference images, parse the
 6-axis JSON, average it, decide ACCEPT/REJECT by threshold) lived only as
 prose in ``references/spark-video-clip-review/SKILL.md``. Weak agents
 sometimes skipped it entirely and a clip would sail through unscored.
@@ -119,10 +119,10 @@ def _omni_model_override() -> str | None:
     return v or None
 
 
-# ----------------------------------------------------------------- cast portraits
+# ------------------------------------------------------------ cast references
 
 def _resolve_cast_portraits(ep_dir: Path, characters: list[str]) -> tuple[list[Path], list[str]]:
-    """Map shot.characters → portrait image paths via cast.json.
+    """Map shot.characters → cast reference image paths via cast.json.
 
     Returns (resolved_paths, missing_names). Reuses the exact ``image_local``
     the renderer fed the model so cast_match compares like-for-like. Falls
@@ -160,7 +160,7 @@ def _resolve_cast_portraits(ep_dir: Path, characters: list[str]) -> tuple[list[P
 
 
 def _scan_for_portrait(ep_dir: Path, character: str) -> Path | None:
-    """Best-effort: find a portrait under cast/<character>/ (episode then project)."""
+    """Best-effort: find a cast reference under cast/<character>/ (episode then project)."""
     candidates = [
         ep_dir / "cast" / character,
         ep_dir.parent / "cast" / character,
@@ -367,7 +367,7 @@ def score_clip(
 
     portraits, missing = _resolve_cast_portraits(ep_dir, characters)
     if missing:
-        print(f"warn: review {shot_id} v{version}: no portrait for {missing} "
+        print(f"warn: review {shot_id} v{version}: no cast reference image for {missing} "
               f"(cast_match will be weaker)", file=sys.stderr)
 
     cmd: list[str] = [str(_BL_WRAPPER), "omni"]

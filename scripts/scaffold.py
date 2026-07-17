@@ -11,6 +11,7 @@ Subcommands:
     scene --num N           scaffold scenes/scene-NN.md (mode-specific)
     cast --name "陆辰"      scaffold cast folder + cast.md template
     cast --fork --name "陆辰" --drop-portraits   copy project cast to episode tier
+                                                and optionally delete copied reference images
     set --name "客栈-白天"   scaffold movie-set folder + set.md
     prop --name "红包-完整"  scaffold prop folder + prop.md
     cast-init               rebuild cast.json from project + episode tiers
@@ -220,6 +221,8 @@ dont:
 ## Visual anchor
 
 `visual_anchor` should paste directly into a t2i prompt.
+Default to a full-body standing character sheet / three-view reference,
+not a face-only or front-only portrait.
 Example: "a three-view drawing of a person and annotate it with an AI-generated, non-real-person watermark on the bottom, 28-year-old man, short hair, dark T-shirt, full-body character reference sheet, front view, side view, back view, same face and costume in all views, plain background, no other readable text."
 """
 
@@ -262,7 +265,7 @@ def _cast_fork(args: argparse.Namespace) -> int:
             png.unlink()
         for jpg in dst.glob("*.jpg"):
             jpg.unlink()
-        print(f"  dropped portraits from {dst}/")
+        print(f"  dropped cast reference images from {dst}/")
     print(f"forked {src} → {dst}")
     print(f"  next: ./scripts/bl image edit ... --out-dir {dst}/")
     print(f"        uv run scripts/scaffold.py cast-init")
@@ -447,7 +450,7 @@ def main() -> int:
     p_cast.add_argument("--fork", action="store_true",
                         help="copy project cast to episode tier")
     p_cast.add_argument("--drop-portraits", action="store_true",
-                        help="when --fork, delete copied portraits to force regen")
+                        help="when --fork, delete copied cast reference images to force regen")
     p_cast.add_argument("--force", action="store_true")
     p_cast.set_defaults(fn=cmd_cast)
 

@@ -40,7 +40,7 @@ string, ready to be passed directly to the video model.
 
 ### 3. Keep the hard rules
 - **DO NOT** add wardrobe / hairstyle / makeup / accessories — those live in the cast
-  portrait. Repeating them in text fights the reference image.
+  reference image. Repeating them in text fights the reference image.
 - **DO NOT** remove the age callout if the original had one
   ("28-year-old Lu Chen" / "middle-aged Qian Furen") — the model drifts age without it.
 - **DO NOT** remove the `mood_anchor` at the end of the prompt. If it's

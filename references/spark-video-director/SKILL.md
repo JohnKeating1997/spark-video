@@ -300,7 +300,7 @@ So your `prompt` should remain dense and shootable: action, camera,
 emotion, spoken text, and mood anchor. Do not hand-write the numbered
 wrapper unless you deliberately pass `render_shot.py --raw-prompt`.
 
-## Character consistency — cast portrait does the work, prompt stays out
+## Character consistency — cast reference sheet does the work, prompt stays out
 
 AI video models have no cross-shot memory: re-mention wardrobe in every
 prompt and you get a *different* dress shape every clip. The fix is
@@ -310,7 +310,7 @@ prompt and you get a *different* dress shape every clip. The fix is
 |--------|---------------|------------------------|
 | Face / hairstyle / costume / build | The cast `reference_image` (r2v shots only) | The shot prompt |
 | Age | The shot prompt — verbatim ("28 岁青年", "中年妇女", "白发老者") | (also OK in soul card, but required in every prompt that introduces the character) |
-| Gender, body type | Implicitly via portrait | Don't re-state in prompt unless the camera frames it |
+| Gender, body type | Implicitly via cast reference | Don't re-state in prompt unless the camera frames it |
 | Mood / facial expression | The shot prompt (this is shot-specific) | — |
 
 ### Hard rules
@@ -329,14 +329,14 @@ prompt and you get a *different* dress shape every clip. The fix is
 3. **DO** keep dialog lines verbatim (per Shanyin red lines).
 
 4. If `cast.json` was forked into the episode tier (costume change),
-   trust it: the episode-tier portrait already shows the new outfit,
+   trust it: the episode-tier cast reference already shows the new outfit,
    you still write zero clothing in the prompt.
 
 ### Costume change mid-project — fork the cast
 
 If the story REQUIRES a character to wear something different from
-their project-tier portrait, do NOT solve it in the prompt. Use
-`spark-video-cast` skill's fork procedure to override the portrait for
+their project-tier cast reference, do NOT solve it in the prompt. Use
+`spark-video-cast` skill's fork procedure to override the cast reference for
 this episode only. Episode tier overrides project tier automatically.
 
 ## Dialog & voiceover in drama-mode prompts
@@ -427,7 +427,7 @@ with characters wearing a noon-lit room. **Mandatory split**:
    align the `set_id`.
 
 5. **The renderer auto-appends the set's reference image to every r2v
-   shot's `media[]`** after cast portraits. You do NOT mention
+   shot's `media[]`** after cast reference images. You do NOT mention
    "[Image N] 客栈大堂" in the prompt — it's automatic.
 
 6. **For `t2v` shots in a scene with `set_id`**, the model can't take
@@ -506,7 +506,7 @@ Naming: `<prop_name>-<state>` — `红包-完整`, `红包-起皱`, `红包-撕�
    produces flicker. Use a hard cut.
 
 4. **The renderer auto-appends each prop's reference image to the r2v
-   shot's `media[]`** after cast portraits and after the set image. You
+   shot's `media[]`** after cast reference images and after the set image. You
    do NOT mention "[Image N] 红包" in the prompt — it's automatic.
 
 5. **DON'T re-describe the prop's appearance in the prompt.** Same rule
@@ -586,7 +586,7 @@ judgment is needed.
 - Don't assume a feature is available across all providers. Cross-check
   the capability table before relying on `negative_prompt`, voice, or
   first-frame r2v continuation.
-- Don't write wardrobe / hairstyle / makeup / accessories in shot prompts. Cast portrait
+- Don't write wardrobe / hairstyle / makeup / accessories in shot prompts. Cast reference sheet
   owns appearance. Solve costume changes by forking the cast — never by
   writing "wearing XXX" into the prompt.
 - Don't omit age. Every chain group's first character mention must

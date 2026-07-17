@@ -38,7 +38,7 @@ cast.
 Renderer integration: see ``providers/wan.py`` and
 ``providers/happyhorse.py`` — when a shot's scene has ``set_id`` and
 the active provider supports r2v ``reference_image``, the set's image
-is appended to ``media[]`` after the cast portraits.
+is appended to ``media[]`` after the cast reference images.
 """
 from __future__ import annotations
 

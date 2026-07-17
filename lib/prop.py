@@ -28,14 +28,14 @@ episode prop.md overrides the project one.
 State changes (完整的红包 → 起皱的红包 → 撕碎的红包) are SEPARATE
 folders, not multiple images in one folder. Multiple images in one
 folder are only for showing the *same state* from different angles
-(grid composite, just like cast portraits). Naming convention for
+(grid composite, just like cast reference images). Naming convention for
 state-bearing props: ``<name>-<state>``  e.g. ``红包-完整``,
 ``红包-起皱``, ``红包-撕碎``.
 
 Renderer integration: see ``providers/wan.py`` and
 ``providers/happyhorse.py`` — when a shot's ``props`` list names one
 or more props, the resolved image_url for each is appended to
-``media[]`` after cast portraits and after the scene's set image.
+``media[]`` after cast reference images and after the scene's set image.
 HappyHorse r2v caps total media at 9; the provider truncates with a
 warning when the cast + set + props slot count exceeds it.
 """

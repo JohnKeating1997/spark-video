@@ -168,15 +168,15 @@ craft, so they live here:
 3. **User-supplied dialog lines must appear verbatim** in some scene.
    This is non-negotiable, regardless of what Shanyin craft suggests.
 4. **Costume / hairstyle / accessories — only mention when it CHANGES.**
-   The character's baseline look is encoded in the cast portrait, so
+   The character's baseline look is encoded in the cast reference sheet, so
    the director will never put it into a prompt. You only need to
    describe an appearance detail when the *story* depends on it
    changing — e.g. "陆辰换上婚礼礼服" / "苏晚摘下耳环掷在桌上" /
-   "蓬头垢面". Otherwise leave appearance to the portrait.
+   "蓬头垢面". Otherwise leave appearance to the cast reference.
    - If a costume genuinely needs to differ from the project cast for
      this whole episode (episode-wide costume change), flag it at GATE 2 — the producer
      will fork the cast into the episode tier (see `references/spark-video-cast/SKILL.md`)
-     and the new portrait carries the change without any dialog
+     and the new cast reference carries the change without any dialog
      gymnastics. Don't try to solve it by repeatedly mentioning the outfit.
 5. **Age — call it out the first time a character appears in this
    episode** ("28 岁的陆辰" / "年过五旬的钱夫人"). The director reuses
@@ -190,13 +190,13 @@ craft, so they live here:
    Leads (in cast):
      - <name>
    Named NPCs (need cast entry):
-     - <name>: <one-line appearance for director portrait generation>
+     - <name>: <one-line appearance for director cast reference sheet generation>
    Extras (no cast needed):
      - <generic label>
    -->
    ```
 
-   The director uses this to generate NPC portraits before storyboarding.
+   The director uses this to generate NPC cast reference sheets before storyboarding.
 
 7. **Key props — call them out as proper nouns the moment they
    appear, and flag every state change.** A "key prop" is any object that
@@ -215,7 +215,7 @@ craft, so they live here:
    The state word in parentheses tells the director to swap the prop's
    reference image (`红包-完整` → `红包-起皱` are two folders). Never
    describe the prop's *visual properties* (material / color / print / thickness) —
-   the reference image owns those, the same way the cast portrait owns
+   the reference image owns those, the same way the cast reference owns
    face appearance. Only mention the *narrative state* and the *action* on the prop.
 
 8. **Prop check (PROP CHECK) — append below CAST CHECK in the last

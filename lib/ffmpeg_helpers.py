@@ -177,7 +177,7 @@ def _normalize_audio(
 
     When ``target_w`` and ``target_h`` are provided, the video is letterboxed
     to that exact canvas — required when mixing resolutions (e.g. t2v shots
-    at 1080P with r2v shots whose dims match the 720P cast portraits).
+    at 1080P with r2v shots whose dims match the 720P cast reference images).
     Without it, the concat demuxer silently drops streams with mismatched
     layouts.
 

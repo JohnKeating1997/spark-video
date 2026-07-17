@@ -311,7 +311,7 @@ def _build_asset_index(
 
 
 def _build_cast_index(ep_dir: Path) -> dict[str, str]:
-    """Map character name → portrait path from cast.json, with folder fallback."""
+    """Map character name → cast reference image path from cast.json, with folder fallback."""
     return _build_asset_index(
         ep_dir, json_name="cast.json", plural_key="characters", folder_name="cast"
     )
