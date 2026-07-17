@@ -30,6 +30,9 @@ import requests
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent.parent))
 
+from lib.env import load_pwd_dotenv  # noqa: E402
+
+load_pwd_dotenv()
 
 DASHSCOPE_BASE = os.environ.get(
     "DASHSCOPE_BASE_URL",

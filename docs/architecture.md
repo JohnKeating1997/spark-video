@@ -13,7 +13,7 @@ Spark-Video's entire product shape is a stack of `SKILL.md` files plus determini
 videoGen/
 ├── SKILL.md                                ← router / root Skill
 ├── references/
-│   ├── spark-video-episode/SKILL.md        ← producer (one-shot production)
+│   ├── spark-video-producer/SKILL.md       ← producer (one-shot production)
 │   ├── spark-video-screenwriter/SKILL.md   ← screenwriter
 │   ├── spark-video-director/SKILL.md       ← director / storyboarder
 │   ├── spark-video-cast/SKILL.md           ← art (cast/set/prop)
@@ -69,7 +69,7 @@ None of this requires rerunning the whole flow — the Agent reads `shots_state.
 ```mermaid
 flowchart TB
     User([User premise])
-    User --> Producer[producer<br/>spark-video-episode]
+    User --> Producer[producer<br/>spark-video]
 
     Producer --> G0{{GATE 0<br/>mode: drama / narration}}
     G0 --> G05{{GATE 0.5<br/>BGM mode}}

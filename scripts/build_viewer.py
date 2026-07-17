@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["pydantic>=2.5", "python-dotenv>=1.0"]
+# dependencies = ["pydantic>=2.5"]
 # ///
 """
 build_viewer.py — emit a self-contained viewer.html for one episode.
@@ -33,7 +33,10 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
+from lib.env import load_pwd_dotenv  # noqa: E402
 from lib.state import episode_dir, project_dir, normalize_episode_id  # noqa: E402
+
+load_pwd_dotenv()
 
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}

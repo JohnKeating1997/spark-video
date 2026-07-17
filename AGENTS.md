@@ -30,7 +30,7 @@ SKILL.md                     ← root router skill (runtime entry point + instal
 README.md / README.zh.md     ← user-facing intro (EN / Chinese)
 docs/architecture.md         ← the "why" — design philosophy & consistency model
 references/
-  spark-video-episode/       ← producer (one-shot orchestrator, the 4+2 gates)
+  spark-video-producer/      ← producer (one-shot orchestrator, the 4+2 gates)
   spark-video-screenwriter/  ← premise → scene-NN.md
   spark-video-director/      ← scene-NN.md → scene-NN.json (storyboard fragment)
   spark-video-cast/          ← cast / movie-set / prop reference-asset generation
@@ -63,16 +63,19 @@ lib/                         ← Pydantic data models + infra (storyboard, lore,
   declares its own deps in a `# /// script` header.
 
 ```bash
-./scripts/doctor.sh                 # verify bl + ffmpeg + uv + python + sub-skills
-uv run scripts/storyboard.py --help # run any script (uv resolves inline deps)
-cp .env.example .env                # then fill in DASHSCOPE_API_KEY
+./scripts/doctor.sh --quick --json        # fast agent preflight
+./scripts/doctor.sh --install-plan --json # machine-readable repair plan
+./scripts/doctor.sh                       # human-readable full report
+uv run scripts/storyboard.py --help       # run any script (uv resolves inline deps)
+cp .env.example .env                      # in the runtime cwd; then fill in DASHSCOPE_API_KEY
 ```
 
 - Runtime config is read from env vars in [`lib/config.py`](lib/config.py)
   (the `VIDEOGEN_*` family, e.g. `DASHSCOPE_API_KEY`,
   `VIDEOGEN_VIDEO_PROVIDER`, `VIDEOGEN_REVIEW_THRESHOLD`). The skills
   additionally set per-run `SPARK_VIDEO_*` vars (project / episode /
-  phase / concurrency). When adding a knob, add it to **both**
+  phase / concurrency). `.env` is loaded explicitly from `Path.cwd() / ".env"`,
+  so scripts should run with cwd set to the user's video workspace. When adding a knob, add it to **both**
   `lib/config.py` and `.env.example` with a comment.
 - Install the git hook once: `./scripts/install-hooks.sh`.
 
@@ -83,7 +86,8 @@ There is no test suite or `pyproject.toml`. The closest things to CI are:
   cross-artifact completeness check (every clip scored + won, viewer fresh,
   …). stdlib-only; `--json` for a dashboard. This is the deterministic
   backstop for "an agent skipped a step".
-- `./scripts/doctor.sh` — environment + sub-skill presence check.
+- `./scripts/doctor.sh --quick --json` — fast environment + sub-skill
+  presence check; `--install-plan --json` suggests repair commands.
 
 Run both after changing `lib/` models or `scripts/storyboard.py`.
 
@@ -106,8 +110,9 @@ Run both after changing `lib/` models or `scripts/storyboard.py`.
   step, ask "does this need a model's judgment?" — if no, make it a
   deterministic, idempotent tool call and let `gate.py` verify it.
 - **`render_shot.py` imports `lib.review` but NOT `lib.config`.** Its uv
-  env only declares `requests`; `lib.config` pulls in `python-dotenv`. Keep
-  `lib/review.py` dependency-light (stdlib) and read env directly there.
+  env only declares `requests`. Keep `lib/review.py` dependency-light
+  (stdlib) and read env directly there after loading `Path.cwd()/.env`
+  through `lib.env`.
 - **Don't hand-write `script.md` or `storyboard.json`.** Produce them
   through `uv run scripts/storyboard.py compile` so validation runs.
 - **Consistency comes from assets, not prompts.** One folder = one

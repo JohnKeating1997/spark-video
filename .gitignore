@@ -9,6 +9,7 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+.spark-video/
 
 # === Per-user settings (NOT committed) =========================================
 .claude/settings.local.json
