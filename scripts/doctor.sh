@@ -70,10 +70,17 @@ fi
 
 # Shanyin references (optional)
 echo "[shanyin craft references — optional]"
-sh_sw="$(dirname "$self_dir")/references/shanyin/screenwriting-master/SKILL.md"
-sh_dir="$(dirname "$self_dir")/references/shanyin/director-master/SKILL.md"
-[ -f "$sh_sw" ] && good "shanyin-screenwriting-master present" || echo "  · not installed (optional). Run: ./scripts/install-deps.sh"
-[ -f "$sh_dir" ] && good "shanyin-director-master present"     || echo "  · not installed (optional). Run: ./scripts/install-deps.sh"
+# Upstream repos ship a `.skill` bundle (filename varies, may be non-ASCII),
+# not a SKILL.md — so detect a successful clone by any `.skill` file present.
+shanyin_present() {
+  local dir="$1"
+  [ -d "$dir" ] || return 1
+  compgen -G "$dir/*.skill" >/dev/null 2>&1
+}
+sh_sw_dir="$(dirname "$self_dir")/references/shanyin/screenwriting-master"
+sh_dir_dir="$(dirname "$self_dir")/references/shanyin/director-master"
+shanyin_present "$sh_sw_dir"  && good "shanyin-screenwriting-master present" || echo "  · not installed (optional). Run: ./scripts/install-deps.sh"
+shanyin_present "$sh_dir_dir" && good "shanyin-director-master present"     || echo "  · not installed (optional). Run: ./scripts/install-deps.sh"
 
 # sub-skills present
 echo "[sub-skills]"
