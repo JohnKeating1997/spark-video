@@ -1,9 +1,13 @@
 ---
 name: spark-video-clip-review
-description: Per-clip quality reviewer + render retry state machine. After each rendered shot, score it on 6 axes via `bl omni` (qwen3.5-omni-plus), then decide ACCEPT / REJECT-and-rewrite / REJECT-and-escalate. Handles up to N retry rounds with auto prompt rewriting; escalates to spark-video-director when retries are exhausted.
+description: Optional per-clip quality reviewer + render retry state machine. When bl is installed and authenticated, score each rendered shot on 6 axes via `bl omni`, then decide ACCEPT / REJECT-and-rewrite / REJECT-and-escalate. Without bl, render_shot marks review SKIPPED and promotes the clip.
 ---
 
 # Clip Review + Re-Render Skill — spark-video On-Set QA
+
+This stage is optional. If `render_shot.py` returns
+`review.verdict=SKIPPED`, bl is unavailable or review was disabled; keep the
+promoted winner and do not enter the rewrite loop.
 
 You are the **per-clip quality gate** of the pipeline. You run **after**
 each shot is rendered. You catch problems that only surface in the
@@ -29,6 +33,15 @@ it, writes `reviews/<shot>-ver<N>.json`, embeds the review into
 version to winner (`clips/<shot>.mp4`). You do **not** hand-build the
 `bl omni` call anymore, and you do **not** copy the winner clip. That
 deterministic spine cannot be skipped.
+
+## Rewrite language contract
+
+The review rubric may keep `critique` in English for stable machine parsing.
+When rewriting a rejected shot, however, detect and preserve the original
+shot prompt's language. A Chinese prompt must produce a Chinese rewrite and
+an English prompt an English rewrite; names and quoted dialogue stay
+unchanged. Never switch languages merely because the active Wan account is
+on the CN or international site.
 
 What is left to *you* is exactly the judgment a script can't do:
 - read the REJECT `critique` and rewrite the prompt to fix the specific
@@ -56,18 +69,27 @@ while ver <= max_retry:                # default max_retry = 3, env: SPARK_VIDEO
         # the clip looks fine to you, accept it manually with --accept-version.
         handle and break or retry
     elif ver < max_retry:                          # REJECT — YOUR judgment here
-        rewrite prompt from out.review.critique (bl text chat)   # SPARK_VIDEO_PHASE=rewrite
-        update scenes/scene-NN.json with the new prompt
+        rewrite prompt from out.review.critique using host-agent reasoning
+        update only scenes/scene-NN.json's model-facing prompt; keep the
+        approved animatic/narrative/cast/set/prop contract unchanged
         ver += 1                                   # next render_shot --force renders ver+1
     else:                                          # REJECT, retries exhausted
-        best = highest-scoring attempt in shots_state.json
-        render_shot.py --shot <id> --accept-version <best>       # promote best-of-N
+        best = highest-scoring attempt with blocking_issues=[]
+        if best exists:
+            render_shot.py --shot <id> --accept-version <best>   # promote best-of-N
+        # If every attempt has a blocker, do not promote one.
         write reviews/escalation-<shot>.md + needs_director_rewrite.json
         exit with escalation signal
 ```
 
 The producer reads the escalation file and invokes the
 `spark-video-director` skill with it as input.
+
+If a proposed fix must change `animatic_prompt`, narrative purpose, duration,
+beats, speech source/text/speaker, AudioPlan, cast, set, props, or shot kind,
+it is no longer a prompt rewrite. Go
+back through the affected GATE 2 panel generation and confirmation; the
+contract fingerprint deliberately blocks rendering against stale approval.
 
 ## How to render + review one attempt
 
@@ -79,12 +101,12 @@ uv run scripts/render_shot.py \
   --shot $SPARK_VIDEO_SHOT \
   --kind r2v --duration 12 \
   --prompt "<from storyboard.json>" \
-  --media projects/$SPARK_VIDEO_PROJECT/cast/陆辰/portrait1.png \
-          projects/$SPARK_VIDEO_PROJECT/movie-set/客栈大堂-夜晚/set1.png
+  --media "projects/$SPARK_VIDEO_PROJECT/cast/Ethan Cole/portrait1.png" \
+          projects/$SPARK_VIDEO_PROJECT/movie-set/inn-lobby-night/set1.png
 
 # stdout (JSON) now includes the review verdict:
 # {"shot_id":"S01-002","version":1,"video_path":"...","duration_s":12.0,
-#  "provider":"bl","model":"happyhorse-1.0-r2v","elapsed_s":47.2,
+#  "provider":"wan-cli","model":"wan3.0","elapsed_s":47.2,
 #  "review":{"score":6.2,"verdict":"REJECT","breakdown":{...},"critique":"..."},
 #  "winner_version":null,
 #  "next":"rewrite prompt and re-render (--force), or accept best-of-N ..."}
@@ -119,29 +141,32 @@ reference images feed the `cast_match` axis (default: storyboard's
     "logic": 7, "proportion": 6, "physics": 7,
     "style": 8, "cast_match": 5, "dialog_attribution": 4
   },
-  "critique": "0:00–0:03 钱夫人脸型偏离参考图(下巴宽 + 发际线高); 0:04 那句\"你这小蹄子\"应是钱夫人说的, 但视频里嘴动的是郭芙蓉, 属于台词错位 ...",
+  "critique": "0:00–0:03 Madam Quinn's face drifts from the reference (wider jaw and higher hairline); at 0:04, the line 'You little rogue' belongs to Madam Quinn, but Grace Ford's mouth moves instead, causing dialog misattribution ...",
   "verdict": "REJECT",
   "ts": "<ISO8601>"
 }
 ```
 
-`verdict = "ACCEPT"` iff `score >= threshold` (default 7.0, env:
+`verdict = "ACCEPT"` iff `score >= threshold`, no axis triggers the configured
+veto floor, and `blocking_issues` is empty (default threshold 7.0, env:
 `SPARK_VIDEO_REVIEW_THRESHOLD` / `VIDEOGEN_REVIEW_THRESHOLD`). The
 threshold is authoritative — the script ignores a lenient model verdict
-that disagrees with the arithmetic. A `verdict == "ERROR"` means the
+that disagrees with deterministic policy. Blocking issues are general
+delivery failures such as malformed/unrequested readable text, contradiction
+of the approved shot contract, unexpected model speech, wrong speaker, severe corruption, or wrong
+identity; they are not a topic-specific review. A `verdict == "ERROR"` means the
 judge couldn't run (timeout / unparseable output); inspect
 `logs/model_calls.jsonl` rather than treating it as a content reject.
 
 ### 3. On REJECT — rewrite the prompt (this is YOUR job)
 
+Use the host agent's own reasoning with `rewrite-system.md`, the original
+prompt, score, and critique. Keep narrative intent unchanged and output only
+the rewritten prompt. Do not call `bl text chat` for this step.
+
 ```bash
 export SPARK_VIDEO_PHASE=rewrite
-./scripts/bl text chat \
-  --model qwen-plus \
-  --system "$(cat references/spark-video-clip-review/rewrite-system.md)" \
-  --message "Original prompt: <prompt>\nScore: 6.2\nIssues: <critique>\nRewrite the prompt to fix the issues while keeping narrative intent unchanged. Output only the new prompt text, no explanation."
-
-# Update scenes/scene-NN.json's shot with the new prompt, then re-render
+# Update scenes/scene-NN.json's shot with the rewritten prompt, then re-render
 # (the next attempt auto-scores again):
 uv run scripts/render_shot.py --shot $SPARK_VIDEO_SHOT --kind r2v \
   --duration 12 --prompt "<rewritten>" --media ... --force
@@ -184,7 +209,7 @@ director under
 `projects/<p>/<ep>/reviews/escalation-<shot>.md`:
 
 ```markdown
-# Escalation to Director · S01-002
+# Escalation to Director - S01-002
 
 ## Three scoring rounds
 | ver | score | logic | prop | phys | style | cast | dialog |

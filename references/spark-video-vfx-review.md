@@ -73,22 +73,27 @@ to the director.
 
 Run through EVERY item below for EVERY shot. Be systematic — don't sample.
 
-### A. mood_anchor coverage (Critical)
+### A. visual-medium and mood compatibility (Critical)
 
-Every shot prompt MUST end with the `mood_anchor` from `lore.md`, verbatim.
+Read project `visual_medium` and any shot `animatic_style` override. The mood
+anchor is a review baseline for compatible lighting, palette, contrast, and
+atmosphere; it does not need to appear verbatim in every prompt.
 
-- Read lore's `mood_anchor` string.
-- Check each shot's `prompt` field contains it.
-- Missing anchor = **CRITICAL** — #1 visual cohesion lever.
+- A shot rendered in a different canonical medium (`live_action`,
+  `2d_animation`, `3d_animation`, or `stop_motion`) is **CRITICAL** unless the
+  shot explicitly declares `mixed`.
+- A mixed shot must name the concrete medium of every element crossing a media
+  boundary; a bare `animation` label is ambiguous and therefore **CRITICAL**.
+- A missing verbatim mood-anchor suffix is not an error by itself.
 
 ### B. Scene consistency (Critical)
 
 For each shot, find its parent `scene` (via `shot.scene` → `scenes[].id`).
 
 - The shot's prompt must contain **at least 2-3 key physical nouns** from
-  `scene.description` (e.g. "松木戏台", "彩旗", "红色横幅").
+  `scene.description` (e.g. "pine stage", "festival flags", "red banner").
 - If a shot's prompt describes an environment that contradicts its scene
-  (e.g. scene says "露天戏台" but prompt says "室内大厅") → **CRITICAL**.
+  (e.g. scene says "open-air stage" but prompt says "indoor hall") → **CRITICAL**.
 - If the prompt just omits scene keywords but doesn't contradict → **WARNING**.
 
 ### C. Costume / appearance consistency (Critical)
@@ -103,17 +108,17 @@ Cross-reference each character mentioned in a shot with their soul card:
   reference image; see director SKILL.md § "Character consistency").
 - Pay special attention to NPC characters — most likely to drift.
 
-### D. Dialog coverage (Critical)
+### D. Speech-source coverage (Critical)
 
 Compare `script.md` dialog lines against shot prompts:
 
-- Every user-supplied dialog line (from the original premise) must appear
-  in exactly one shot prompt, verbatim.
+- Every user-supplied spoken line must appear exactly once: in the model-facing
+  prompt for `speech_source=model`, or in `speech_text` for `post_tts`.
 - Every line from script.md should appear unless deliberately cut.
-- Dialog in a shot that uses `t2v` or `i2v` kind → **CRITICAL** (these
-  can't lip-sync; dialog is silently discarded).
-- Dialog in a `narration` role shot → **CRITICAL** (use dialog beats for
-  dialog, not narration).
+- `post_tts` speech copied into the visual prompt → **CRITICAL**.
+- `speech_source=model` without the exact spoken line in the prompt → **CRITICAL**.
+- `post_tts + voiceover` asking for visible speaking, lip sync, or a mouth
+  close-up → **CRITICAL** unless an explicit lip-sync stage exists.
 
 ### E. Protagonist never leaves frame (Critical)
 
@@ -128,11 +133,11 @@ For action sequences (especially fights / confrontations):
 
 | Situation | Expected kind | Flag if wrong |
 |-----------|---------------|---------------|
-| Character + dialog | `r2v` | CRITICAL if t2v/i2v |
+| Character identity lock or model dialog | `r2v` | CRITICAL if the required cast reference cannot be attached |
 | Pure camera move / transition | `i2v` | WARNING if r2v |
 | Establishing shot, no character | `t2v` | WARNING if r2v |
 | First shot of project | Not `i2v` (needs no prev frame) | WARNING |
-| Narration beat | `t2v` (or `r2v` if face-lock needed) | WARNING if i2v |
+| Post-TTS voiceover beat | `t2v` (or `r2v` if a visible face must be locked) | WARNING if kind adds an unnecessary continuity dependency |
 
 ### G. Continuation-frame logic (Warning)
 
@@ -148,12 +153,15 @@ Check `use_prev_last_frame_as_first` for each shot:
 
 For each shot prompt:
 
-- Length: 60–200 characters is the sweet spot. Under 40 → too
-  vague (WARNING). Over 250 → diluted (WARNING).
-- Must contain: shot type (wide / medium / close / extreme close-up), action verb,
-  character reference (`[Image 1]/[Image 2]` for bl/happyhorse r2v,
-  `图1/图2` for wan27/seedance2, plus `视频N` / `音频N` when those
-  reference modalities are present).
+- Do not enforce a universal character-count range. Flag prompts only when they
+  are too vague to stage or so repetitive that the primary action becomes hard
+  to identify.
+- Must contain: visible subject, a concrete action verb, physical performance
+  cues where relevant, and the character reference matching the
+  renderer-generated `Image N / Video N / Audio N` map.
+- Do not require camera movement or the final-frame layout in `prompt`; those
+  belong to `camera_path` and `end_composition`. Framing that materially changes
+  the visible action may still be stated once.
 - Should NOT contain: wardrobe / hairstyle / makeup / accessories — these belong to the
   cast reference, not the prompt. Repeating fights the reference image.
 - Should not contain: abstract emotions without physical actions
@@ -172,11 +180,32 @@ For each shot prompt:
 - Check every prompt against each character's `dont` list from soul cards.
 - Any match → **CRITICAL**.
 
-### K. Duration sanity (Suggestion)
+### K. Duration and complexity sanity (Suggestion)
 
-- Shots defaulting to model max (15s) for non-dialog or quick beats →
-  **WARNING** (likely hard cut / freeze tail).
-- Narration shots > 6s without justification → **WARNING**.
+- Duration must be Agent-selected from content, never copied from the model cap.
+- Treat 6-8s as the prior for an ordinary complete shot, not a fixed duration.
+- 2-5s is appropriate for an immediately readable insert, reaction, or simple
+  action; 11-15s needs visible performance, speech, or camera-travel demand.
+- Any 16-30s shot without a specific `long_take_reason`, or whose action could
+  be split without losing continuity or dramatic effect → **CRITICAL**.
+- Never grade by beat count. When a timed plan exists, check only that its
+  segmentation follows real action changes and its ranges cover the shot
+  continuously without gaps or overlaps.
+- For 2-15s shots, a timed plan is optional. When present, every phase must
+  advance the same dramatic intention and may clarify contact, occlusion,
+  environmental response, or camera/subject synchronization. Unrelated events
+  packed into short time ranges → **WARNING**; timestamps that merely restate
+  the prose without adding control → **SUGGESTION** to remove them.
+- Missing `camera_path` or `end_composition` → **WARNING**; vague values such as
+  “cinematic movement” or “beautiful ending” do not count.
+- A valid `camera_path` should identify an executable opening geometry, one
+  dominant continuous path, and a landing position. Lens/support are recommended
+  when they materially affect perspective or motion character. Mutually
+  conflicting same-phase instructions (locked + tracking, fixed distance +
+  push-in, telephoto compression + exaggerated wide-angle perspective) →
+  **WARNING**.
+- Check that any shake has a physical source and recovery behavior. Random
+  “dynamic handheld” without an amplitude/source → **SUGGESTION** to rewrite.
 - More than 5 shots in one scene → **SUGGESTION** (consider splitting scene).
 
 ### L. Continuous-action recall (Warning)
@@ -184,8 +213,8 @@ For each shot prompt:
 When the main character switches between consecutive shots in the same scene:
 
 - Does the new shot mention the previous main character's presence?
-- If shot N features 钱夫人 and shot N+1 features 少林方丈 (same scene),
-  does N+1's prompt mention 钱夫人 is still in frame?
+- If shot N features Madam Quinn and shot N+1 features Abbot Rowan (same scene),
+  does N+1's prompt mention Madam Quinn is still in frame?
 - Missing recall for important characters → **WARNING**.
 
 ### M. narrative_purpose quality (Critical)
@@ -194,15 +223,15 @@ Every shot must have a concrete `narrative_purpose` field — no empty platitude
 
 - **CRITICAL**: `narrative_purpose` missing or empty string.
 - **CRITICAL**: `narrative_purpose` hits the platitude blacklist —
-  `"展现冲突"`, `"推进剧情"`, `"推进故事"`, `"建立场景"`,
-  `"渲染气氛"`, `"表现情绪"`, `"TBD"`, `"TODO"`.
+  `"show conflict"`, `"advance the plot"`, `"move the story forward"`,
+  `"establish the scene"`, `"build atmosphere"`, `"show emotion"`, `"TBD"`, `"TODO"`.
 - **WARNING**: `narrative_purpose` length < 8 characters (platitude variant).
 - **WARNING**: multiple shots share the same `narrative_purpose` text.
 - **Rule of thumb**: a valid `narrative_purpose` must answer "what would the story lose if this shot didn't exist?" If you can't answer → **WARNING**.
 
 Reference — good examples:
-- "用低角度仰拍 + 缓慢推近, 放大钱夫人挑衅时的优越感"
-- "通过她偷瞄郭芙蓉的眼神, 暗示她已经心虚"
+- "Use a low angle and slow push-in to magnify Madam Quinn's smugness as she provokes her rival"
+- "Her quick glance toward Grace Ford reveals that her confidence is already cracking"
 
 ### N. Standout-design density (Warning)
 
@@ -224,16 +253,16 @@ If `lore.imagery_system.motifs` is non-empty, every motif must appear as a concr
 - Short form (≤300s): each motif appears in at least 2 shot prompts (verbatim or near-synonym).
   Grounding count < 2 → **CRITICAL**.
 - Long form (>300s): each motif at least 5 times. < 5 → **WARNING**.
-- Grounding must be a shootable concrete image, not abstract mention. E.g. motif is "搓动的围裙",
-  prompt should be `"[Image 1] 钱夫人 双手反复搓动腰间围裙"`, not `"她紧张地
-  搓着围裙"`.
+- Grounding must be a shootable concrete image, not abstract mention. E.g. motif is "wringing an apron",
+  prompt should be `"Madam Quinn repeatedly wrings the apron at her waist"`, not
+  `"She nervously fidgets with her apron"`.
 - `lore.imagery_system.highlight_elements` — same rules, half the threshold.
 
 ### P. Dialog-shot variety (Warning)
 
 Episode-wide r2v dialog shots (2+ characters + explicit dialog) must have **non shot-reverse-shot ratio ≥ 30%**.
 
-- **Shot-reverse-shot flag**: prompt contains both `[Image 1]` and `[Image 2]` +
+- **Shot-reverse-shot flag**: prompt contains both character names +
   framing is medium / close-up + no tracking / over-shoulder / mirror keywords.
 - **Non shot-reverse-shot flag**: prompt contains tracking / side-by-side / walk-and-talk / over-shoulder /
   OS / POV / in-mirror / reflection / voice-over / extreme close-up + single character.
@@ -250,21 +279,22 @@ Episode-wide r2v dialog shots (2+ characters + explicit dialog) must have **non 
 - A `Shot.props` attached to a `t2v` / `i2v` shot: **WARNING** — the kind
   has no media[] slot, the prop image is silently dropped.
 
-### R. Provider compatibility (Warning)
+### R. Video provider compatibility (Warning)
 
 Check `Storyboard.provider` (or fall back to `$SPARK_VIDEO_PROVIDER`):
 
-- If provider is `bl`/happyhorse and any shot has `negative_prompt` set →
-  **WARNING** (silently dropped; encode the negation in the positive prompt).
-- If provider is `bl`/happyhorse and prompt uses `图1/图2` syntax →
-  **WARNING** (use `[Image 1]/[Image 2]` instead).
-- If provider is `wan27` and prompt uses `[Image 1]/[Image 2]` →
-  **SUGGESTION** (wan accepts both but 图1 is more native).
-- If provider is `seedance2` and prompt uses `[Image 1]/[Image 2]` →
-  **WARNING** (Seedance 2 prompt rules expect `图N` / `视频N` / `音频N`
-  references by modality order).
-- Cap check: r2v shot with `cast count + (set ? 1 : 0) + props count > 9`
-  on `bl`/happyhorse → **WARNING** (extras dropped by priority order).
+- Supported providers are `wan-cli`, `bl`, and `seedance2`; aliases
+  normalize in the render layer. Unknown providers are **CRITICAL**.
+- For `wan-cli`, verify explicit reference numbers match the actual
+  `Image N / Video N / Audio N` upload order. Warn when an r2v shot exceeds
+  10 images, 5 videos, or 5 audios. Because the active Wan commands do not use
+  a separate negative-prompt flag, repeat negative constraints as concrete
+  positive-prompt guidance.
+- For `bl`, account for HappyHorse's narrower reference/continuity features;
+  do not assume reference voice or first-frame chaining on r2v.
+- Wan 2.7 is selected inside `wan-cli`; do not treat it as a provider name.
+- For `seedance2`, require Ark-compatible URLs/assets for local video inputs;
+  local image and audio references may be embedded by the adapter.
 
 ## How to run
 

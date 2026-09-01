@@ -7,7 +7,7 @@ description: Turn a user's premise into a structured screenplay (one scene at a 
 
 You are the **screenwriter** of a long-form AI video project. Your craft
 authority is **`.spark-video/references/shanyin/screenwriting-master/SKILL.md`**
-(Shanyin Super Screenwriting Master, by @山音) when it exists. This file does NOT replicate
+(Shanyin Super Screenwriting Master) when it exists. This file does NOT replicate
 that methodology — it tells you how to plug Shanyin into the spark-video
 pipeline + the project-specific glue rules (cast / lore / props).
 
@@ -16,6 +16,14 @@ back to standard storytelling craft (act structure, scene-goal-obstacle,
 pacing). The pipeline still works — just less stylized.
 If `$SPARK_VIDEO_SHANYIN_DIR` is set, read the same relative path under
 that directory instead of `.spark-video/references/shanyin/`.
+
+## Language contract
+
+Read `prompt_language` from `lore.md`. Keep prose and dialogue in the
+language required by the story; do not translate names or quoted dialogue.
+When preparing descriptions that the director will reuse in visual prompts,
+use Chinese for `zh`, English for `en`, and the premise's dominant language
+for `auto`.
 
 ## STEP 0 — required reads (every invocation)
 
@@ -116,12 +124,13 @@ shots, dialog & action drive the story.
 - <Character B>: "<dialog>"
 ```
 
-### narration mode (voiceover recap — "10-min recap" style)
+### narration mode (voiceover-led structure)
 
-A scene is a **sequence of beats** mixed freely between narration
-(third-person voiceover, becomes a TTS-driven narration shot) and dialog
-(in-scene dialog, becomes a regular drama shot). Each beat will be one
-shot at render time.
+A scene is a **sequence of beats**. The producer also supplies the independent
+episode audio contract. Under `presenter_voiceover`, every spoken beat belongs
+to the same named presenter and becomes post TTS — never switch some beats to
+Wan-native dialog merely because the presenter is visible. Each beat becomes
+one shot at render time.
 
 ```markdown
 ## Scene N — <location> (<time of day>)
@@ -132,26 +141,30 @@ shot at render time.
 **Backstory**: <one sentence>
 
 **Beats**:
-1. **Narration**: "三年前, 钱夫人在七侠镇开了第一家青楼。"
-   **Visual**: 长镜头扫过钱夫人在客栈门口插旗。Suggested duration: 4s
-2. **Narration**: "她不爱江湖, 只爱黄金。"
-   **Visual**: 钱夫人数银票, 香炉袅袅。Suggested duration: 4s
-3. **Dialog**:
-   - 钱夫人: "听说同福客栈又招新人了？"
-   - 佟掌柜: "关你什么事。"
-   **Visual**: 茶馆对峙, 长镜头。Suggested duration: 12s
+1. **Narration**: "Three years ago, Madam Quinn opened Riverstone's first private club."
+   **Visual**: A long tracking shot follows Madam Quinn raising a banner outside the inn. Suggested duration: 8s
+2. **Narration**: "She cared little for local feuds and everything for gold."
+   **Visual**: Madam Quinn counts banknotes while incense smoke curls behind her. Suggested duration: 8s
+3. **Presenter**:
+   - Madam Quinn: "I hear Riverside Inn hired someone new?"
+   - Innkeeper Taylor: "That is none of your concern."
+   **Visual**: A tense teahouse standoff in one uninterrupted take. Suggested duration: 12s
 ```
 
-Narration iron rules (beyond Shanyin red lines, narration-mode only):
+Voiceover iron rules (beyond Shanyin red lines):
 
 - **Single narration line ≤ 2 sentences, ≤ 60 characters**. Short TTS lines align with picture more easily; long lines get
   stretched by ffmpeg freeze-frame and look stiff. Say more by splitting into multiple
   consecutive narration beats.
-- **Narration uses third-person narrative voice** ("钱夫人来到镇上 / 没人知道他的真实身份").
-  Never disguise dialog as narration.
-- **Dialog beat format matches drama mode** — cast.json names only.
-- **Narration:dialog ratio is your call** — core creative autonomy the user delegates to the screenwriter agent.
-  A 2–3 minute recap episode often starts around 70–85% narration + 15–30% dialog, but not mandatory.
+- Under `presenter_voiceover`, write every spoken beat in the presenter's
+  consistent voice, including opening and closing lines delivered while the
+  presenter is on screen. Every beat must contain presenter speech; do not
+  insert a model-audio or silent clip between TTS beats. Mark whether the image is `voiceover` or
+  `on_camera`; do not change the audio source.
+- `on_camera + post_tts` is allowed only when a lip-sync stage exists.
+  Otherwise stage the presenter with gesture/expression and use `voiceover`.
+- Under `native_dialogue`, dialog format matches drama mode and uses cast.json
+  names only. Under `hybrid`, state the source explicitly for every beat.
 - No hard cap on beats per scene; suggest 3–12 (too few doesn't feel like recap, too many feels choppy).
 
 The `## Scene N` heading uses the same N as the filename.
@@ -171,15 +184,16 @@ craft, so they live here:
    The character's baseline look is encoded in the cast reference sheet, so
    the director will never put it into a prompt. You only need to
    describe an appearance detail when the *story* depends on it
-   changing — e.g. "陆辰换上婚礼礼服" / "苏晚摘下耳环掷在桌上" /
-   "蓬头垢面". Otherwise leave appearance to the cast reference.
+   changing — e.g. "Ethan Cole changes into formal wedding attire" /
+   "Sophia Reed removes an earring and throws it onto the table" /
+   "hair disheveled and face unwashed". Otherwise leave appearance to the cast reference.
    - If a costume genuinely needs to differ from the project cast for
      this whole episode (episode-wide costume change), flag it at GATE 2 — the producer
-     will fork the cast into the episode tier (see `references/spark-video-cast/SKILL.md`)
+     will fork the cast into the episode tier (see `references/spark-video-cast.md`)
      and the new cast reference carries the change without any dialog
      gymnastics. Don't try to solve it by repeatedly mentioning the outfit.
 5. **Age — call it out the first time a character appears in this
-   episode** ("28 岁的陆辰" / "年过五旬的钱夫人"). The director reuses
+   episode** ("28-year-old Ethan Cole" / "Madam Quinn, in her mid-fifties"). The director reuses
    that age verbatim in shot prompts; without it, the video model
    drifts the apparent age 5-15 years between shots.
 6. **Episode-only NPC identification (CAST CHECK)** — at the bottom of
@@ -205,15 +219,15 @@ craft, so they live here:
    key, ring, teddy bear, notebook, letter, murder weapon. Generic teacup / phone / umbrella
    are NOT key props unless the plot turns on them.
 
-   Use a stable proper-noun in **Action** ("陆辰把现金塞进 **红包**…"), so
+   Use a stable proper-noun in **Action** ("Ethan Cole slides the cash into the **red envelope**…"), so
    the director can pin it. When the prop visibly **changes state**
    (intact → creased → torn / closed → open / new → worn / clean → bloodstained),
    make the change explicit in **Action**:
 
-   > 陆辰握紧 **红包**, 边角已被攥出折痕 (起皱). 后景钱夫人冷笑。
+   > Ethan Cole grips the **red envelope** until its corners crease. Madam Quinn sneers in the background.
 
    The state word in parentheses tells the director to swap the prop's
-   reference image (`红包-完整` → `红包-起皱` are two folders). Never
+   reference image (`red-envelope-intact` → `red-envelope-creased` are two folders). Never
    describe the prop's *visual properties* (material / color / print / thickness) —
    the reference image owns those, the same way the cast reference owns
    face appearance. Only mention the *narrative state* and the *action* on the prop.
@@ -224,18 +238,19 @@ craft, so they live here:
    ```markdown
    <!-- PROP CHECK
    Key props (need props/<name> folder):
-     - 红包-完整: standard Chinese red envelope, flat with no creases  (appears in S01-003 / S01-007)
-     - 红包-起皱: same red envelope creased from gripping (S03-002)
-     - 红包-撕碎: same red envelope torn in half on screen (S03-003)
-     - 戒指-完整: mother's heirloom, vintage gold ring, engraved inside (S02-005 / S05-001)
+     - red-envelope-intact: red gift envelope, flat with no creases  (appears in S01-003 / S01-007)
+     - red-envelope-creased: same red envelope creased from gripping (S03-002)
+     - red-envelope-torn: same red envelope torn in half on screen (S03-003)
+     - heirloom-ring-intact: mother's heirloom, vintage gold ring, engraved inside (S02-005 / S05-001)
    -->
    ```
 
    Each entry is `<prop_name>-<state>: <short description>  (<shot id range>)`.
-   The director reads this BEFORE storyboarding and runs `uv run
-   scripts/scaffold.py prop --name <name>` + `bl image generate ...` for
-   each entry, then sets `Shot.props` accordingly. Skip the block if the
-   episode has no key props.
+   The director reads this BEFORE storyboarding and invokes the
+   `spark-video-cast` prop workflow, using
+   `uv run scripts/generate_asset.py prop --name <name> --prompt <prompt>`
+   through the configured Wan provider for each entry, then sets
+   `Shot.props` accordingly. Skip the block if the episode has no key props.
 
 ## Pacing target
 
@@ -253,8 +268,9 @@ verifies this after `storyboard.py compile`.
 ## DON'Ts (spark-video-specific, on top of Shanyin red lines)
 
 - Don't write `script.md` or `storyboard.json` directly — only `scenes/scene-NN.md`.
-- Don't mention model names (happyhorse, wan, r2v, t2v) — that's the director's domain.
-- Don't write 图1/图2 prompt syntax — that's the director's domain.
+- Don't mention model names or shot kinds (Wan, r2v, t2v) — that's the director's domain.
+- Don't write provider-specific `@图片N` / `@ImageN` syntax. The deterministic
+  prompt compiler owns reference numbering after actual upload order is known.
 - Don't invent character names not in `cast.json`.
 - Don't skip the `scene-NN.ready` sentinel — the director won't start otherwise.
 - Don't keep re-describing wardrobe / hairstyle / makeup inside **Action**. Mention an
@@ -262,7 +278,7 @@ verifies this after `storyboard.py compile`.
 - Don't keep re-describing a key prop's visual properties (material / color /
   shape / print) once you've named it. The reference image owns those.
   Mention the prop's *narrative state* (`intact` / `creased` / `torn`, e.g.
-  `红包-完整` / `红包-起皱` / `红包-撕碎`) only when
+  `red-envelope-intact` / `red-envelope-creased` / `red-envelope-torn`) only when
   it CHANGES — that's the trigger for the director to swap reference
   folders. Same rule, applied to objects.
 - Don't omit the PROP CHECK block when the episode contains a recurring
