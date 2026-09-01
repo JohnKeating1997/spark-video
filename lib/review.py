@@ -4,7 +4,7 @@ review.py — deterministic per-clip scoring (the engineering spine of Zone 3).
 Historically the *mechanics* of scoring a rendered clip (build the
 ``./scripts/bl omni`` call, attach the right cast reference images, parse the
 6-axis JSON, average it, decide ACCEPT/REJECT by threshold) lived only as
-prose in ``references/spark-video-clip-review/SKILL.md``. Weak agents
+prose in ``references/spark-video-clip-review/instructions.md``. Weak agents
 sometimes skipped it entirely and a clip would sail through unscored.
 
 This module moves all of that *non-judgment* work into deterministic code
@@ -36,13 +36,15 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from lib.cli import bl_cmd
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_BL_WRAPPER = _REPO_ROOT / "scripts" / "bl"
 _RUBRIC = _REPO_ROOT / "references" / "spark-video-clip-review" / "rubric.md"
 
 from lib.env import load_pwd_dotenv  # noqa: E402
@@ -73,9 +75,18 @@ def review_enabled() -> bool:
     review. ``SPARK_VIDEO_REVIEW_MODEL`` takes precedence when set.
     """
     raw = _env("SPARK_VIDEO_REVIEW_MODEL", "VIDEOGEN_REVIEW_MODEL", default="__unset__")
-    if raw == "__unset__":
-        return True  # default-on
-    return bool(raw.strip())
+    configured = True if raw == "__unset__" else bool(raw.strip())
+    if not configured or shutil.which("bl") is None:
+        return False
+    try:
+        return subprocess.run(
+            ["bl", "auth", "status"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def threshold() -> float:
@@ -117,6 +128,24 @@ def _omni_model_override() -> str | None:
     """
     v = _env("SPARK_VIDEO_REVIEW_OMNI_MODEL", default="").strip()
     return v or None
+
+
+def _decide_verdict(
+    breakdown: dict[str, float],
+    blocking_issues: list[dict[str, str]],
+    *,
+    threshold_value: float,
+    veto_floor: float,
+) -> tuple[str, list[str], float]:
+    """Apply deterministic review policy to a model-produced observation."""
+    score = round(sum(breakdown.values()) / len(AXES), 2)
+    vetoed_axes = [key for key, value in breakdown.items() if value <= veto_floor]
+    verdict = (
+        "REJECT"
+        if blocking_issues or vetoed_axes or score < threshold_value
+        else "ACCEPT"
+    )
+    return verdict, vetoed_axes, score
 
 
 # ------------------------------------------------------------ cast references
@@ -191,10 +220,30 @@ def _coerce_scores(obj: object) -> dict | None:
             return None
     verdict = str(obj.get("verdict", "")).upper().strip()
     critique = obj.get("critique", "")
+    raw_blocking = obj.get("blocking_issues")
+    if not isinstance(raw_blocking, list):
+        return None
+    blocking_issues: list[dict[str, str]] = []
+    for issue in raw_blocking:
+        if isinstance(issue, str) and issue.strip():
+            blocking_issues.append({"type": "other", "detail": issue.strip()})
+            continue
+        if not isinstance(issue, dict):
+            return None
+        issue_type = str(issue.get("type") or "other").strip()
+        detail = str(issue.get("detail") or "").strip()
+        timestamp = str(issue.get("timestamp") or "").strip()
+        if not detail:
+            return None
+        normalized = {"type": issue_type, "detail": detail}
+        if timestamp:
+            normalized["timestamp"] = timestamp
+        blocking_issues.append(normalized)
     return {
         "breakdown": breakdown,
         "verdict": verdict if verdict in ("ACCEPT", "REJECT") else "",
         "critique": critique if isinstance(critique, str) else "",
+        "blocking_issues": blocking_issues,
     }
 
 
@@ -288,14 +337,20 @@ def parse_omni_output(stdout: str) -> dict | None:
 # ------------------------------------------------------------------------- scoring
 
 def _build_message(*, shot_id: str, characters: list[str], prompt: str,
-                   duration: int, thr: float) -> str:
+                   narrative_purpose: str | None, narration_text: str | None,
+                   approved_contract: dict | None, duration: int, thr: float) -> str:
     chars = ", ".join(characters) if characters else "no specified characters (cast_match: undeclared characters should not appear)"
     return (
         f"Score this video on 6 axes (0-10). Output strict JSON: "
-        f"{{logic, proportion, physics, style, cast_match, dialog_attribution, critique, verdict}}. "
+        f"{{logic, proportion, physics, style, cast_match, dialog_attribution, "
+        f"blocking_issues, critique, verdict}}. "
         f"Threshold {thr:g} (six-axis average >= threshold -> ACCEPT, else REJECT). "
         f"Video duration ~{duration}s. Shot {shot_id}. Expected characters: {chars}. "
-        f"Shot content and dialog (from storyboard prompt): {prompt}"
+        f"Narrative purpose: {narrative_purpose or 'not specified'}. "
+        f"Expected narration or voiceover: {narration_text or 'none'}. "
+        f"User-approved shot contract: "
+        f"{json.dumps(approved_contract or {}, ensure_ascii=False, sort_keys=True)}. "
+        f"Literal prompt sent to the video model: {prompt}"
     )
 
 
@@ -313,6 +368,9 @@ def score_clip(
     video_path: Path,
     characters: list[str] | None,
     prompt: str,
+    narrative_purpose: str | None = None,
+    narration_text: str | None = None,
+    approved_contract: dict | None = None,
     duration: int,
 ) -> dict | None:
     """Score one rendered clip on the 6 rubric axes via ``./scripts/bl omni``.
@@ -354,10 +412,12 @@ def score_clip(
             "score": None, "verdict": "ERROR",
             "error": f"rubric not found at {_RUBRIC}",
         })
-    if not _BL_WRAPPER.exists():
+    try:
+        bl_prefix = bl_cmd(_REPO_ROOT)
+    except FileNotFoundError as e:
         return _finalize({
             "score": None, "verdict": "ERROR",
-            "error": f"bl wrapper not found at {_BL_WRAPPER}",
+            "error": str(e),
         })
     if not Path(video_path).exists():
         return _finalize({
@@ -370,14 +430,18 @@ def score_clip(
         print(f"warn: review {shot_id} v{version}: no cast reference image for {missing} "
               f"(cast_match will be weaker)", file=sys.stderr)
 
-    cmd: list[str] = [str(_BL_WRAPPER), "omni"]
+    cmd: list[str] = bl_prefix + ["omni"]
     model = _omni_model_override()
     if model:
         cmd += ["--model", model]
     cmd += ["--system", _RUBRIC.read_text(encoding="utf-8")]
     cmd += ["--message", _build_message(
         shot_id=shot_id, characters=characters, prompt=prompt,
-        duration=duration, thr=thr,
+        narrative_purpose=narrative_purpose,
+        narration_text=narration_text,
+        approved_contract=approved_contract,
+        duration=duration,
+        thr=thr,
     )]
     cmd += ["--video", str(Path(video_path).resolve())]
     for p in portraits:
@@ -409,22 +473,21 @@ def score_clip(
         parsed = parse_omni_output(proc.stdout)
         if parsed:
             breakdown = parsed["breakdown"]
-            score = round(sum(breakdown.values()) / len(AXES), 2)
-            # Single-axis veto: any axis <= 5 forces REJECT regardless of avg.
-            veto_floor = _veto_floor()
-            vetoed_axes = [k for k, v in breakdown.items() if v <= veto_floor]
-            if vetoed_axes:
-                verdict = "REJECT"
-            elif score >= thr:
-                verdict = "ACCEPT"
-            else:
-                verdict = "REJECT"
+            blocking_issues = parsed["blocking_issues"]
+            # Blocking issues and single-axis vetoes beat a passing average.
+            verdict, vetoed_axes, score = _decide_verdict(
+                breakdown,
+                blocking_issues,
+                threshold_value=thr,
+                veto_floor=_veto_floor(),
+            )
             return _finalize({
                 "score": score,
                 "breakdown": breakdown,
                 "verdict": verdict,
                 "model_verdict": parsed.get("verdict") or None,
                 "critique": parsed.get("critique", ""),
+                "blocking_issues": blocking_issues,
                 "vetoed_axes": vetoed_axes if vetoed_axes else None,
             })
         last_err = f"could not parse 6-axis JSON from omni output: {proc.stdout[-400:].strip()}"
