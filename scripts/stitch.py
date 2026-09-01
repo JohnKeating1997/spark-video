@@ -14,7 +14,8 @@ Pipeline:
     3. For narration shots: synthesize TTS via ./scripts/bl speech synthesize,
        strip the clip's audio, mux the TTS in (lib.ffmpeg_helpers.mux_audio)
     4. Concat all clips (with optional --crossfade)
-    5. If storyboard.bgm is configured, mix in BGM track via EBU R128 normalize
+    5. If storyboard.bgm is configured, mix in BGM track
+    6. Normalize the assembled program audio and verify target duration
 
 Output: projects/<p>/<ep>/final/<p>-<ep>.mp4
 """
@@ -38,11 +39,14 @@ from lib.ffmpeg_helpers import (              # noqa: E402
     concat as concat_clips,
     mux_audio as mux_audio_to_video,
     mix_bgm,
+    normalize_program_audio,
     probe_duration,
+    strip_audio,
     audio_atempo,
     xfade_continuation,
 )
 from lib.bgm import resolve_track             # noqa: E402
+from lib.cli import bl_cmd                    # noqa: E402
 
 load_pwd_dotenv()
 
@@ -56,7 +60,7 @@ def _find_continuation_clip(clips_dir: Path, shot_id: str) -> Path | None:
     Convention: a "b" suffix sibling of the winner clip indicates a second
     take that should be xfade-joined with the main clip before narration
     muxing — used when narration is longer than a single take can cover under
-    the model's hard duration cap (e.g. happyhorse-1.0-r2v at 10s).
+    a model's hard duration cap (Wan3.0: 30s; legacy Wan2.7: 15s).
 
     Looks for ``<id>b.mp4`` first (promoted via ``--accept-version``); falls
     back to the highest-versioned ``<id>b-ver*.mp4`` so producers can simply
@@ -84,14 +88,37 @@ def _episode_dir() -> Path:
     return _projects_root() / proj / ep_id
 
 
-def _synth_narration(shot, out_wav: Path, voice: str, rate: float, model: str) -> None:
-    """Call ./scripts/bl speech synthesize for narration text."""
-    bl_wrapper = _HERE / "bl"
-    text = shot.narration_text or ""
+def _synth_narration(
+    text: str,
+    out_wav: Path,
+    voice: str,
+    rate: float,
+    model: str,
+) -> None:
+    """Call the platform-native bl wrapper for narration TTS."""
+    try:
+        bl_prefix = bl_cmd(_HERE.parent)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "Narration TTS needs the optional bl CLI. Run "
+            "the narration-aware doctor install plan, "
+            "approve the bl install, then complete `bl auth login`."
+        ) from exc
+    auth = subprocess.run(
+        bl_prefix + ["auth", "status"],
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    if auth.returncode != 0:
+        raise RuntimeError(
+            "Narration TTS needs an authenticated bl CLI. Run `bl auth login`, "
+            "then retry the narration-aware doctor check."
+        )
     if not text.strip():
-        raise RuntimeError(f"shot {shot.id} has role=narration but empty narration_text")
-    cmd = [
-        str(bl_wrapper), "speech", "synthesize",
+        raise RuntimeError("post-TTS shot has empty speech_text")
+    cmd = bl_prefix + [
+        "speech", "synthesize",
         "--text", text,
         "--voice", voice,
         "--rate", str(rate),
@@ -158,17 +185,25 @@ def main() -> int:
     state = json.loads(state_path.read_text())
 
     # Resolve voice / rate / TTS model from storyboard + env
-    narrator_voice = sb.narrator_voice or os.environ.get(
-        "SPARK_VIDEO_NARRATOR_VOICE", "longanyang")
-    narrator_rate = float(os.environ.get("SPARK_VIDEO_NARRATOR_SPEECH_RATE", "1.2"))
-    narrator_model = os.environ.get("SPARK_VIDEO_NARRATOR_TTS_MODEL",
-                                    "cosyvoice-v3-flash")
+    narrator_voice = sb.audio.voice or sb.narrator_voice or os.environ.get(
+        "SPARK_VIDEO_NARRATOR_VOICE",
+        os.environ.get("VIDEOGEN_NARRATOR_VOICE", "longanyang"),
+    )
+    narrator_rate = float(os.environ.get(
+        "SPARK_VIDEO_NARRATOR_SPEECH_RATE",
+        os.environ.get("VIDEOGEN_NARRATOR_SPEECH_RATE", "1.2"),
+    ))
+    narrator_model = os.environ.get(
+        "SPARK_VIDEO_NARRATOR_TTS_MODEL",
+        os.environ.get("VIDEOGEN_NARRATOR_TTS_MODEL", "cosyvoice-v3-flash"),
+    )
 
     # Walk shots in storyboard order, locate winner clips, do per-shot
     # narration mux if needed
     with tempfile.TemporaryDirectory(prefix="spark-stitch-") as tmp:
         tmp_dir = Path(tmp)
         ordered_clips: list[Path] = []
+        audio_entries: list[dict] = []
         for shot in sb.shots:
             entry = state.get(shot.id)
             if not entry or not entry.get("winner_version"):
@@ -195,12 +230,16 @@ def main() -> int:
                       file=sys.stderr)
                 clip = joined
 
-            if (sb.mode == "narration" and shot.role == "narration"
-                    and shot.narration_text):
+            speech_source = shot.speech_source or (
+                "post_tts" if shot.role == "narration" else "model"
+            )
+            speech_text = shot.speech_text or shot.narration_text or ""
+            shot_voice = shot.narrator_voice or narrator_voice
+            if speech_source == "post_tts":
                 # 1. synthesize TTS
                 tts_wav = tmp_dir / f"{shot.id}.wav"
                 try:
-                    _synth_narration(shot, tts_wav, narrator_voice, narrator_rate,
+                    _synth_narration(speech_text, tts_wav, shot_voice, narrator_rate,
                                      narrator_model)
                 except Exception as e:
                     print(f"ERROR: TTS for {shot.id} failed: {e}", file=sys.stderr)
@@ -213,8 +252,8 @@ def main() -> int:
                            f"→ atempo×{tempo:.3f}")
                     if residual > 0.05:
                         # Significant freeze tail remains even at max atempo.
-                        # For providers with a hard duration cap (happyhorse
-                        # r2v = 10s), bumping shot.duration won't help; render
+                        # If the model's hard duration cap is reached,
+                        # bumping shot.duration won't help; render
                         # a continuation take (<id>b.mp4) instead — stitch
                         # will xfade-join it automatically.
                         fix = ("render a continuation clip "
@@ -233,8 +272,36 @@ def main() -> int:
                     fit="narration",
                 )
                 ordered_clips.append(muxed)
+                audio_entries.append({
+                    "shot_id": shot.id,
+                    "speech_source": "post_tts",
+                    "speaker": shot.speaker or sb.audio.presenter,
+                    "voice": shot_voice,
+                    "speech_text": speech_text,
+                    "model_audio": "replaced",
+                })
+            elif sb.audio.model_audio_policy == "strip_all":
+                silent = tmp_dir / f"{shot.id}-silent.mp4"
+                strip_audio(clip, silent)
+                ordered_clips.append(silent)
+                audio_entries.append({
+                    "shot_id": shot.id,
+                    "speech_source": speech_source,
+                    "speaker": shot.speaker,
+                    "voice": None,
+                    "speech_text": speech_text or None,
+                    "model_audio": "stripped",
+                })
             else:
                 ordered_clips.append(clip)
+                audio_entries.append({
+                    "shot_id": shot.id,
+                    "speech_source": speech_source,
+                    "speaker": shot.speaker,
+                    "voice": None,
+                    "speech_text": speech_text or None,
+                    "model_audio": "kept",
+                })
 
         # Concat
         concat_out = tmp_dir / "concat.mp4"
@@ -265,6 +332,13 @@ def main() -> int:
                 )
                 final_video = bgm_out
 
+        # Apply one program-level loudness pass after narration, source audio,
+        # and optional BGM have been assembled.  Per-clip normalization cannot
+        # guarantee a stable final mix once those layers are combined.
+        normalized_out = tmp_dir / "program-normalized.mp4"
+        normalize_program_audio(final_video, normalized_out)
+        final_video = normalized_out
+
         # Move to final/
         out_path = (Path(args.out) if args.out
                     else ep_dir / "final" /
@@ -273,10 +347,34 @@ def main() -> int:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(final_video, out_path)
 
+        audio_manifest = {
+            "mode": sb.audio.mode,
+            "presenter": sb.audio.presenter,
+            "voice": sb.audio.voice,
+            "model_audio_policy": sb.audio.model_audio_policy,
+            "subtitle_mode": sb.audio.subtitle_mode,
+            "shots": audio_entries,
+        }
+        audio_manifest_path = out_path.parent / "audio_manifest.json"
+        audio_manifest_path.write_text(
+            json.dumps(audio_manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
         duration = probe_duration(out_path)
+        target_duration = float(sb.target_duration_s)
+        duration_tolerance = max(3.0, target_duration * 0.05)
+        duration_ok = (
+            duration > 0
+            and abs(duration - target_duration) <= duration_tolerance
+        )
         print(json.dumps({
             "final_path": str(out_path),
             "duration_s": duration,
+            "target_duration_s": target_duration,
+            "duration_tolerance_s": duration_tolerance,
+            "duration_ok": duration_ok,
+            "audio_manifest": str(audio_manifest_path),
             "shots_count": len(sb.shots),
             "size_bytes": out_path.stat().st_size,
         }, ensure_ascii=False))
@@ -290,6 +388,14 @@ def main() -> int:
         except Exception as e:
             print(f"[viewer] skipped: {e}", file=sys.stderr)
 
+        if not duration_ok:
+            print(
+                "ERROR: final duration is outside the storyboard budget "
+                f"(actual={duration:.2f}s, target={target_duration:.2f}s, "
+                f"tolerance=±{duration_tolerance:.2f}s)",
+                file=sys.stderr,
+            )
+            return 1
         return 0
 
 

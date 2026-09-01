@@ -19,9 +19,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -30,6 +33,22 @@ sys.path.insert(0, str(_HERE.parent))
 from lib.env import load_pwd_dotenv                  # noqa: E402
 from lib.storyboard import Storyboard, Scene, Shot  # noqa: E402
 from lib.render_graph import compute_chain_groups   # noqa: E402
+from lib.cli import active_wan_site, bl_cmd, wan_cmd, wan_media_tag  # noqa: E402
+from lib.prompt_compiler import (  # noqa: E402
+    art_direction_conflicts,
+    compatible_art_direction,
+    reference_treatment_instruction,
+    rendering_instruction,
+    require_compatible_art_direction,
+    resolve_visual_medium,
+    validate_reference_tags,
+)
+from lib.shot_contract import (  # noqa: E402
+    approval_contract,
+    contract_mismatches,
+    contract_fingerprint,
+    storyboard_contract_fingerprint,
+)
 
 load_pwd_dotenv()
 
@@ -98,7 +117,20 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def _lint(sb: Storyboard, ep_dir: Path) -> list[str]:
     """Cross-fragment lints that pure schema can't catch."""
-    warns: list[str] = []
+    warns: list[str] = list(sb.lint())
+
+    lore_front = _read_lore_front(ep_dir)
+    try:
+        project_medium = resolve_visual_medium(
+            project_default=lore_front.get("visual_medium"),
+            fallback_text=" ".join(
+                str(lore_front.get(key) or "")
+                for key in ("visual_style", "mood_anchor")
+            ),
+        )
+        warns.extend(art_direction_conflicts(lore_front, project_medium))
+    except ValueError as exc:
+        warns.append(str(exc))
 
     # Load manifests if present
     cast_path = ep_dir / "cast.json"
@@ -227,17 +259,24 @@ def _llm_continuity_check(sb: Storyboard, ep_dir: Path) -> list[str]:
     Best-effort: returns [] on any failure (API down, timeout, parse error).
     Never blocks compile.
     """
-    bl = _HERE / "bl"
-    if not bl.exists():
+    try:
+        bl_prefix = bl_cmd(_HERE.parent)
+    except FileNotFoundError:
         return []
 
-    # Read lore for context
-    proj_dir = ep_dir.parent
-    lore_path = proj_dir / "lore.md"
-    lore_text = lore_path.read_text(encoding="utf-8")[:500] if lore_path.exists() else ""
+    lore_front = _read_lore_front(ep_dir)
+    lore_context = {
+        key: lore_front.get(key)
+        for key in (
+            "title", "genre", "visual_medium", "visual_style", "mood_anchor",
+            "forbidden", "imagery_system",
+        )
+        if lore_front.get(key)
+    }
 
-    # Build per-scene summaries
-    scene_blocks = []
+    # Keep each shot complete. Truncating individual prompts creates false
+    # continuity failures; batching/timeout is the caller's budget boundary.
+    scene_payloads: list[dict] = []
     shot_by_scene: dict[str, list] = {}
     for s in sb.shots:
         shot_by_scene.setdefault(s.scene, []).append(s)
@@ -246,33 +285,64 @@ def _llm_continuity_check(sb: Storyboard, ep_dir: Path) -> list[str]:
         shots = shot_by_scene.get(sc.id, [])
         if not shots:
             continue
-        lines = [f"## Scene {sc.id}: {sc.name} (set: {sc.set_id or 'none'})"]
-        for s in shots:
-            lines.append(
-                f"  {s.id} [{s.kind}, {s.duration}s, chars={s.characters}]: "
-                f"{s.prompt[:120]}{'...' if len(s.prompt) > 120 else ''}"
-            )
-        scene_blocks.append("\n".join(lines))
+        scene_payloads.append({
+            "id": sc.id,
+            "name": sc.name,
+            "description": sc.description,
+            "set_id": sc.set_id,
+            "shots": [
+                {
+                    "id": shot.id,
+                    "characters": shot.characters,
+                    "props": shot.props,
+                    "set_id": shot.set_id,
+                    "narrative_purpose": shot.narrative_purpose,
+                    "use_prev_last_frame_as_first": shot.use_prev_last_frame_as_first,
+                    "prompt": shot.prompt,
+                }
+                for shot in shots
+            ],
+        })
 
-    prompt = (
-        "你是一个影视剧本连贯性审查员。下面是一部短剧的分镜列表，按场景分组。\n"
-        "请检查以下问题，只输出有问题的条目，每条一行，格式: `[SHOT_ID] 问题描述`。\n"
-        "如果没有问题，输出一个空行。\n\n"
-        "检查项：\n"
-        "1. 同一场景内时间矛盾（如一个镜头白天，下一个镜头深夜）\n"
-        "2. 同一场景内地点矛盾（如一个镜头在办公室，下一个突然在户外但没有转场说明）\n"
-        "3. 角色行为逻辑矛盾（如角色已离开但下一个镜头又出现）\n"
-        "4. 动作连贯性问题（如前一个镜头角色站着，下一个镜头突然坐着，且是链式续接）\n"
-        "5. 台词内容与场景设定冲突\n\n"
-    )
-    if lore_text:
-        prompt += f"世界设定摘要:\n{lore_text}\n\n"
-    prompt += "分镜列表:\n" + "\n\n".join(scene_blocks)
+    if lore_front.get("prompt_language") == "en":
+        prompt = (
+            "You are a film screenplay continuity reviewer. Below is a short-film storyboard grouped by scene.\n"
+            "Report only genuine problems, one per line, formatted as `[SHOT_ID] problem description`.\n"
+            "If there are no problems, output a blank line.\n\n"
+            "Check for:\n"
+            "1. Time contradictions within a scene.\n"
+            "2. Location contradictions without a stated transition.\n"
+            "3. Character-action logic contradictions.\n"
+            "4. Action-continuity problems across chained shots.\n"
+            "5. Dialogue that conflicts with the scene setting.\n\n"
+            "Do not report truncation: every prompt in the JSON below is complete.\n\n"
+            "World context:\n"
+            + json.dumps(lore_context, ensure_ascii=False, indent=2)
+            + "\n\nStoryboard:\n"
+            + json.dumps(scene_payloads, ensure_ascii=False, indent=2)
+        )
+    else:
+        prompt = (
+            "你是一个影视剧本连贯性审查员。下面是一部短剧的分镜列表，按场景分组。\n"
+            "请检查以下问题，只输出有问题的条目，每条一行，格式: `[SHOT_ID] 问题描述`。\n"
+            "如果没有问题，输出一个空行。\n\n"
+            "检查项：\n"
+            "1. 同一场景内时间矛盾（如一个镜头白天，下一个镜头深夜）\n"
+            "2. 同一场景内地点矛盾（如一个镜头在办公室，下一个突然在户外但没有转场说明）\n"
+            "3. 角色行为逻辑矛盾（如角色已离开但下一个镜头又出现）\n"
+            "4. 动作连贯性问题（如前一个镜头角色站着，下一个镜头突然坐着，且是链式续接）\n"
+            "5. 台词内容与场景设定冲突\n\n"
+            "不要因为字段或句子在显示中被截断而报错；下面 JSON 中的 prompt 均为完整原文。\n\n"
+            "世界设定:\n"
+            + json.dumps(lore_context, ensure_ascii=False, indent=2)
+            + "\n\n分镜列表:\n"
+            + json.dumps(scene_payloads, ensure_ascii=False, indent=2)
+        )
 
     try:
         proc = subprocess.run(
-            [str(bl), "text", "chat", "--model", "qwen-plus",
-             "--message", prompt],
+            bl_prefix + ["text", "chat", "--model", "qwen-plus",
+                         "--message", prompt],
             capture_output=True, text=True, timeout=30,
         )
         if proc.returncode != 0:
@@ -407,13 +477,43 @@ def cmd_compile(args: argparse.Namespace) -> int:
 
     sb_data = {
         "title": proj or "untitled",
+        "project_id": proj,
         "scenes": scenes,
         "shots": shots,
         "mode": args.mode,
         "provider": args.provider,
+        "video_model": args.video_model,
     }
+    lore_front = _read_lore_front(ep_dir)
+    raw_target_duration = lore_front.get("duration_target_s")
+    if raw_target_duration is not None:
+        try:
+            sb_data["target_duration_s"] = int(str(raw_target_duration).strip())
+        except ValueError:
+            print(
+                "ERROR: lore.md duration_target_s must be an integer, got "
+                f"{raw_target_duration!r}",
+                file=sys.stderr,
+            )
+            return 1
     if args.narrator_voice:
         sb_data["narrator_voice"] = args.narrator_voice
+    audio_cfg_path = ep_dir / "audio-config.json"
+    if audio_cfg_path.exists():
+        sb_data["audio"] = json.loads(audio_cfg_path.read_text(encoding="utf-8"))
+    if args.audio_mode:
+        policy = {
+            "presenter_voiceover": "strip_all",
+            "native_dialogue": "keep",
+            "hybrid": "per_shot",
+        }[args.audio_mode]
+        sb_data["audio"] = {
+            "mode": args.audio_mode,
+            "presenter": args.presenter,
+            "voice": args.voice or args.narrator_voice,
+            "model_audio_policy": policy,
+            "subtitle_mode": args.subtitle_mode,
+        }
 
     # Apply BGM config if present
     bgm_cfg_path = ep_dir / "bgm-config.json"
@@ -483,6 +583,12 @@ def _asset_records(data, plural_key: str) -> list[dict]:
 
 
 def _first_record_image(record: dict) -> str | None:
+    value = record.get("image_url")
+    if isinstance(value, str) and value:
+        return value
+    for value in record.get("image_urls", []) or []:
+        if isinstance(value, str) and value:
+            return value
     for key in ("image_local", "image", "path"):
         value = record.get(key)
         if isinstance(value, str) and value:
@@ -555,6 +661,8 @@ def _animatic_reference_entries(
     ep_dir: Path,
     sb: Storyboard,
     shots: list[Shot],
+    *,
+    render_style: str,
 ) -> list[dict[str, str]]:
     cast_index = _build_asset_index(
         ep_dir, json_name="cast.json", plural_key="characters", folder_name="cast"
@@ -569,6 +677,9 @@ def _animatic_reference_entries(
     seen: set[str] = set()
     for shot in shots:
         for name in shot.characters or []:
+            rendering_rule = reference_treatment_instruction(
+                render_style, subject="character"
+            )
             _add_reference_entry(
                 refs,
                 seen,
@@ -576,14 +687,18 @@ def _animatic_reference_entries(
                 kind="character",
                 name=name,
                 instruction=(
-                    f"Character reference for {name}. Preserve identity, face "
-                    "shape, hairstyle, costume, body type, and apparent age; "
-                    "adapt the rendering to the storyboard style. Do not copy "
-                    "photorealistic skin texture or live-action realism."
+                    f"Authoritative character reference for {name}. Strictly "
+                    "preserve identity, face shape, hairstyle, costume, "
+                    "accessories, body type, silhouette, and apparent age. "
+                    "Do not redesign or replace the hairstyle or costume. "
+                    + rendering_rule
                 ),
             )
         set_id = shot.set_id or _scene_set_id(sb, shot.scene)
         if set_id:
+            set_rendering_rule = reference_treatment_instruction(
+                render_style, subject="location"
+            )
             _add_reference_entry(
                 refs,
                 seen,
@@ -591,12 +706,16 @@ def _animatic_reference_entries(
                 kind="location",
                 name=set_id,
                 instruction=(
-                    f"Location reference for {set_id}. Preserve architecture, "
+                    f"Authoritative location reference for {set_id}. Preserve architecture, "
                     "spatial layout, period details, lighting mood, and main "
-                    "environmental elements; adapt to the storyboard style."
+                    "environmental elements. Do not redesign the layout. "
+                    + set_rendering_rule
                 ),
             )
         for name in shot.props or []:
+            prop_rendering_rule = reference_treatment_instruction(
+                render_style, subject="prop"
+            )
             _add_reference_entry(
                 refs,
                 seen,
@@ -604,12 +723,39 @@ def _animatic_reference_entries(
                 kind="prop",
                 name=name,
                 instruction=(
-                    f"Prop reference for {name}. Preserve shape, material, "
-                    "color, texture, and scale; adapt to the storyboard style "
-                    "and do not override the shot action."
+                    f"Authoritative prop reference for {name}. Preserve shape, "
+                    "material, color, texture, and scale. Do not redesign it "
+                    "or override the shot action. " + prop_rendering_rule
                 ),
             )
     return refs
+
+
+def _animatic_render_style(
+    shots: list[Shot],
+    lore_front: dict[str, str | list[str]],
+) -> str:
+    return resolve_visual_medium(
+        project_default=lore_front.get("visual_medium"),
+        shot_overrides=[shot.animatic_style for shot in shots],
+        fallback_text=" ".join(
+            (shot.animatic_prompt or shot.prompt) for shot in shots
+        ),
+    )
+
+
+def _validate_animatic_reference_tags(
+    prompt: str,
+    *,
+    reference_count: int,
+    site: str,
+) -> None:
+    first_tag = wan_media_tag("image", 1, site=site)
+    validate_reference_tags(
+        prompt,
+        tag_prefix=first_tag[:-1],
+        reference_count=reference_count,
+    )
 
 def _read_lore_front(ep_dir: Path) -> dict[str, str | list[str]]:
     """Crude front-matter reader for project lore + episode override."""
@@ -642,23 +788,21 @@ def _read_lore_front(ep_dir: Path) -> dict[str, str | list[str]]:
     front.update(parse_front(ep_dir / "lore.md"))
     return front
 
-def _tc(seconds: int) -> str:
-    m, s = divmod(max(0, int(seconds)), 60)
-    return f"{m:02d}:{s:02d}"
-
-
-def _shot_offsets(sb: Storyboard) -> dict[str, tuple[int, int]]:
-    out: dict[str, tuple[int, int]] = {}
-    t = 0
-    for shot in sb.shots:
-        start = t
-        t += int(shot.duration)
-        out[shot.id] = (start, t)
-    return out
-
-
 def _chunks(seq: list[Shot], n: int) -> list[list[Shot]]:
     return [seq[i:i + n] for i in range(0, len(seq), n)]
+
+
+def _targeted_animatic_panels(
+    panels: list[dict], target_shots: list[str] | None,
+) -> list[dict]:
+    """Return only panels containing an explicitly targeted shot."""
+    if not target_shots:
+        return panels
+    targets = set(target_shots)
+    return [
+        panel for panel in panels
+        if targets.intersection(str(shot_id) for shot_id in panel.get("shots", []))
+    ]
 
 
 def _animatic_panel_prompt(
@@ -668,72 +812,52 @@ def _animatic_panel_prompt(
     shots: list[Shot],
     panel_no: int,
     panel_count: int,
-    offsets: dict[str, tuple[int, int]],
     lore_front: dict[str, str | list[str]],
 ) -> str:
-    visual_style = str(lore_front.get("visual_style") or "").strip()
-    mood_anchor = str(lore_front.get("mood_anchor") or "").strip()
-    camera = str(lore_front.get("camera_language") or "").strip()
-    palette_raw = lore_front.get("palette") or []
-    palette = ", ".join(palette_raw) if isinstance(palette_raw, list) else str(palette_raw)
+    del panel_no, panel_count  # Panel order is manifest metadata, not image content.
+    render_style = _animatic_render_style(shots, lore_front)
+    require_compatible_art_direction(lore_front, render_style)
+    style_bits = compatible_art_direction(lore_front, render_style)
 
-    style_bits = [
-        "static storyboard reference image",
-        "cinematic blocking",
-        "clear composition",
-        "consistent characters, locations, and props",
-    ]
-    if visual_style:
-        style_bits.append(visual_style)
-    if camera:
-        style_bits.append(camera)
-    if palette:
-        style_bits.append(f"palette: {palette}")
-    if mood_anchor:
-        style_bits.append(mood_anchor)
-
-    lines = [
-        f"Create static storyboard reference image {panel_no}/{panel_count} "
-        f"for one video clip.",
-        "",
-        "Style: " + "; ".join(style_bits) + ".",
-        "Layout: one still image for exactly one clip, readable composition, no speech bubbles, no subtitles, no UI, no panel labels.",
-        "Purpose: static previsualization for user approval before paid video rendering.",
-        "",
-        "Clip:",
-    ]
-    reference_entries = _animatic_reference_entries(ep_dir, sb, shots)
+    lines = ["Task:", "Create one static storyboard reference image."]
+    rendering = rendering_instruction(render_style)
+    lines.extend([f"Rendering: {rendering}"])
+    if style_bits:
+        lines.append("Art direction: " + "; ".join(style_bits) + ".")
+    reference_entries = _animatic_reference_entries(
+        ep_dir, sb, shots, render_style=render_style
+    )
     if reference_entries:
+        site = active_wan_site(_HERE.parent)
         lines.extend([
             "",
-            "Reference image map:",
+            "References:",
         ])
         for idx, ref in enumerate(reference_entries, 1):
-            lines.append(f"Image {idx}: {ref['instruction']}")
+            tag = wan_media_tag("image", idx, site=site)
+            lines.append(f"{tag}: {ref['instruction']}")
         lines.extend([
-            "The image numbers must exactly match the uploaded reference image order. Use each image only for its assigned role. These images are references for the static storyboard composition and continuity; do not copy labels, borders, captions, UI, photorealistic skin texture, or live-action camera realism.",
-            "",
-            "When generating the still storyboard, follow the reference images for identity, location, and prop continuity while prioritizing this clip's composition, action, mood, and declared visual style.",
-            "",
+            "Reference images are authoritative for character appearance and environment. Shot text controls composition, action, and only explicitly declared style changes. The tags match uploaded-image order.",
         ])
-    for idx, shot in enumerate(shots, 1):
-        start, end = offsets[shot.id]
+    lines.extend(["", "Shot:"])
+    for shot in shots:
         panel_prompt = (shot.animatic_prompt or shot.prompt).strip()
         panel_prompt = " ".join(panel_prompt.split())
-        chars = ", ".join(shot.characters or []) or "none"
-        lines.extend([
-            f"{idx}. {shot.id} [{_tc(start)}-{_tc(end)}], {shot.kind}, {shot.duration}s",
-            f"   Characters: {chars}",
-            f"   Visual: {panel_prompt}",
-            f"   Narrative purpose: {shot.narrative_purpose or 'n/a'}",
-        ])
+        lines.append(panel_prompt)
     lines.extend([
         "",
-        "Important: this is a still storyboard reference for one video clip, "
-        "not a finished illustration and not a video first frame. Keep it clear "
-        "enough to judge framing, action, mood, and continuity.",
+        "Constraints:",
+        "One clear still composition. Preserve reference continuity. No speech "
+        "bubbles, subtitles, captions, UI, borders, or panel labels.",
     ])
-    return "\n".join(lines).strip() + "\n"
+    prompt = "\n".join(lines).strip() + "\n"
+    if reference_entries:
+        _validate_animatic_reference_tags(
+            prompt,
+            reference_count=len(reference_entries),
+            site=site,
+        )
+    return prompt
 
 
 def _find_generated_panel_images(panel_dir: Path, prefix: str) -> list[Path]:
@@ -744,9 +868,129 @@ def _find_generated_panel_images(panel_dir: Path, prefix: str) -> list[Path]:
         if (
             p.is_file()
             and p.suffix.lower() in exts
-            and p.stem in exact_stems
+            and (
+                p.stem in exact_stems
+                or p.stem.startswith(f"{prefix}-candidate-")
+            )
         )
     )
+
+
+def _wan_json(stdout: str) -> dict:
+    text = stdout.strip()
+    try:
+        value = json.loads(text)
+        return value if isinstance(value, dict) else {}
+    except json.JSONDecodeError:
+        pass
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _generated_image_urls(payload: dict) -> list[str | None]:
+    """Return Wan result URLs in the same order as result indices."""
+    results = payload.get("result") or []
+    if not results and isinstance(payload.get("task"), dict):
+        results = payload["task"].get("taskResult") or []
+    urls: list[str | None] = []
+    for result in results:
+        if not isinstance(result, dict):
+            urls.append(None)
+            continue
+        image_url = None
+        for key in (
+            "downloadUrl",
+            "urlWithoutLogo",
+            "url",
+            "resultImage",
+            "originImage",
+        ):
+            value = result.get(key)
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                image_url = value
+                break
+        urls.append(image_url)
+    return urls
+
+
+def _generate_wan_panel(item: dict, *, model: str, ratio: str,
+                        panel_dir: Path, candidate_start: int = 1,
+                        max_candidates: int = 1,
+                        ) -> list[tuple[Path, str | None, str | None]]:
+    prompt = Path(item["prompt"]).read_text(encoding="utf-8")
+    refs = [
+        str(ref["path"])
+        for ref in item.get("reference_images", [])
+        if isinstance(ref, dict) and ref.get("path")
+    ]
+    with tempfile.TemporaryDirectory(prefix="spark-video-panel-") as temp_dir:
+        if refs:
+            cmd = wan_cmd(_HERE.parent) + [
+                "image2image", "--images", ",".join(refs),
+                "--generation-mode", "reference", "--prompt", prompt,
+            ]
+        else:
+            cmd = wan_cmd(_HERE.parent) + ["text2image", "--prompt", prompt]
+        if model:
+            cmd += ["--model", model]
+        cmd += [
+            "--ratio", ratio, "--resolution", "2K", "--wait", "--save",
+            "--save-dir", temp_dir, "--timeout", "600", "--output", "json",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=630)
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or proc.stdout).strip()[-2000:])
+        payload = _wan_json(proc.stdout)
+        image_urls = _generated_image_urls(payload)
+        saved: list[tuple[int, Path, str | None]] = []
+        seen: set[Path] = set()
+        for fallback_index, value in enumerate(payload.get("savedFiles") or []):
+            raw = value.get("path") if isinstance(value, dict) else value
+            raw_index = value.get("index", fallback_index) if isinstance(value, dict) else fallback_index
+            if isinstance(raw, str):
+                path = Path(raw).expanduser().resolve()
+                try:
+                    result_index = int(raw_index)
+                except (TypeError, ValueError):
+                    result_index = fallback_index
+                if (path.exists() and path.suffix.lower()
+                        in {".png", ".jpg", ".jpeg", ".webp"}):
+                    url = image_urls[result_index] if 0 <= result_index < len(image_urls) else None
+                    saved.append((result_index, path, url))
+                    seen.add(path)
+        for path in sorted(Path(temp_dir).iterdir()):
+            resolved = path.resolve()
+            if (resolved not in seen and path.exists() and path.suffix.lower()
+                    in {".png", ".jpg", ".jpeg", ".webp"}):
+                saved.append((len(saved), resolved, None))
+        saved.sort(key=lambda value: value[0])
+        if not saved:
+            raise RuntimeError(
+                f"wan returned no saved image; taskId={payload.get('taskId', 'unknown')}"
+            )
+        task_id = payload.get("taskId")
+        generated = []
+        for offset, (_index, source, image_url) in enumerate(saved[:max_candidates]):
+            candidate_no = candidate_start + offset
+            destination = panel_dir / (
+                f"{item['id']}-candidate-{candidate_no:02d}{source.suffix.lower()}"
+            )
+            shutil.copy2(source, destination)
+            generated.append((
+                destination,
+                image_url,
+                str(task_id) if task_id else None,
+            ))
+        return generated
 
 
 def cmd_animatic(args: argparse.Namespace) -> int:
@@ -761,8 +1005,9 @@ def cmd_animatic(args: argparse.Namespace) -> int:
     panel_dir.mkdir(parents=True, exist_ok=True)
     confirm_path = panel_dir / "CONFIRMED"
 
-    if args.confirm:
-        manifest_path = panel_dir / "panels.json"
+    manifest_path = panel_dir / "panels.json"
+
+    if args.select:
         if not manifest_path.exists():
             print(
                 f"ERROR: {manifest_path} missing. Run "
@@ -770,9 +1015,110 @@ def cmd_animatic(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"ERROR: cannot read {manifest_path}: {exc}", file=sys.stderr)
+            return 2
+        panels = {
+            item.get("shots", [None])[0]: item
+            for item in manifest.get("panels", []) or []
+            if isinstance(item, dict) and len(item.get("shots") or []) == 1
+        }
+        for decision in args.select:
+            if "=" not in decision:
+                print(
+                    f"ERROR: invalid selection {decision!r}; expected SHOT=CANDIDATE",
+                    file=sys.stderr,
+                )
+                return 2
+            shot_id, candidate_id = (part.strip() for part in decision.split("=", 1))
+            panel = panels.get(shot_id)
+            if panel is None:
+                print(f"ERROR: unknown storyboard shot {shot_id!r}", file=sys.stderr)
+                return 2
+            candidate_ids = {
+                str(candidate.get("id"))
+                for candidate in panel.get("candidates", []) or []
+                if isinstance(candidate, dict) and candidate.get("id")
+            }
+            if candidate_id not in candidate_ids:
+                print(
+                    f"ERROR: unknown candidate {candidate_id!r} for {shot_id}; "
+                    f"choose one of {sorted(candidate_ids)}",
+                    file=sys.stderr,
+                )
+                return 2
+            panel["selected_candidate"] = candidate_id
+        manifest["confirmed"] = False
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        if confirm_path.exists():
+            confirm_path.unlink()
+        print(f"saved storyboard selections to {manifest_path}")
+        if not args.confirm:
+            return 0
+
+    if args.confirm:
+        if not manifest_path.exists():
+            print(
+                f"ERROR: {manifest_path} missing. Run "
+                "`uv run scripts/storyboard.py animatic` first.",
+                file=sys.stderr,
+            )
+            return 2
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        missing: list[str] = []
+        invalid: list[str] = []
+        storyboard_data = json.loads(sb_path.read_text(encoding="utf-8"))
+        expected_shots = {
+            shot.get("id")
+            for shot in storyboard_data.get("shots", []) or []
+            if isinstance(shot, dict) and shot.get("id")
+        }
+        manifest_shots: set[str] = set()
+        stale_contracts = contract_mismatches(storyboard_data, manifest)
+        for panel in manifest.get("panels", []) or []:
+            shot_id = str((panel.get("shots") or [panel.get("id")])[0])
+            manifest_shots.add(shot_id)
+            selected = panel.get("selected_candidate")
+            candidates = {
+                candidate.get("id"): candidate
+                for candidate in panel.get("candidates", []) or []
+                if isinstance(candidate, dict) and candidate.get("id")
+            }
+            if not selected:
+                missing.append(shot_id)
+            elif selected not in candidates or not (
+                candidates[selected].get("image_url")
+                or candidates[selected].get("image")
+            ):
+                invalid.append(shot_id)
+        missing.extend(sorted(expected_shots - manifest_shots))
+        if missing or invalid or stale_contracts:
+            detail = []
+            if missing:
+                detail.append(f"not selected: {', '.join(missing)}")
+            if invalid:
+                detail.append(f"invalid selection: {', '.join(invalid)}")
+            if stale_contracts:
+                detail.append(
+                    "stale shot contract: " + ", ".join(stale_contracts)
+                )
+            print(
+                "ERROR: every shot must select one storyboard candidate before "
+                f"confirmation ({'; '.join(detail)}).",
+                file=sys.stderr,
+            )
+            return 2
         confirm_path.write_text(
             "User approved per-shot static storyboard reference images for video rendering.\n",
             encoding="utf-8",
+        )
+        manifest["confirmed"] = True
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         print(f"confirmed {panel_dir}")
         return 0
@@ -784,8 +1130,21 @@ def cmd_animatic(args: argparse.Namespace) -> int:
         return 0
 
     sb = Storyboard.model_validate(json.loads(sb_path.read_text(encoding="utf-8")))
+    target_shots = list(dict.fromkeys(args.shot or []))
+    if target_shots:
+        storyboard_shots = {shot.id for shot in sb.shots}
+        unknown_shots = [
+            shot_id for shot_id in target_shots
+            if shot_id not in storyboard_shots
+        ]
+        if unknown_shots:
+            print(
+                "ERROR: requested animatic shot(s) not found in storyboard: "
+                + ", ".join(unknown_shots),
+                file=sys.stderr,
+            )
+            return 2
     lore_front = _read_lore_front(ep_dir)
-    offsets = _shot_offsets(sb)
     if args.shots_per_image != 1:
         print(
             "WARN: --shots-per-image is deprecated; animatic now always "
@@ -793,6 +1152,18 @@ def cmd_animatic(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     groups = _chunks(sb.shots, 1)
+
+    previous_manifest: dict = {}
+    if manifest_path.exists():
+        try:
+            previous_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous_manifest = {}
+    previous_panels = {
+        item.get("id"): item
+        for item in previous_manifest.get("panels", []) or []
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
 
     manifest: dict = {
         "storyboard": str(sb_path),
@@ -802,12 +1173,23 @@ def cmd_animatic(args: argparse.Namespace) -> int:
         "size": args.size,
         "panels": [],
         "confirmed": confirm_path.exists(),
+        "storyboard_contract_fingerprint": storyboard_contract_fingerprint(
+            sb.model_dump(mode="json")
+        ),
     }
+    contracts_changed: list[str] = []
+    episode_contract_changed = bool(
+        previous_manifest
+        and previous_manifest.get("storyboard_contract_fingerprint")
+        != manifest["storyboard_contract_fingerprint"]
+    )
+    if episode_contract_changed:
+        contracts_changed.append("<storyboard>")
 
     shell_lines = [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
-        f"cd {shlex.quote(str(_HERE.parent))}",
+        f"cd {shlex.quote(str(Path.cwd()))}",
         f"export SPARK_VIDEO_PROJECT={shlex.quote(os.environ.get('SPARK_VIDEO_PROJECT', ''))}",
         f"export SPARK_VIDEO_EPISODE={shlex.quote(os.environ.get('SPARK_VIDEO_EPISODE', ''))}",
         "export SPARK_VIDEO_PHASE=animatic",
@@ -823,13 +1205,45 @@ def cmd_animatic(args: argparse.Namespace) -> int:
         shell_lines.extend([
             "echo 'This episode is configured for OpenAI image generation.'",
             "echo 'Use the per-shot .prompt.txt files plus panels.json reference_images order with the OpenAI image generator.'",
-            "echo 'The BL image helper is intentionally disabled for this animatic run.'",
+            "echo 'The wan-cli image helper is intentionally disabled for this animatic run.'",
             "exit 2",
+            "",
+        ])
+    else:
+        target_flags = "".join(
+            f" --shot {shlex.quote(shot_id)}" for shot_id in target_shots
+        )
+        shell_lines.extend([
+            "uv run "
+            f"{shlex.quote(str(_HERE / 'storyboard.py'))} animatic --generate "
+            f"--model {shlex.quote(args.model)} --size {shlex.quote(args.size)}"
+            f"{target_flags}",
             "",
         ])
 
     for i, shots in enumerate(groups, 1):
         prefix = shots[0].id if len(shots) == 1 else f"panel-{i:03d}"
+        shot_data = [shot.model_dump(mode="json") for shot in shots]
+        fingerprints = {
+            shot["id"]: contract_fingerprint(shot) for shot in shot_data
+        }
+        snapshots = {
+            shot["id"]: approval_contract(shot) for shot in shot_data
+        }
+        previous = previous_panels.get(prefix) or {}
+        previous_fingerprints = previous.get("contract_fingerprints")
+        if not isinstance(previous_fingerprints, dict):
+            legacy = previous.get("contract_fingerprint")
+            previous_fingerprints = (
+                {shots[0].id: legacy}
+                if len(shots) == 1 and isinstance(legacy, str)
+                else {}
+            )
+        contract_changed = episode_contract_changed or (
+            bool(previous) and previous_fingerprints != fingerprints
+        )
+        if contract_changed:
+            contracts_changed.extend(fingerprints)
         prompt_path = panel_dir / f"{prefix}.prompt.txt"
         prompt = _animatic_panel_prompt(
             ep_dir=ep_dir,
@@ -837,31 +1251,62 @@ def cmd_animatic(args: argparse.Namespace) -> int:
             shots=shots,
             panel_no=i,
             panel_count=len(groups),
-            offsets=offsets,
             lore_front=lore_front,
         )
         prompt_path.write_text(prompt, encoding="utf-8")
-        out_images = _find_generated_panel_images(panel_dir, prefix)
-        manifest["panels"].append({
+        out_images = (
+            [] if contract_changed
+            else _find_generated_panel_images(panel_dir, prefix)
+        )
+        panel_item = {
             "id": prefix,
             "shots": [s.id for s in shots],
+            "render_style": _animatic_render_style(shots, lore_front),
             "prompt": str(prompt_path),
             "images": [str(p) for p in out_images],
-            "reference_images": _animatic_reference_entries(ep_dir, sb, shots),
-        })
-        if not openai_image_model:
-            shell_lines.extend([
-                f"echo '[animatic] {prefix}: {' '.join(s.id for s in shots)}'",
-                "./scripts/bl image generate "
-                f"--model {shlex.quote(args.model)} "
-                f"--prompt \"$(cat {shlex.quote(str(prompt_path))})\" "
-                f"--size {shlex.quote(args.size)} "
-                f"--out-dir {shlex.quote(str(panel_dir))} "
-                f"--out-prefix {shlex.quote(prefix)}",
-                "",
-            ])
+            "reference_images": _animatic_reference_entries(
+                ep_dir,
+                sb,
+                shots,
+                render_style=_animatic_render_style(shots, lore_front),
+            ),
+            "candidates": [],
+            "selected_candidate": None,
+            "contract_fingerprints": fingerprints,
+            "contract_snapshots": snapshots,
+        }
+        if not contract_changed:
+            for key in ("candidates", "selected_candidate", "image_urls", "task_id"):
+                if previous.get(key):
+                    panel_item[key] = previous[key]
+        if not panel_item["candidates"]:
+            local_images = [str(path) for path in out_images]
+            remote_images = list(previous.get("image_urls", []) or [])
+            panel_item["candidates"] = [
+                {
+                    "id": f"{prefix}-candidate-{candidate_no:02d}",
+                    **({"image": local_images[candidate_no - 1]}
+                       if candidate_no <= len(local_images) else {}),
+                    **({"image_url": remote_images[candidate_no - 1]}
+                       if candidate_no <= len(remote_images) else {}),
+                }
+                for candidate_no in range(1, max(len(local_images), len(remote_images)) + 1)
+            ]
+        if not panel_item.get("selected_candidate") and panel_item["candidates"]:
+            panel_item["selected_candidate"] = panel_item["candidates"][0]["id"]
+        manifest["panels"].append(panel_item)
 
-    manifest_path = panel_dir / "panels.json"
+    if contracts_changed:
+        manifest["confirmed"] = False
+        if confirm_path.exists():
+            confirm_path.unlink()
+        print(
+            "WARN: storyboard approval contract changed for "
+            f"{', '.join(sorted(contracts_changed))}; stale candidates were "
+            "detached and GATE 2 confirmation was cleared.",
+            file=sys.stderr,
+        )
+
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
                              encoding="utf-8")
 
@@ -873,37 +1318,116 @@ def cmd_animatic(args: argparse.Namespace) -> int:
         if openai_image_model:
             print(
                 "ERROR: --generate with OpenAI image models is not supported "
-                "by the BL helper. Use the emitted prompt files and "
+                "by the wan-cli helper. Use the emitted prompt files and "
                 "panels.json reference_images with the OpenAI image generator.",
                 file=sys.stderr,
             )
             return 2
-        env = os.environ.copy()
-        env["SPARK_VIDEO_PHASE"] = "animatic"
-        for i, item in enumerate(manifest["panels"], 1):
+        generation_panels = _targeted_animatic_panels(
+            manifest["panels"], target_shots,
+        )
+        if target_shots:
+            print(
+                "[animatic] targeting " + ", ".join(target_shots),
+                file=sys.stderr,
+            )
+        for i, item in enumerate(generation_panels, 1):
             prefix = item["id"]
-            if not args.force and _find_generated_panel_images(panel_dir, prefix):
-                print(f"[animatic] skip {prefix}: image already exists", file=sys.stderr)
-                continue
-            prompt_text = Path(item["prompt"]).read_text(encoding="utf-8")
-            cmd = [
-                str(_HERE / "bl"), "image", "generate",
-                "--model", args.model,
-                "--prompt", prompt_text,
-                "--size", args.size,
-                "--out-dir", str(panel_dir),
-                "--out-prefix", prefix,
+            existing = item.get("candidates", []) or []
+            remote_candidates = [
+                candidate for candidate in existing
+                if isinstance(candidate, dict) and candidate.get("image_url")
             ]
-            print(f"[animatic] generating {prefix} ({i}/{len(manifest['panels'])})",
-                  file=sys.stderr)
-            proc = subprocess.run(cmd, text=True, env=env, cwd=str(_HERE.parent))
-            if proc.returncode != 0:
-                print(f"ERROR: image generation failed for {prefix}", file=sys.stderr)
-                return proc.returncode
+            if len(remote_candidates) != len(existing):
+                # A previous interrupted run may have downloaded local files
+                # before panels.json was written. Those files are useful for
+                # inspection, but using them for video makes wan-cli upload a
+                # private OSS URL that omni2video currently rejects with 9006.
+                # Keep only candidates whose durable Wan CDN URL survived and
+                # regenerate the missing slots.
+                item["candidates"] = remote_candidates
+                if item.get("selected_candidate") not in {
+                    candidate.get("id") for candidate in remote_candidates
+                }:
+                    item["selected_candidate"] = None
+                if confirm_path.exists():
+                    confirm_path.unlink()
+                existing = remote_candidates
+            if not args.force and len(existing) >= args.candidates:
+                print(
+                    f"[animatic] skip {prefix}: {len(existing)} candidates already exist",
+                    file=sys.stderr,
+                )
+                continue
+            if args.force:
+                item["candidates"] = []
+                item["selected_candidate"] = None
+                if confirm_path.exists():
+                    confirm_path.unlink()
+            while len(item.get("candidates", []) or []) < args.candidates:
+                start = len(item.get("candidates", []) or []) + 1
+                remaining = args.candidates - start + 1
+                print(
+                    f"[animatic] generating {prefix} candidates "
+                    f"{start}-{args.candidates} ({i}/{len(generation_panels)})",
+                    file=sys.stderr,
+                )
+                try:
+                    generated = _generate_wan_panel(
+                        item, model=args.model, ratio=args.size,
+                        panel_dir=panel_dir, candidate_start=start,
+                        max_candidates=remaining,
+                    )
+                    for offset, (image_path, image_url, task_id) in enumerate(generated):
+                        candidate_no = start + offset
+                        candidate = {
+                            "id": f"{prefix}-candidate-{candidate_no:02d}",
+                            "image": str(image_path),
+                        }
+                        if image_url:
+                            candidate["image_url"] = image_url
+                        if task_id:
+                            candidate["task_id"] = task_id
+                        item.setdefault("candidates", []).append(candidate)
+                    item["images"] = [
+                        candidate["image"]
+                        for candidate in item.get("candidates", [])
+                        if candidate.get("image")
+                    ]
+                    item["image_urls"] = [
+                        candidate["image_url"]
+                        for candidate in item.get("candidates", [])
+                        if candidate.get("image_url")
+                    ]
+                    manifest["confirmed"] = False
+                    manifest_path.write_text(
+                        json.dumps(manifest, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                    # Persist every completed candidate before returning so a
+                    # later --generate run can resume from its CDN URL instead
+                    # of reconstructing a local-only candidate.
+                    manifest["confirmed"] = False
+                    manifest_path.write_text(
+                        json.dumps(manifest, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    print(f"ERROR: image generation failed for {prefix}: {exc}",
+                          file=sys.stderr)
+                    return 1
+
+            if not item.get("selected_candidate") and item.get("candidates"):
+                item["selected_candidate"] = item["candidates"][0]["id"]
 
         for item in manifest["panels"]:
             item["images"] = [
-                str(p) for p in _find_generated_panel_images(panel_dir, item["id"])
+                candidate["image"] for candidate in item.get("candidates", [])
+                if candidate.get("image")
+            ]
+            item["image_urls"] = [
+                candidate["image_url"] for candidate in item.get("candidates", [])
+                if candidate.get("image_url")
             ]
         manifest["confirmed"] = confirm_path.exists()
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
@@ -942,12 +1466,67 @@ def cmd_estimate(args: argparse.Namespace) -> int:
 
     long_confirm = int(os.environ.get("SPARK_VIDEO_LONG_CONFIRM_S", "600"))
 
-    provider = sb.provider or os.environ.get("VIDEOGEN_VIDEO_PROVIDER", "bl")
+    provider = sb.provider or os.environ.get("VIDEOGEN_VIDEO_PROVIDER", "wan-cli")
     resolution = sb.resolution
+
+    storyboard_duration_by_kind: dict[str, dict[str, int]] = {}
+    for s in sb.shots:
+        entry = storyboard_duration_by_kind.setdefault(
+            s.kind, {"shots": 0, "seconds": 0}
+        )
+        entry["shots"] += 1
+        entry["seconds"] += int(s.duration)
+
+    # Approved/generated per-shot storyboard panels are uploaded as Wan
+    # reference media, which makes the effective provider call r2v even when
+    # the director-authored kind is t2v. Cost estimates must describe the call
+    # that will actually be submitted, not only the source storyboard shape.
+    panel_shot_ids: set[str] = set()
+    panel_manifest = ep_dir / "storyboard-panels" / "panels.json"
+    if panel_manifest.exists():
+        try:
+            manifest = json.loads(panel_manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+        for item in manifest.get("panels", []) or []:
+            shots = item.get("shots") or []
+            if len(shots) != 1:
+                continue
+            has_image = False
+            selected_id = item.get("selected_candidate")
+            selected = next(
+                (
+                    candidate for candidate in item.get("candidates", []) or []
+                    if isinstance(candidate, dict)
+                    and candidate.get("id") == selected_id
+                ),
+                None,
+            )
+            candidates = []
+            if selected:
+                candidates.extend([selected.get("image_url"), selected.get("image")])
+            elif not item.get("candidates"):
+                candidates.extend(item.get("image_urls", []) or [])
+                candidates.extend(item.get("images", []) or [])
+            for raw in candidates:
+                if not raw:
+                    continue
+                ref = str(raw)
+                if ref.startswith(("http://", "https://", "asset://", "data:")):
+                    has_image = True
+                    break
+                if Path(ref).expanduser().exists():
+                    has_image = True
+                    break
+            if has_image and isinstance(shots[0], str):
+                panel_shot_ids.add(shots[0])
 
     duration_by_kind: dict[str, dict[str, int]] = {}
     for s in sb.shots:
-        entry = duration_by_kind.setdefault(s.kind, {"shots": 0, "seconds": 0})
+        effective_kind = "r2v" if s.id in panel_shot_ids else s.kind
+        entry = duration_by_kind.setdefault(
+            effective_kind, {"shots": 0, "seconds": 0}
+        )
         entry["shots"] += 1
         entry["seconds"] += int(s.duration)
 
@@ -955,8 +1534,11 @@ def cmd_estimate(args: argparse.Namespace) -> int:
         "shots": n_shots,
         "total_clip_seconds": total_sec,
         "provider": provider,
+        "video_model": sb.video_model,
         "resolution": resolution,
         "duration_by_kind": duration_by_kind,
+        "storyboard_duration_by_kind": storyboard_duration_by_kind,
+        "storyboard_reference_shots": len(panel_shot_ids),
         "parallel_groups": len(groups),
         "estimated_render_seconds_serial": int(est_serial),
         "estimated_render_seconds_parallel": int(est_parallel),
@@ -965,12 +1547,12 @@ def cmd_estimate(args: argparse.Namespace) -> int:
         "long_confirm_threshold_s": long_confirm,
     }
 
-    if sb.mode == "narration":
+    if any(s.speech_source == "post_tts" for s in sb.shots):
         tts_model = os.environ.get("VIDEOGEN_NARRATOR_TTS_MODEL", "cosyvoice-v3-flash")
         tts_chars = sum(
-            len(s.narration_text or "")
+            len(s.speech_text or s.narration_text or "")
             for s in sb.shots
-            if s.role == "narration"
+            if s.speech_source == "post_tts"
         )
         out["tts"] = {"model": tts_model, "estimated_chars": tts_chars}
 
@@ -1022,23 +1604,43 @@ def main() -> int:
     p_cmp = sub.add_parser("compile")
     p_cmp.add_argument("--mode", choices=["drama", "narration"], default="drama")
     p_cmp.add_argument("--provider", default=None,
-                       help="default: $SPARK_VIDEO_PROVIDER or 'bl'")
+                       help="default: $SPARK_VIDEO_PROVIDER or 'wan-cli'")
     p_cmp.add_argument("--narrator-voice", default=None)
+    p_cmp.add_argument(
+        "--video-model",
+        choices=["wan3.0", "wan2.7"],
+        default=os.environ.get("VIDEOGEN_WAN_VIDEO_MODEL", "wan3.0"),
+    )
+    p_cmp.add_argument(
+        "--audio-mode",
+        choices=["presenter_voiceover", "native_dialogue", "hybrid"],
+        default=None,
+        help="explicit episode-wide audio contract; omitted preserves legacy inference",
+    )
+    p_cmp.add_argument("--presenter", default=None)
+    p_cmp.add_argument("--voice", default=None)
+    p_cmp.add_argument("--subtitle-mode", choices=["off", "post"], default="off")
     p_cmp.set_defaults(fn=cmd_compile)
 
     p_anim = sub.add_parser("animatic")
     p_anim.add_argument("--shots-per-image", type=int, choices=[1, 2, 3], default=1,
                         help="deprecated; animatic always generates one image per shot")
-    p_anim.add_argument("--model", default="wan2.6-t2i",
+    p_anim.add_argument("--model", default="wan2.7-pro",
                         help="image model for --generate")
     p_anim.add_argument("--size", default="16:9",
-                        help="image aspect ratio / size passed to bl image generate")
+                        help="image ratio passed to wan image generation")
     p_anim.add_argument("--generate", action="store_true",
-                        help="call ./scripts/bl image generate for each clip reference image")
+                        help="call wan-cli for each clip reference image")
+    p_anim.add_argument("--candidates", type=int, choices=range(1, 9), default=4,
+                        help="candidate images generated per shot (default: 4)")
     p_anim.add_argument("--force", action="store_true",
                         help="regenerate reference images even if files already exist")
+    p_anim.add_argument("--shot", action="append", default=[], metavar="SHOT_ID",
+                        help="generate only this shot; repeat for multiple shots")
     p_anim.add_argument("--confirm", action="store_true",
                         help="mark generated reference images approved for video rendering")
+    p_anim.add_argument("--select", action="append", metavar="SHOT=CANDIDATE",
+                        help="persist a candidate choice; repeat for multiple shots")
     p_anim.add_argument("--unconfirm", action="store_true",
                         help="remove the approval marker")
     p_anim.set_defaults(fn=cmd_animatic)
