@@ -130,20 +130,45 @@ Install the spark-video skill for me:
    `spark-video`.
 2. Tell me to open a new session so the skill gets loaded.
 3. In the new session, read `spark-video/SKILL.md`, run
-   `./scripts/doctor.sh --quick --json`. If it is not green, run
-   `./scripts/doctor.sh --install-plan --json`, then install any
-   missing deps (`bl`, `ffmpeg`, `uv`) with my OS's package manager —
+   `./scripts/doctor.sh --quick --json` (or native Windows PowerShell
+   `./scripts/doctor.ps1 -Quick -Json`). If it is not green, run the matching
+   `--install-plan` / `-InstallPlan` command, then install any
+   missing required deps (`wan-cli`, `ffmpeg`, `uv`) with my OS's package
+   manager —
    ask before each install command.
 4. Ask whether to also clone the optional Shanyin craft references via
-   `./scripts/install-deps.sh` into the current working directory's
+   `./scripts/install-deps.sh` (or `./scripts/install-deps.ps1` on Windows)
+   into the current working directory's
    `.spark-video/references/shanyin/` (failure is safe).
-5. Re-run `./scripts/doctor.sh --quick --json` and confirm everything
+5. Also ask whether I want the optional `bl` CLI for HappyHorse rendering,
+   narration TTS, or bl-based clip review. Do not install it by default unless
+   I select the `bl` provider. If I choose narration later, run the
+   narration-aware doctor and guide me through bl install/login.
+6. Re-run `./scripts/doctor.sh --quick --json` and confirm everything
    required is green.
 ```
 
 That's it. No paths to memorize, no platform-specific commands to copy
 — the agent reads `SKILL.md` plus the setup reference only when needed,
 and drives the rest.
+
+## Video providers
+
+The open-source build keeps the storyboard provider-agnostic and bundles four
+render adapters. `wan-cli` remains the default; select another provider with
+`VIDEOGEN_VIDEO_PROVIDER` in the workspace `.env` or `--provider` at render
+time.
+
+| Provider | Adapter | Setup |
+|---|---|---|
+| `wan-cli` (`wan`) | Wan 3.0 / 2.7 through `@wan-ai/cli` | `wan auth login` |
+| `bl` (`happyhorse`) | HappyHorse through the audited `scripts/bl` wrapper | `bl auth login` |
+| `seedance2` (`seedance`) | Volcengine Ark Seedance 2.0 | `ARK_API_KEY` |
+
+Every adapter receives the same generic `t2v` / `i2v` / `r2v` shot contract;
+model names and provider-specific payloads stay inside `scripts/providers/`.
+Wan 2.7 is selected within the `wan-cli` adapter with
+`VIDEOGEN_WAN_VIDEO_MODEL=wan2.7`; it is not a separate provider.
 
 <details>
 <summary>Manual fallback (if your agent isn't skill-aware)</summary>
@@ -175,7 +200,7 @@ In a new session, say one of:
 > Use spark-video's screenwriter to draft a script. Project demo
 > episode 001. Premise: …
 
-The agent reads `SKILL.md`, routes to the matching sub-skill, and runs
+The agent reads `SKILL.md`, routes to the matching bundled stage instructions, and runs
 the 4+2 user-confirmation gate workflow.
 
 ## Outputs
@@ -196,8 +221,14 @@ it'll run the right command.
 
 - After install the agent doesn't recognize `spark-video` → restart the
   agent / open a new session
-- `bl: command not found` → `npm install -g bailian-cli && npx skills add modelstudioai/skills --all -g && bl auth login`
+- `wan: command not found` → `npm install --global @wan-ai/cli@latest`, then
+  `wan auth login --output json`
+- Narration reports `bl: command not found` → run
+  `./scripts/doctor.sh --install-plan --json --narration`; approve the optional
+  bl install and `bl auth login` steps
   (full install guide: <https://bailian.aliyun.com/cli/install.md>)
+- Native Windows → use `scripts/doctor.ps1 -InstallPlan -Json -Narration`;
+  model calls are logged through `scripts/bl.ps1` automatically
 - `Permission denied: scripts/bl` → `./scripts/doctor.sh --install-plan`
 - Render seems stuck → `tail -f projects/<p>/<e>/logs/model_calls.jsonl | jq .`
 
@@ -221,5 +252,5 @@ rm -rf ~/.claude/skills/spark-video
 ## Want to look under the hood?
 
 - Architecture + agent routing rules: [`SKILL.md`](SKILL.md)
-- Per-sub-skill detailed docs: [`references/spark-video-*/SKILL.md`](references/)
+- Bundled stage instructions: [`references/`](references/)
 - Per-script `--help`: `uv run scripts/<name>.py --help`

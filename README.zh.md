@@ -127,18 +127,41 @@ Codex / …)。
    目录名叫 `spark-video`。
 2. 提醒我新开一个会话,让 skill 被加载。
 3. 新会话里读 `spark-video/SKILL.md`,跑
-   `./scripts/doctor.sh --quick --json`。如果不是全绿,再跑
-   `./scripts/doctor.sh --install-plan --json`,用我系统的包管理器装上
-   缺的依赖(`bl` / `ffmpeg` / `uv`),每条命令都先问我确认。
-4. 问我要不要顺手 `./scripts/install-deps.sh` 把可选的山音 craft 引用拉到
+   `./scripts/doctor.sh --quick --json`（Windows 原生 PowerShell 用
+   `./scripts/doctor.ps1 -Quick -Json`）。如果不是全绿,再跑对应的
+   `--install-plan` / `-InstallPlan` 命令,用我系统的包管理器装上
+   缺的必需依赖(`wan-cli` / `ffmpeg` / `uv`),每条命令都先问我确认。
+4. 问我要不要顺手 `./scripts/install-deps.sh`（Windows 用
+   `./scripts/install-deps.ps1`）把可选的山音 craft 引用拉到
    当前工作目录的 `.spark-video/references/shanyin/`
    (失败不影响主流程)。
-5. 再跑一次 `./scripts/doctor.sh --quick --json`,必需项全绿后告诉我
+5. 再问我要不要安装可选的 `bl` CLI（HappyHorse 渲染、旁白 TTS 或
+   bl 质检会用到）。除非我选择 `bl` provider，否则默认不要安装。
+   如果我之后选择旁白模式，运行 narration 专用检查并引导我补装 bl
+   和完成鉴权。
+6. 再跑一次 `./scripts/doctor.sh --quick --json`,必需项全绿后告诉我
    可以开工了。
 ```
 
 完事。不需要记路径,也不需要复制 platform-specific 的命令 —— agent 读
 `SKILL.md`,只有需要时才展开 setup reference,自己驱动后面的步骤。
+
+## 视频 Provider
+
+开源版本保持分镜协议与具体模型解耦，内置四种渲染适配。默认仍是
+`wan-cli`；可以在工作区 `.env` 中设置 `VIDEOGEN_VIDEO_PROVIDER`，或在
+渲染时传 `--provider` 切换。
+
+| Provider | 适配 | 配置 |
+|---|---|---|
+| `wan-cli`（`wan`） | 通过 `@wan-ai/cli` 使用 Wan 3.0 / 2.7 | `wan auth login` |
+| `bl`（`happyhorse`） | 通过有审计日志的 `scripts/bl` 使用 HappyHorse | `bl auth login` |
+| `seedance2`（`seedance`） | 火山方舟 Seedance 2.0 | `ARK_API_KEY` |
+
+所有适配器接收相同的 `t2v` / `i2v` / `r2v` 通用镜头协议；具体模型名和
+provider payload 只存在于 `scripts/providers/`。
+Wan 2.7 通过 `wan-cli` 内部的 `VIDEOGEN_WAN_VIDEO_MODEL=wan2.7` 选择，
+不再作为独立 Provider。
 
 <details>
 <summary>手动 fallback(如果你的 agent 不识别 skills)</summary>
@@ -170,7 +193,7 @@ agent 会按 `SKILL.md` 里的安装 runbook 继续。
 > 用 spark-video 的 screenwriter 帮我写剧本,项目 demo episode 001,
 > premise:…
 
-agent 读 `SKILL.md` 自动路由到对应 sub-skill,按 4+2 gate 流程跑。
+agent 读 `SKILL.md` 自动路由到对应的内置阶段说明，按 4+2 gate 流程跑。
 
 ## 产物
 
@@ -187,8 +210,15 @@ projects/<project>/<episode>/
 大多数情况直接交给 agent 处理 —— 说"帮我修 XX"就行。
 
 - 安装后 agent 不认识 `spark-video` → 重启 agent / 新开会话
-- `bl: command not found` → `npm install -g bailian-cli && npx skills add modelstudioai/skills --all -g && bl auth login`
+- `wan: command not found` → `npm install --global @wan-ai/cli@latest`，然后运行
+  `wan auth login --output json`
+- 选择旁白后提示 `bl: command not found` → 运行
+  `./scripts/doctor.sh --install-plan --json --narration`，确认后补装 bl 并执行
+  `bl auth login`
   (完整安装说明：<https://bailian.aliyun.com/cli/install.md>)
+- Windows 原生 PowerShell → 使用
+  `scripts/doctor.ps1 -InstallPlan -Json -Narration`；模型调用会自动经过
+  `scripts/bl.ps1` 留下日志
 - `Permission denied: scripts/bl` → `./scripts/doctor.sh --install-plan`
 - 渲染卡住 → `tail -f projects/<p>/<e>/logs/model_calls.jsonl | jq .`
 
@@ -212,5 +242,5 @@ rm -rf ~/.claude/skills/spark-video
 ## 想看细节?
 
 - 架构 + agent 调度规则: [`SKILL.md`](SKILL.md)
-- 6 个子技能的详细文档: [`references/spark-video-*/SKILL.md`](references/)
+- 内置阶段说明文档：[`references/`](references/)
 - 每个脚本的 `--help`: 用 `uv run scripts/<name>.py --help`
