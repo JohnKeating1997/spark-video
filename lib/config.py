@@ -10,11 +10,11 @@ load_pwd_dotenv(Path.cwd() / ".env")
 
 
 def _normalise_provider(value: str) -> str:
-    name = (value or "bl").strip().lower()
+    name = (value or "wan-cli").strip().lower()
     return {
+        "wan": "wan-cli",
+        "wan_cli": "wan-cli",
         "happyhorse": "bl",
-        "wan": "wan27",
-        "dashscope_wan27": "wan27",
         "seedance": "seedance2",
     }.get(name, name)
 
@@ -22,8 +22,6 @@ def _normalise_provider(value: str) -> str:
 @dataclass(frozen=True)
 class Settings:
     api_key: str
-    ark_api_key: str
-    ark_base_url: str
     region: str
     base_url: str
     resolution: str
@@ -39,14 +37,14 @@ class Settings:
     review_timeout_s: int
     rewrite_model: str
     max_retry: int
-    # Default video provider. ``bl`` | ``wan27`` | ``seedance2``. Director
+    # Default video provider. ``wan-cli`` is the default; the open-source
+    # distribution also ships bl and Seedance 2 adapters. Wan 2.7 remains a
+    # model choice inside the wan-cli adapter. Director
     # skill writes generic kinds (t2v/i2v/r2v) and the provider maps them to its
     # own concrete model names. Per-episode overrides live in
     # ``Storyboard.provider``; ``--provider`` on the CLI beats both.
     video_provider: str
-    seedance2_model: str
-    seedance2_generate_audio: bool
-    seedance2_watermark: bool
+    wan_video_model: str
     # Narration-mode TTS defaults. Per-episode override:
     # ``Storyboard.narrator_voice``; per-shot: ``Shot.narrator_voice``.
     narrator_voice: str
@@ -64,16 +62,10 @@ class Settings:
             base = "https://dashscope.aliyuncs.com/api/v1"
 
         api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
-        ark_api_key = os.getenv("ARK_API_KEY", "").strip()
         _rate = float(os.getenv("VIDEOGEN_NARRATOR_SPEECH_RATE", "1.2"))
         _rate = max(0.5, min(2.0, _rate))
         return cls(
             api_key=api_key,
-            ark_api_key=ark_api_key,
-            ark_base_url=os.getenv(
-                "ARK_BASE_URL",
-                "https://ark.cn-beijing.volces.com/api/v3",
-            ).strip().rstrip("/"),
             region=region,
             base_url=base,
             resolution=os.getenv("VIDEOGEN_DEFAULT_RESOLUTION", "720P"),
@@ -88,19 +80,12 @@ class Settings:
             review_timeout_s=int(os.getenv("VIDEOGEN_REVIEW_TIMEOUT_S", "300")),
             rewrite_model=os.getenv("VIDEOGEN_REWRITE_MODEL", "qwen-plus").strip(),
             max_retry=int(os.getenv("VIDEOGEN_MAX_RETRY", "3")),
-            video_provider=_normalise_provider(os.getenv("VIDEOGEN_VIDEO_PROVIDER", "bl")),
-            seedance2_model=(
-                os.getenv("SEEDANCE2_MODEL", "doubao-seedance-2-0-260128").strip()
-                or "doubao-seedance-2-0-260128"
+            video_provider=_normalise_provider(
+                os.getenv("VIDEOGEN_VIDEO_PROVIDER", "wan-cli")
             ),
-            seedance2_generate_audio=(
-                os.getenv("SEEDANCE2_GENERATE_AUDIO", "true").strip().lower()
-                in {"1", "true", "yes", "y", "on"}
-            ),
-            seedance2_watermark=(
-                os.getenv("SEEDANCE2_WATERMARK", "false").strip().lower()
-                in {"1", "true", "yes", "y", "on"}
-            ),
+            wan_video_model=os.getenv(
+                "VIDEOGEN_WAN_VIDEO_MODEL", "wan3.0"
+            ).strip(),
             narrator_voice=os.getenv("VIDEOGEN_NARRATOR_VOICE", "longanyang").strip(),
             narrator_tts_model=os.getenv("VIDEOGEN_NARRATOR_TTS_MODEL", "cosyvoice-v3-flash").strip(),
             narrator_language=os.getenv("VIDEOGEN_NARRATOR_LANGUAGE", "Auto").strip(),
@@ -113,13 +98,5 @@ class Settings:
                 "DASHSCOPE_API_KEY is missing. Copy .env.example to .env and fill it in."
             )
         return self.api_key
-
-    def require_ark_api_key(self) -> str:
-        if not self.ark_api_key:
-            raise RuntimeError(
-                "ARK_API_KEY is missing. Copy .env.example to .env and fill it in."
-            )
-        return self.ark_api_key
-
 
 SETTINGS = Settings.load()

@@ -6,7 +6,7 @@
 render_shot.py — render a single shot via the configured provider, then
 score it (the deterministic half of Zone 3).
 
-Reads SPARK_VIDEO_PROVIDER (default `bl`) and dispatches to the matching
+Reads SPARK_VIDEO_PROVIDER (default `wan-cli`) and dispatches to the matching
 plugin under scripts/providers/. Also updates projects/<p>/<ep>/shots_state.json.
 
 After a successful render the clip is automatically reviewed (6-axis
@@ -24,7 +24,7 @@ when to escalate to the director.
 Usage:
     uv run scripts/render_shot.py --shot S01-001 --kind r2v \\
         --prompt "..." --duration 12 --media a.png b.png \\
-        [--voice cast.mp3] [--provider bl|wan27|seedance2] [--force] [--reset-attempts] \\
+        [--voice cast.mp3] [--provider wan-cli] [--force] [--reset-attempts] \\
         [--characters 陆辰 钱夫人] [--no-review] [--skip-animatic-gate]
 
 By default, video rendering is blocked until the static storyboard
@@ -42,7 +42,7 @@ Re-render flags:
 
 Stdout (JSON):
     {"shot_id":"S01-001","version":1,"video_path":"...","last_frame_path":"...",
-     "duration_s":12.0,"provider":"bl","model":"happyhorse-1.0-r2v","elapsed_s":47.2,
+     "duration_s":12.0,"provider":"wan-cli","model":"wan3.0","elapsed_s":47.2,
      "review":{"score":8.2,"verdict":"ACCEPT","breakdown":{...},"critique":"..."},
      "winner_version":1}
 
@@ -59,6 +59,7 @@ import fcntl
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -73,6 +74,21 @@ sys.path.insert(0, str(_HERE.parent))
 
 from lib.env import load_pwd_dotenv  # noqa: E402
 from lib import review as review_mod  # noqa: E402
+from lib.prompt_language import (  # noqa: E402
+    read_project_prompt_language,
+    resolve_prompt_language,
+)
+from lib.cli import active_wan_site, wan_media_tag  # noqa: E402
+from lib.prompt_compiler import (  # noqa: E402
+    compatible_art_direction,
+    reference_treatment_instruction,
+    rendering_instruction,
+    require_compatible_art_direction,
+    resolve_visual_medium,
+)
+from lib.cinematic import cinematic_budget  # noqa: E402
+from lib.bgm import forbid_directive  # noqa: E402
+from lib.shot_contract import contract_mismatches  # noqa: E402
 
 load_pwd_dotenv()
 
@@ -98,7 +114,45 @@ def _animatic_confirmed(ep_dir: Path) -> bool:
     }:
         return True
     panels_dir = ep_dir / "storyboard-panels"
-    return (panels_dir / "panels.json").exists() and (panels_dir / "CONFIRMED").exists()
+    manifest_path = panels_dir / "panels.json"
+    if not manifest_path.exists() or not (panels_dir / "CONFIRMED").exists():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        storyboard = json.loads(
+            (ep_dir / "storyboard.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return False
+    if contract_mismatches(storyboard, manifest):
+        return False
+    panels = manifest.get("panels", []) or []
+    if not panels:
+        return False
+    for panel in panels:
+        selected = panel.get("selected_candidate")
+        candidates = {
+            candidate.get("id"): candidate
+            for candidate in panel.get("candidates", []) or []
+            if isinstance(candidate, dict) and candidate.get("id")
+        }
+        if selected not in candidates:
+            return False
+        choice = candidates[selected]
+        if not (choice.get("image_url") or choice.get("image")):
+            return False
+    return True
+
+
+def _approved_contract_for_shot(ep_dir: Path, shot_id: str) -> dict | None:
+    manifest = _load_json(ep_dir / "storyboard-panels" / "panels.json") or {}
+    for panel in manifest.get("panels", []) or []:
+        if not isinstance(panel, dict) or (panel.get("shots") or []) != [shot_id]:
+            continue
+        snapshots = panel.get("contract_snapshots")
+        if isinstance(snapshots, dict) and isinstance(snapshots.get(shot_id), dict):
+            return snapshots[shot_id]
+    return None
 
 
 def _load_state(state_path: Path) -> dict:
@@ -258,7 +312,9 @@ def _read_lore_style(ep_dir: Path) -> dict[str, str]:
                 continue
             key, raw = line.split(":", 1)
             key = key.strip()
-            if key not in {"visual_style", "camera_language", "mood_anchor"}:
+            if key not in {
+                "visual_medium", "visual_style", "camera_language", "mood_anchor",
+            }:
                 continue
             val = raw.strip().strip("'\"")
             if val:
@@ -270,9 +326,61 @@ def _read_lore_style(ep_dir: Path) -> dict[str, str]:
     return out
 
 
-def _format_mmss(seconds: int) -> str:
-    m, s = divmod(max(0, int(seconds)), 60)
-    return f"{m:02d}:{s:02d}"
+def _visual_medium_for_shot(ep_dir: Path, shot_id: str, prompt: str) -> str:
+    shot = _storyboard_shot(ep_dir, shot_id)
+    panel_medium = None
+    manifest = _load_json(ep_dir / "storyboard-panels" / "panels.json") or {}
+    for panel in manifest.get("panels", []) or []:
+        if isinstance(panel, dict) and shot_id in (panel.get("shots") or []):
+            panel_medium = panel.get("render_style")
+            break
+    return resolve_visual_medium(
+        project_default=_read_lore_style(ep_dir).get("visual_medium"),
+        shot_overrides=[shot.get("animatic_style"), panel_medium],
+        fallback_text=prompt,
+    )
+
+
+def _forbid_model_bgm(ep_dir: Path, shot_id: str | None = None) -> bool:
+    """Return the compiled episode-level model-music policy.
+
+    Short clips forbid model-generated music by default because separate
+    fragments cannot produce a coherent score. Exceptional long shots may
+    retain Wan's native soundtrack unless a program-level BGM is configured.
+    An episode may explicitly opt in for every shot by writing
+    ``forbid_model_bgm: false``.
+    """
+    storyboard = _load_json(ep_dir / "storyboard.json") or {}
+    bgm = storyboard.get("bgm")
+    if isinstance(bgm, dict):
+        if bgm.get("enabled") and bgm.get("mode") not in (None, "off"):
+            return True
+        if bgm.get("forbid_model_bgm") is False:
+            return False
+    if shot_id:
+        shot = _storyboard_shot(ep_dir, shot_id)
+        if (
+            int(shot.get("duration") or 0) > 15
+            and shot.get("speech_source") != "post_tts"
+        ):
+            return False
+    return True
+
+
+def _long_shot_music_directive(shot: dict, *, zh: bool) -> str:
+    if int(shot.get("duration") or 0) <= 15:
+        return ""
+    return (
+        "生成克制、连续的背景音乐，并与对白、环境声和音效自然融合；音乐在镜头开头约2秒渐入，在结尾约3秒渐出，不要突然开始或中断。"
+        if zh else
+        "Generate a restrained continuous musical bed integrated naturally with dialog, ambience, and sound effects; fade it in over about 2 seconds at the opening and fade it out over about 3 seconds at the end, with no abrupt start or cutoff."
+    )
+
+
+def _storyboard_video_model(ep_dir: Path) -> str | None:
+    storyboard = _load_json(ep_dir / "storyboard.json") or {}
+    value = storyboard.get("video_model")
+    return str(value) if value else None
 
 
 def _structured_video_prompt(
@@ -280,13 +388,10 @@ def _structured_video_prompt(
     ep_dir: Path,
     shot_id: str,
     prompt: str,
-    duration: int,
-    media: list[str | Path],
-    first_frame: str | Path | None,
     voice: str | Path | None,
-    characters: list[str],
     reference_image_map: str | None = None,
     reference_audio_map: str | None = None,
+    prompt_language: str = "en",
 ) -> str:
     if prompt.lstrip().lower().startswith("style -"):
         return _insert_reference_maps(
@@ -296,58 +401,143 @@ def _structured_video_prompt(
         )
 
     style = _read_lore_style(ep_dir)
-    style_line = (
-        os.environ.get("SPARK_VIDEO_PROMPT_STYLE")
-        or style.get("mood_anchor")
-        or style.get("visual_style")
-        or "Cinematic live-action short film, consistent visual style across every clip."
-    )
-    camera = style.get("camera_language")
-    if camera and camera not in style_line:
-        style_line = f"{style_line}; {camera}"
-
     shot = _storyboard_shot(ep_dir, shot_id)
-    char_names = characters or [
-        c for c in shot.get("characters", []) if isinstance(c, str)
+    complexity = cinematic_budget(int(shot.get("duration") or 12))
+    speech_source = shot.get("speech_source") or (
+        "post_tts" if shot.get("role") == "narration" else "model"
+    )
+    medium = resolve_visual_medium(
+        project_default=style.get("visual_medium"),
+        shot_overrides=[shot.get("animatic_style")],
+        fallback_text=prompt,
+    )
+    require_compatible_art_direction(style, medium)
+    style_override = os.environ.get("SPARK_VIDEO_PROMPT_STYLE", "").strip()
+    art_direction = [style_override] if style_override else compatible_art_direction(style, medium)
+    zh = prompt_language == "zh"
+    sections = [
+        "渲染：" if zh else "Rendering:",
+        rendering_instruction(medium, language=prompt_language),
     ]
-    char_line = ", ".join(char_names) if char_names else "none"
-    if first_frame:
-        first_frame_note = "Use the provided first-frame input as the literal continuity bridge."
-    elif media:
-        first_frame_note = (
-            "DO NOT use uploaded reference images as the literal first frame; "
-            "treat them as approved storyboard/composition references when "
-            "provided, plus identity, location, and prop references."
+    if art_direction:
+        sections.append(("美术方向：" if zh else "Art direction: ") + "; ".join(art_direction))
+    if reference_image_map or reference_audio_map:
+        sections.extend(["", "参考契约：" if zh else "Reference contract:"])
+        if reference_image_map:
+            sections.append(reference_image_map)
+        if reference_audio_map:
+            sections.append(reference_audio_map)
+    beats = shot.get("beats") or []
+    timeline_lines: list[str] = []
+    for beat in beats:
+        start = beat.get("start_s")
+        end = beat.get("end_s")
+        action = str(beat.get("action") or "").strip()
+        if start is None or end is None or not action:
+            continue
+        timeline_lines.append(f"- {start}-{end}s: {action}")
+    if speech_source == "model":
+        audio_line = (
+            "只生成镜头明确要求的对白、环境声和音效，不要添加额外台词或旁白。"
+            if zh else
+            "Generate only explicitly requested dialog, ambience, and sound effects. Do not add extra speech or narration."
         )
     else:
-        first_frame_note = "No uploaded reference image."
-
-    audio_line = (
-        "NO MUSIC. Sound effects, ambient audio, breath sounds, and spoken lines are welcome when specified."
-    )
+        audio_line = (
+            "不要生成人物对白、旁白或可辨识的说话声；只保留自然动作和环境表现，后期将统一配音。"
+            if zh else
+            "Do not generate character dialog, narration, or intelligible speech; preserve natural action and ambience only because voice is added in post."
+        )
+    forbid_model_bgm = _forbid_model_bgm(ep_dir, shot_id)
+    if forbid_model_bgm:
+        audio_line += (
+            " 不要生成背景音乐。" if zh else " Do not generate background music."
+        )
+    else:
+        music_directive = _long_shot_music_directive(shot, zh=zh)
+        if music_directive:
+            audio_line += " " + music_directive
     if voice or reference_audio_map:
         audio_line += (
-            " Match each provided reference voice to its corresponding "
-            "speaking character."
+            " 将每条参考声音只匹配给对应角色。" if zh
+            else " Match each reference voice only to its assigned character."
         )
-
-    sections = [
-        f"Style - {style_line}",
-        f"First frame note - {first_frame_note}",
-    ]
-    if reference_image_map:
-        sections.append(reference_image_map)
-    if reference_audio_map:
-        sections.append(reference_audio_map)
+    text_constraint = ""
+    if not shot.get("allow_generated_text", False):
+        text_constraint = (
+            " 不要生成字幕、台词文字、说明文字、UI 或装饰性伪文字。"
+            if zh else
+            " Do not generate captions, dialogue text, labels, UI, or decorative pseudo-text."
+        )
+    performance_constraint = ""
+    if speech_source == "post_tts" and shot.get("visual_speech_mode") == "voiceover":
+        performance_constraint = (
+            " 出镜人物以表情、手势和展示动作为主，避免明显的连续说话口型和嘴部特写。"
+            if zh else
+            " On-camera characters should communicate through expression and gesture; avoid sustained speaking mouth motion or mouth close-ups."
+        )
+    transition = shot.get("transition_from_previous") or {}
+    transition_lines: list[str] = []
+    if transition.get("type"):
+        transition_type = str(transition["type"])
+        preserve = [str(item) for item in transition.get("preserve") or []]
+        allow_change = [str(item) for item in transition.get("allow_change") or []]
+        transition_lines.append(f"type: {transition_type}")
+        transition_lines.append(
+            ("保持：" if zh else "Preserve: ") + (", ".join(preserve) or "—")
+        )
+        transition_lines.append(
+            ("允许变化：" if zh else "Allow change: ")
+            + (", ".join(allow_change) or "—")
+        )
+        if transition_type == "continuous_action":
+            transition_lines.append(
+                "以前一镜头最终帧为本镜头起始状态，保持动作连续。"
+                if zh else
+                "Use the preceding shot's final frame as this shot's opening state and continue the action."
+            )
+        else:
+            transition_lines.append(
+                "不要复刻前一镜头的最终帧；只保持上面明确声明的属性。"
+                if zh else
+                "Do not copy the preceding final frame; preserve only the attributes declared above."
+            )
     sections.extend([
-        f"Characters - {char_line}; describe by natural appearance only, no @tags or social handles.",
-        "Age and height - keep ages and relative heights explicit and consistent when the shot includes people.",
-        "Voices - yes when dialog, narration, breath, or vocal reactions are specified; keep voice continuity.",
-        f"Panel timing - [0:00-{_format_mmss(duration)}]",
-        f"Audio - {audio_line}",
         "",
-        "Shot content -",
+        "镜头：" if zh else "Shot:",
         prompt.rstrip(),
+        "",
+        "复杂度预算：" if zh else "Complexity budget:",
+        (
+            f"{complexity['label']}：{complexity['prompt_guidance_zh']}"
+            if zh else
+            f"{complexity['label']}: {complexity['prompt_guidance']}"
+        ),
+        *(
+            ["", "时序动作：" if zh else "Temporal action plan:", *timeline_lines]
+            if timeline_lines else []
+        ),
+        *(
+            ["", "与上一镜头的衔接：" if zh else "Transition from previous:", *transition_lines]
+            if transition_lines else []
+        ),
+        *(
+            ["", "摄影机路径：" if zh else "Camera path:", str(shot["camera_path"]).strip()]
+            if shot.get("camera_path") else []
+        ),
+        *(
+            ["", "结束构图：" if zh else "Ending composition:", str(shot["end_composition"]).strip()]
+            if shot.get("end_composition") else []
+        ),
+        "",
+        "音频：" if zh else "Audio:",
+        audio_line,
+        "",
+        "约束：保持参考图中的人物身份、服装、场景布局和道具外观；不要复制参考图里的文字、边框、字幕或 UI。"
+        + text_constraint + performance_constraint
+        if zh else
+        "Constraints: Preserve referenced character identity, costume, location layout, and prop design. Do not copy text, borders, captions, or UI from references."
+        + text_constraint + performance_constraint,
     ])
     return "\n".join(sections).rstrip()
 
@@ -358,7 +548,7 @@ def _load_provider(name: str):
         mod = importlib.import_module(f"scripts.providers.{name}")
     except ImportError as e:
         raise SystemExit(
-            f"unknown provider '{name}'. Available: bl, wan27, seedance2"
+            f"unknown provider '{name}'. Available: wan-cli, bl, seedance2"
         ) from e
     if not hasattr(mod, "render"):
         raise SystemExit(f"provider '{name}' missing render() entrypoint")
@@ -366,9 +556,10 @@ def _load_provider(name: str):
 
 
 _REMOTE_MEDIA_PREFIXES = ("http://", "https://", "asset://", "data:")
-_AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+_AUDIO_EXTS = {".mp3", ".wav"}
+_VOICE_EXTS = {".mp3", ".wav", ".mp4"}
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
-_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
+_VIDEO_EXTS = {".mp4", ".mov"}
 
 REFERENCE_IMAGE_MAP_HEADER = "Reference image map:"
 REFERENCE_IMAGE_MAP_RULE = (
@@ -409,7 +600,23 @@ def _storyboard_reference_for_shot(ep_dir: Path, shot_id: str) -> str | None:
         shots = item.get("shots") or []
         if shots != [shot_id]:
             continue
-        for image in item.get("images", []) or []:
+        selected_id = item.get("selected_candidate")
+        selected = next(
+            (
+                candidate for candidate in item.get("candidates", []) or []
+                if isinstance(candidate, dict) and candidate.get("id") == selected_id
+            ),
+            None,
+        )
+        candidates = []
+        if selected:
+            candidates.extend([selected.get("image_url"), selected.get("image")])
+        elif not item.get("candidates"):
+            candidates.extend(item.get("image_urls", []) or [])
+            candidates.extend(item.get("images", []) or [])
+        for image in candidates:
+            if not image:
+                continue
             ref = str(image)
             if _is_remote_media_ref(ref):
                 return ref
@@ -461,12 +668,12 @@ def _scan_first_image(folder: Path) -> str | None:
 def _scan_first_audio(folder: Path) -> str | None:
     if not folder.is_dir():
         return None
-    for name in ("voice.mp3", "voice.wav", "voice.m4a"):
+    for name in ("voice.mp3", "voice.wav", "voice.mp4"):
         preferred = folder / name
         if preferred.is_file():
             return str(preferred)
     for f in sorted(folder.iterdir()):
-        if f.is_file() and f.suffix.lower() in _AUDIO_EXTS:
+        if f.is_file() and f.suffix.lower() in _VOICE_EXTS:
             return str(f)
     return None
 
@@ -480,6 +687,12 @@ def _asset_records(data, plural_key: str) -> list[dict]:
 
 
 def _first_record_image(record: dict) -> str | None:
+    value = record.get("image_url")
+    if isinstance(value, str) and value:
+        return value
+    for value in record.get("image_urls", []) or []:
+        if isinstance(value, str) and value:
+            return value
     for key in ("image_local", "image", "path"):
         value = record.get(key)
         if isinstance(value, str) and value:
@@ -572,7 +785,12 @@ def _storyboard_scene_set_id(ep_dir: Path, scene_id: str | None) -> str | None:
     return None
 
 
-def _reference_labels_for_shot(ep_dir: Path, shot_id: str) -> dict[str, str]:
+def _reference_labels_for_shot(
+    ep_dir: Path,
+    shot_id: str,
+    *,
+    visual_medium: str,
+) -> dict[str, str]:
     shot = _storyboard_shot(ep_dir, shot_id)
     labels: dict[str, str] = {}
 
@@ -592,12 +810,14 @@ def _reference_labels_for_shot(ep_dir: Path, shot_id: str) -> dict[str, str]:
             continue
         image = cast_index.get(name)
         if image:
+            rendering = reference_treatment_instruction(
+                visual_medium, subject="character"
+            )
             labels[_ref_key(image)] = (
-                f"Character reference for {name}. Preserve the face shape, "
-                "hairstyle, costume, body type, apparent age, and identity "
-                "continuity from this image, while adapting the rendering to "
-                "the shot's declared visual style. Do not copy photorealistic "
-                "skin texture or live-action camera realism from the reference."
+                f"Authoritative character reference for {name}. Strictly preserve "
+                "identity, face shape, hairstyle, costume, accessories, body "
+                "type, silhouette, and apparent age. Do not redesign hair or "
+                f"costume. {rendering}"
             )
 
     set_index = _build_asset_index(
@@ -607,12 +827,14 @@ def _reference_labels_for_shot(ep_dir: Path, shot_id: str) -> dict[str, str]:
     if isinstance(set_id, str):
         image = set_index.get(set_id)
         if image:
+            rendering = reference_treatment_instruction(
+                visual_medium, subject="location"
+            )
             labels[_ref_key(image)] = (
-                f"Location reference for {set_id}. Preserve the architecture, "
+                f"Authoritative location reference for {set_id}. Preserve architecture, "
                 "spatial layout, period details, lighting mood, and main "
-                "environmental elements while adapting the rendering to the "
-                "shot's declared visual style. Do not override the storyboard "
-                "action or character placement."
+                "environmental elements. Do not redesign the layout or override "
+                f"the shot action. {rendering}"
             )
 
     prop_index = _build_asset_index(
@@ -623,11 +845,13 @@ def _reference_labels_for_shot(ep_dir: Path, shot_id: str) -> dict[str, str]:
             continue
         image = prop_index.get(name)
         if image:
+            rendering = reference_treatment_instruction(
+                visual_medium, subject="prop"
+            )
             labels[_ref_key(image)] = (
-                f"Prop reference for {name}. Preserve the shape, material, "
-                "color, texture, and scale from this image while adapting the "
-                "rendering to the shot's declared visual style. Do not let the "
-                "prop reference override the storyboard action."
+                f"Authoritative prop reference for {name}. Preserve shape, "
+                "material, color, texture, and scale. Do not redesign it or "
+                f"override the shot action. {rendering}"
             )
 
     return labels
@@ -649,7 +873,7 @@ def _reference_audio_labels_for_shot(ep_dir: Path, shot_id: str) -> dict[str, st
         voice_ref_dir = ep_dir / "voice-refs" / shot_id
         if voice_ref_dir.is_dir():
             for ref in voice_ref_dir.glob(f"{name}.*"):
-                if ref.is_file() and ref.suffix.lower() in _AUDIO_EXTS:
+                if ref.is_file() and ref.suffix.lower() in _VOICE_EXTS:
                     labels[_ref_key(ref)] = (
                         f"Reference voice for {name}. Use this trimmed audio "
                         "only for that character's voice timbre, age, emotional "
@@ -664,12 +888,16 @@ def _build_reference_image_map(
     ep_dir: Path,
     shot_id: str,
     media: list[str | Path],
+    visual_medium: str,
+    site: str,
 ) -> str | None:
     image_refs = [ref for ref in media if _looks_like_image_ref(ref)]
     if not image_refs:
         return None
 
-    labels = _reference_labels_for_shot(ep_dir, shot_id)
+    labels = _reference_labels_for_shot(
+        ep_dir, shot_id, visual_medium=visual_medium
+    )
     lines = [REFERENCE_IMAGE_MAP_HEADER]
     for idx, ref in enumerate(image_refs, 1):
         label = labels.get(_ref_key(ref))
@@ -679,7 +907,7 @@ def _build_reference_image_map(
                 "relevant to this clip; do not override the storyboard action, "
                 "character identity, location, or prop definitions."
             )
-        lines.append(f"Image {idx}: {label}")
+        lines.append(f"{wan_media_tag('image', idx, site=site)}: {label}")
     lines.append(REFERENCE_IMAGE_MAP_RULE)
     return "\n".join(lines)
 
@@ -690,6 +918,7 @@ def _build_reference_audio_map(
     shot_id: str,
     media: list[str | Path],
     voice: str | Path | None,
+    site: str,
 ) -> str | None:
     audio_refs = [ref for ref in media if _looks_like_audio_ref(ref)]
     if voice:
@@ -704,9 +933,9 @@ def _build_reference_audio_map(
         if not label:
             label = (
                 "Additional reference voice. Use it only for voice timbre "
-                "consistency relevant to this clip; do not add music."
+                "consistency relevant to this clip; do not treat it as music."
             )
-        lines.append(f"Audio {idx}: {label}")
+        lines.append(f"{wan_media_tag('audio', idx, site=site)}: {label}")
     lines.append(REFERENCE_AUDIO_MAP_RULE)
     return "\n".join(lines)
 
@@ -735,21 +964,6 @@ def _insert_reference_maps(prompt: str,
     return _insert_reference_audio_map(prompt, reference_audio_map)
 
 
-def _with_storyboard_reference_note(prompt: str) -> str:
-    marker = "Storyboard reference -"
-    if marker in prompt:
-        return prompt
-    note = (
-        "Storyboard reference - The first reference image is the approved "
-        "static storyboard reference for this clip. Follow its composition, "
-        "camera angle, character placement, framing, lighting, key action, "
-        "and mood. Use it as a storyboard/composition reference only; do not "
-        "treat it as a literal first frame. Do not copy labels, borders, "
-        "captions, or UI from the reference image."
-    )
-    return f"{note}\n\n{prompt.rstrip()}".rstrip()
-
-
 def _ref_suffix(value: str | Path) -> str:
     if isinstance(value, Path):
         return value.suffix.lower()
@@ -765,12 +979,11 @@ def _looks_like_audio_ref(value: str | Path) -> bool:
 
 
 def _normalise_provider_name(name: str) -> str:
-    value = (name or "bl").strip().lower()
+    value = (name or "wan-cli").strip().lower()
     return {
+        "wan": "wan_cli",
+        "wan-cli": "wan_cli",
         "happyhorse": "bl",
-        "wan": "dashscope_wan27",
-        "wan27": "dashscope_wan27",
-        "dashscope_wan27": "dashscope_wan27",
         "seedance": "seedance2",
     }.get(value, value)
 
@@ -782,20 +995,20 @@ def main() -> int:
     ap.add_argument("--prompt", required=True)
     ap.add_argument("--duration", type=int, default=5)
     ap.add_argument("--media", nargs="*", default=[],
-                    help="reference media paths; seedance2 also accepts "
-                         "http(s)://, asset://, and data: refs")
+                    help="reference media paths or URLs")
     ap.add_argument("--voice", default=None,
-                    help="reference voice mp3 path; seedance2 also accepts "
-                         "http(s)://, asset://, and data: refs")
+                    help="reference voice path or URL")
     ap.add_argument("--first-frame", default=None,
                     help="prev shot's last frame (chain bridging, provider-specific)")
+    ap.add_argument("--last-frame", default=None,
+                    help="optional target ending-frame image, provider-specific")
     ap.add_argument("--provider", default=None,
                     help="override SPARK_VIDEO_PROVIDER")
-    ap.add_argument("--resolution", default="1080P")
+    ap.add_argument("--resolution", default="720P")
     ap.add_argument("--ratio", default=None)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--negative-prompt", default=None,
-                    help="providers with negative prompt support; ignored by bl")
+                    help="optional negative guidance")
     ap.add_argument("--accept-version", type=int, default=None,
                     help="don't render; just mark this version as winner")
     ap.add_argument("--force", action="store_true",
@@ -820,14 +1033,20 @@ def main() -> int:
     args = ap.parse_args()
 
     ep_dir = _episode_dir()
+    storyboard_video_model = _storyboard_video_model(ep_dir)
+    if storyboard_video_model:
+        os.environ["VIDEOGEN_WAN_VIDEO_MODEL"] = storyboard_video_model
     state_path = ep_dir / "shots_state.json"
     state = _load_state(state_path)
 
     # --accept-version: promote and exit
     if args.accept_version is not None:
-        if args.shot not in state:
-            print(f"ERROR: shot {args.shot} has no attempts to accept",
-                  file=sys.stderr)
+        if not args.skip_animatic_gate and not _animatic_confirmed(ep_dir):
+            print(
+                "ERROR: cannot promote a version against missing or stale "
+                "GATE 2 approval. Reconfirm the current animatic contract first.",
+                file=sys.stderr,
+            )
             return 2
         ver = args.accept_version
         src = ep_dir / "clips" / f"{args.shot}-ver{ver}.mp4"
@@ -835,6 +1054,78 @@ def main() -> int:
         if not src.exists():
             print(f"ERROR: {src} not found", file=sys.stderr)
             return 2
+        review_path = ep_dir / "reviews" / f"{args.shot}-ver{ver}.json"
+        recovered_review = None
+        if review_path.exists():
+            try:
+                recovered_review = json.loads(
+                    review_path.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                recovered_review = None
+        if recovered_review is None:
+            existing_entry = state.get(args.shot) or {}
+            existing_attempt = next(
+                (
+                    attempt
+                    for attempt in existing_entry.get("attempts", []) or []
+                    if attempt.get("version") == ver
+                ),
+                None,
+            )
+            recovered_review = (existing_attempt or {}).get("review")
+        blocking_issues = (recovered_review or {}).get("blocking_issues") or []
+        if blocking_issues:
+            print(
+                "ERROR: --accept-version cannot override blocking review "
+                f"issues for {args.shot} v{ver}: {blocking_issues}",
+                file=sys.stderr,
+            )
+            return 2
+        def _register_recovered(s: dict) -> None:
+            entry = s.get(args.shot)
+            if not entry:
+                entry = {
+                    "shot_id": args.shot,
+                    "attempts": [],
+                    "winner_version": None,
+                    "winner_path": None,
+                    "needs_director_rewrite": False,
+                }
+                s[args.shot] = entry
+            attempts = entry.setdefault("attempts", [])
+            already_registered = any(
+                attempt.get("status") == "SUCCEEDED"
+                and attempt.get("version") == ver
+                and attempt.get("video_path") == str(src)
+                for attempt in attempts
+            )
+            if not already_registered:
+                recovered_attempt = {
+                    "version": ver,
+                    "target_version": ver,
+                    "status": "SUCCEEDED",
+                    "video_path": str(src),
+                    "provider": "wan-cli",
+                    "model": "wan3.0",
+                    "recovered": True,
+                }
+                if recovered_review is not None:
+                    recovered_attempt["review"] = recovered_review
+                attempts.append(recovered_attempt)
+            else:
+                for attempt in attempts:
+                    if (
+                        attempt.get("status") == "SUCCEEDED"
+                        and attempt.get("version") == ver
+                        and attempt.get("video_path") == str(src)
+                    ):
+                        attempt["model"] = attempt.get("model") or "wan3.0"
+                        if recovered_review is not None:
+                            attempt["review"] = recovered_review
+                        break
+
+        _update_state(state_path, _register_recovered)
         if dst.is_symlink() or dst.exists():
             dst.unlink()
         import shutil as _sh
@@ -846,6 +1137,7 @@ def main() -> int:
                 raise RuntimeError(f"shot {args.shot} disappeared from state")
             entry["winner_version"] = ver
             entry["winner_path"] = str(dst)
+            entry["manual_acceptance"] = True
             entry["needs_director_rewrite"] = False
 
         _update_state(state_path, _promote)
@@ -904,8 +1196,9 @@ def main() -> int:
     os.environ.setdefault("SPARK_VIDEO_PHASE", "render")
 
     provider_name = _normalise_provider_name(
-        args.provider or os.environ.get("SPARK_VIDEO_PROVIDER", "bl")
+        args.provider or os.environ.get("SPARK_VIDEO_PROVIDER", "wan-cli")
     )
+    provider_label = "wan-cli" if provider_name == "wan_cli" else provider_name
     mod = _load_provider(provider_name)
 
     clip_path = ep_dir / "clips" / f"{args.shot}-ver{version}.mp4"
@@ -916,13 +1209,27 @@ def main() -> int:
         "ratio": args.ratio,
         "seed": args.seed,
     }
+    shot_spec = _storyboard_shot(ep_dir, args.shot)
+    if shot_spec.get("speech_source") == "post_tts":
+        # This track will be replaced during stitch; avoid paying for and
+        # reviewing model speech that the episode contract explicitly forbids.
+        extra["audio_output"] = False
+    prompt_language = resolve_prompt_language(
+        explicit=read_project_prompt_language(ep_dir),
+        text=args.prompt,
+    )
+    extra["prompt_language"] = prompt_language
     if args.negative_prompt:
         extra["negative_prompt"] = args.negative_prompt
     first_frame = _normalise_media_ref(args.first_frame) if args.first_frame else None
     if first_frame:
-        extra["first_frame_url"] = (
-            first_frame if provider_name == "seedance2" else str(first_frame)
-        )
+        extra["first_frame_url"] = str(first_frame)
+    last_frame = _normalise_media_ref(args.last_frame) if args.last_frame else None
+    if last_frame:
+        if not first_frame:
+            print("ERROR: --last-frame requires --first-frame", file=sys.stderr)
+            return 2
+        extra["last_frame_url"] = str(last_frame)
 
     # Resolve to absolute paths up front. Providers upload local files by
     # path, and a relative path resolved against a surprising cwd (e.g. when
@@ -930,13 +1237,11 @@ def main() -> int:
     # an opaque "Failed to download …" from the model API.
     media = [_normalise_media_ref(m) for m in args.media]
     voice = _normalise_media_ref(args.voice) if args.voice else None
-    storyboard_ref_used = False
     storyboard_ref = _storyboard_reference_for_shot(ep_dir, args.shot)
     if storyboard_ref:
         storyboard_media = _normalise_media_ref(storyboard_ref)
         media = [m for m in media if str(m) != str(storyboard_media)]
         media.insert(0, storyboard_media)
-        storyboard_ref_used = True
         if args.kind != "r2v":
             print(
                 f"warn: {args.shot} has an approved storyboard reference; "
@@ -944,27 +1249,6 @@ def main() -> int:
                 file=sys.stderr,
             )
             args.kind = "r2v"
-        if first_frame:
-            print(
-                f"warn: {args.shot} has an approved storyboard reference; "
-                "ignoring --first-frame so the storyboard image remains "
-                "reference media, not a literal first frame",
-                file=sys.stderr,
-            )
-            first_frame = None
-            extra.pop("first_frame_url", None)
-
-    remote_refs = [
-        ref for ref in [*media, voice, first_frame]
-        if isinstance(ref, str) and ref is not None
-    ]
-    if remote_refs and provider_name != "seedance2":
-        print(
-            "ERROR: remote media references are currently only supported "
-            f"by --provider seedance2: {remote_refs[0]}",
-            file=sys.stderr,
-        )
-        return 2
 
     for m in media:
         if isinstance(m, Path) and not m.exists():
@@ -976,51 +1260,50 @@ def main() -> int:
     if isinstance(first_frame, Path) and not first_frame.exists():
         print(f"ERROR: --first-frame file not found: {first_frame}", file=sys.stderr)
         return 2
+    if isinstance(last_frame, Path) and not last_frame.exists():
+        print(f"ERROR: --last-frame file not found: {last_frame}", file=sys.stderr)
+        return 2
 
     # Suppress model-generated BGM — cross-clip music can't be coherent.
+    visual_medium = _visual_medium_for_shot(ep_dir, args.shot, args.prompt)
+    wan_site = active_wan_site(_HERE.parent)
     reference_image_map = _build_reference_image_map(
         ep_dir=ep_dir,
         shot_id=args.shot,
         media=media,
+        visual_medium=visual_medium,
+        site=wan_site,
     )
     reference_audio_map = _build_reference_audio_map(
         ep_dir=ep_dir,
         shot_id=args.shot,
         media=media,
         voice=voice,
+        site=wan_site,
     )
     render_prompt = args.prompt.rstrip()
-    if storyboard_ref_used:
-        render_prompt = _with_storyboard_reference_note(render_prompt)
     if args.raw_prompt:
         render_prompt = _insert_reference_maps(
             render_prompt,
             reference_image_map=reference_image_map,
             reference_audio_map=reference_audio_map,
         )
+        if _forbid_model_bgm(ep_dir, args.shot):
+            render_prompt = f"{render_prompt.rstrip()}\n\n{forbid_directive()}"
+        else:
+            music_directive = _long_shot_music_directive(shot_spec, zh=False)
+            if music_directive:
+                render_prompt = f"{render_prompt.rstrip()}\n\n{music_directive}"
     else:
         render_prompt = _structured_video_prompt(
             ep_dir=ep_dir,
             shot_id=args.shot,
             prompt=render_prompt,
-            duration=args.duration,
-            media=media,
-            first_frame=first_frame,
             voice=voice,
-            characters=args.characters or [],
             reference_image_map=reference_image_map,
             reference_audio_map=reference_audio_map,
+            prompt_language=prompt_language,
         )
-    has_seedance_reference_audio = (
-        provider_name == "seedance2"
-        and any(_looks_like_audio_ref(ref) for ref in media)
-    )
-    if (
-        "no background music" not in render_prompt.lower()
-        and not has_seedance_reference_audio
-    ):
-        render_prompt += " No background music."
-
     started = datetime.now(timezone.utc).isoformat()
     try:
         result = mod.render(
@@ -1041,9 +1324,16 @@ def main() -> int:
             "status": "FAILED",
             "started_at": started,
             "error": str(e),
-            "provider": provider_name,
+            "provider": provider_label,
+            "kind": args.kind,
             "prompt": args.prompt,
         }
+        # Try to extract task_id from the error message so it can be
+        # retrieved later via --retrieve.  The wan provider format is:
+        #   "wan task <32-hex> failed: ..."
+        _tid_match = re.search(r'wan task ([a-f0-9]{32}) failed', str(e))
+        if _tid_match:
+            attempt["task_id"] = _tid_match.group(1)
 
         def _append_failed(s: dict) -> None:
             entry = s.setdefault(args.shot, {
@@ -1068,8 +1358,11 @@ def main() -> int:
         "status": "SUCCEEDED",
         "started_at": started,
         "finished_at": datetime.now(timezone.utc).isoformat(),
-        "provider": provider_name,
+        "provider": provider_label,
+        "kind": args.kind,
         "model": result.get("model"),
+        "command": result.get("command"),
+        "task_id": result.get("task_id"),
         "video_path": result["video_path"],
         "last_frame_path": last_frame,
         "elapsed_s": result.get("elapsed_s"),
@@ -1095,13 +1388,17 @@ def main() -> int:
         characters = (args.characters if args.characters is not None
                       else _shot_characters(ep_dir, args.shot))
         try:
+            shot_spec = _storyboard_shot(ep_dir, args.shot)
             review = review_mod.score_clip(
                 ep_dir=ep_dir,
                 shot_id=args.shot,
                 version=version,
                 video_path=clip_path,
                 characters=characters,
-                prompt=args.prompt,
+                prompt=render_prompt,
+                narrative_purpose=shot_spec.get("narrative_purpose"),
+                narration_text=shot_spec.get("narration_text"),
+                approved_contract=_approved_contract_for_shot(ep_dir, args.shot),
                 duration=args.duration,
             )
         except Exception as e:  # never lose a render over a review crash
@@ -1109,8 +1406,22 @@ def main() -> int:
                   file=sys.stderr)
             review = {"score": None, "verdict": "ERROR", "error": str(e)}
 
+    if review is None:
+        review = {
+            "shot_id": args.shot,
+            "version": version,
+            "score": None,
+            "verdict": "SKIPPED",
+            "critique": "Optional bl-based clip review is unavailable or disabled.",
+        }
+        reviews_dir = ep_dir / "reviews"
+        reviews_dir.mkdir(parents=True, exist_ok=True)
+        (reviews_dir / f"{args.shot}-ver{version}.json").write_text(
+            json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
     if review is not None:
-        accept = review.get("verdict") == "ACCEPT"
+        accept = review.get("verdict") in {"ACCEPT", "SKIPPED"}
         winner_dst = ep_dir / "clips" / f"{args.shot}.mp4"
         if accept:
             if winner_dst.is_symlink() or winner_dst.exists():
@@ -1130,6 +1441,7 @@ def main() -> int:
             if accept:
                 entry["winner_version"] = version
                 entry["winner_path"] = str(winner_dst)
+                entry["manual_acceptance"] = False
                 entry["needs_director_rewrite"] = False
 
         _update_state(state_path, _embed_review)
@@ -1143,7 +1455,7 @@ def main() -> int:
         "video_path": result["video_path"],
         "last_frame_path": last_frame,
         "duration_s": float(args.duration),
-        "provider": provider_name,
+        "provider": provider_label,
         "model": result.get("model"),
         "elapsed_s": result.get("elapsed_s"),
     }

@@ -5,9 +5,8 @@
 """
 bl provider — subprocess wrapper around `./scripts/bl video generate|ref|edit`.
 
-Covers happyhorse-1.0-{t2v,i2v,r2v} and wan2.6-{t2v,r2v}. Wan 2.7 features
-(precise first_frame chain bridging, negative_prompt, prompt_extend) require
-the dashscope_wan27 provider — see scripts/providers/dashscope_wan27.py.
+Covers happyhorse-1.0-{t2v,i2v,r2v} and wan2.6-{t2v,r2v}. Use the wan-cli
+provider with `VIDEOGEN_WAN_VIDEO_MODEL=wan2.7` for Wan 2.7 generation.
 
 Public API:
     render(kind, prompt, media, voice, duration, out_path, extra) -> dict
@@ -63,6 +62,11 @@ _TRANSIENT_PATTERNS = (
 
 def _is_transient(stderr: str) -> bool:
     return any(p in stderr for p in _TRANSIENT_PATTERNS)
+
+
+def _clamp_duration(duration: int) -> int:
+    """Clamp to the HappyHorse duration range exposed by the bl provider."""
+    return max(3, min(15, int(duration)))
 
 
 def _run(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess:
@@ -160,9 +164,9 @@ def render(
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Bl's t2v floor is 5s, ceiling 10–15s depending on the kind.
-    # Clamp; caller (render_shot.py) already checks but defense in depth.
-    duration = max(2, min(15, int(duration)))
+    # HappyHorse's supported floor is 3s. Keep provider-specific limits here;
+    # the storyboard remains provider-agnostic.
+    duration = _clamp_duration(duration)
 
     cmd = _bl_cmd()
     if kind == "t2v":

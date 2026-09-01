@@ -1,7 +1,7 @@
 """Movie-set management — folder-per-set.
 
 Why this exists: AI video models have no cross-shot memory, so two
-shots set in the "same" location (e.g. 同福客栈大堂) often render as
+shots set in the "same" location (e.g. Riverside Inn lobby) often render as
 two completely different rooms. The fix mirrors what we already do for
 characters — pin a *reference image* of the location and feed it into
 every r2v shot in that scene.
@@ -27,17 +27,16 @@ Two-tier discovery (per episode build) — exactly the cast model:
 If the same set appears in both tiers, the episode set's images are
 *prepended* (so they are picked first as reference_image), and the
 episode set.md overrides the project one. This is exactly how a sitcom
-can keep one shared "客栈大堂" set forever, while a special episode
-("失火的客栈") drops in a charred override under the episode folder.
+can keep one shared "inn-lobby" set forever, while a special episode
+("inn-after-fire") drops in a charred override under the episode folder.
 
 Composites and ASCII-renamed singletons are written to
 ``projects/<id>/<episode>/movie_set_built/`` per episode (never mutating
 user input). Multi-image sets get a 2/4/9-pane grid PNG, identical to
 cast.
 
-Renderer integration: see ``providers/wan.py`` and
-``providers/happyhorse.py`` — when a shot's scene has ``set_id`` and
-the active provider supports r2v ``reference_image``, the set's image
+Renderer integration: see ``providers/wan_cli.py`` — when a shot's scene has
+``set_id``, the set's image
 is appended to ``media[]`` after the cast reference images.
 """
 from __future__ import annotations
@@ -437,12 +436,12 @@ SET_TEMPLATE = """\
 #
 # ⚠ HARD RULE: ONE FOLDER = ONE LIGHTING STATE.
 # AI video models read the reference image *literally* — feed a noon-lit
-# 客栈 photo into a night shot and you'll get a noon-lit dream sequence
+# noon-lit inn photo into a night shot and you'll get a noon-lit dream sequence
 # with characters acting "tired". The fix is mandatory:
 #
 #   • Same physical place, different time-of-day  → TWO folders
-#       projects/<id>/movie-set/同福客栈大堂-白天/
-#       projects/<id>/movie-set/同福客栈大堂-夜晚/
+#       projects/<id>/movie-set/riverside-inn-lobby-day/
+#       projects/<id>/movie-set/riverside-inn-lobby-night/
 #   • Same place, different season / weather       → separate folders
 #       (willow-branches-spring, snow-winter, storm-summer)
 #   • Same place, different color grade            → separate folders
@@ -484,7 +483,7 @@ weather:
 # director writes a t2v shot in this location (t2v can't take a
 # reference image, so the textual fallback matters there). Keep it
 # concrete: materials / lighting / key props / spatial outline.
-# Example: "明清木质客栈大堂, 二层木楼梯, 红灯笼, 八仙桌三张, 暖色调灯光, 白昼"
+# Example: "Historic wooden inn lobby, two-story staircase, red lanterns, three square tables, warm daytime light"
 description:
 
 # Optional: dominant colors (informational, surfaced to director).

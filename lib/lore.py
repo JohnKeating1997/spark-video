@@ -3,9 +3,9 @@
 Sits at ``projects/<id>/lore.md``. Like soul cards but project-scoped:
 *soul* answers "who is this character", *lore* answers "what world are they in".
 
-The director Skill reads lore BEFORE writing the script, then carries
-``mood_anchor`` (a single style sentence) through every shot prompt for
-visual cohesion.
+The director Skill reads lore before writing the script. ``visual_medium``
+defines the project rendering default; ``mood_anchor`` supplies compatible
+lighting, palette, contrast, and atmosphere guidance.
 """
 from __future__ import annotations
 
@@ -14,9 +14,11 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from lib.soul import _split_frontmatter  # reuse the same parser
+from lib.prompt_language import normalise_prompt_language
+from lib.prompt_compiler import VisualMedium, require_visual_medium
 
 LORE_FILENAME = "lore.md"
 
@@ -59,19 +61,23 @@ class LoreFront(BaseModel):
     genre: list[str] = Field(default_factory=list)
     era: str | None = None
     location: str | None = None
+    prompt_language: str = Field(
+        default="auto",
+        description="Creative prompt language: auto, zh, or en",
+    )
 
     # visual / camera direction
+    visual_medium: VisualMedium | None = None
     visual_style: str | None = None
     camera_language: str | None = None
     palette: list[str] = Field(default_factory=list)
 
-    # The single style sentence the director Skill should append to EVERY
-    # shot prompt for cohesion. Keep it short (<60 chars).
+    # Medium-compatible lighting/palette/contrast/atmosphere baseline.
     mood_anchor: str | None = None
 
     # ── Shanyin fusion: director tone system ──────────────────────────────
     # One-sentence dramatic action: the *engine* of the story.
-    # Example: "钱夫人 keeps provoking 郭芙蓉 to save face, until one punch ends it"
+    # Example: "Madam Quinn keeps provoking Grace Ford to save face, until one punch ends it"
     dramatic_action: str | None = None
 
     # Visual motif system; richer than mood_anchor.
@@ -94,6 +100,18 @@ class LoreFront(BaseModel):
     default_shot_duration: int | None = None
     default_resolution: str | None = None
     default_ratio: str | None = None
+
+    @field_validator("prompt_language", mode="before")
+    @classmethod
+    def _normalise_prompt_language(cls, value: Any) -> str:
+        return normalise_prompt_language(value)
+
+    @field_validator("visual_medium", mode="before")
+    @classmethod
+    def _normalise_visual_medium(cls, value: Any) -> VisualMedium | None:
+        if value is None or not str(value).strip():
+            return None
+        return require_visual_medium(value)
 
 
 @dataclass
@@ -147,8 +165,11 @@ def render_for_prompt(lore: Lore) -> str:
     if head_bits:
         parts.append(f"# World: {' · '.join(head_bits)}")
 
+    parts.append(f"- Prompt language: {f.prompt_language}")
+    if f.visual_medium:
+        parts.append(f"- Visual medium: {f.visual_medium}")
     if f.mood_anchor:
-        parts.append(f"- Style anchor (append to every prompt): \"{f.mood_anchor}\"")
+        parts.append(f"- Mood baseline: \"{f.mood_anchor}\"")
     if f.dramatic_action:
         parts.append(f"- Core dramatic action: {f.dramatic_action}")
     if f.director_reference:
@@ -198,26 +219,29 @@ LORE_TEMPLATE = """\
 ---
 # Story bible for {title}. Fill what you know; leave the rest blank.
 # The director Skill reads this BEFORE writing the script, and carries
-# mood_anchor through every shot prompt for visual cohesion.
+# visual_medium and compatible mood guidance through the production.
 
 title: {title}
 genre: []          # e.g. [wuxia comedy, sitcom] / [sci-fi, thriller]
 era:               # setting, e.g. Ming-era alt-history / 2049 near-future / Victorian steampunk
 location:          # primary location, e.g. Qixia Town · Tongfu Inn
+prompt_language: auto  # auto | zh | en; auto follows the source text
 
 # --- visual / camera direction ---
-visual_style:      # one-line, e.g. warm tones, comedic lighting, slightly exaggerated body language
+visual_medium:      # live_action | 2d_animation | 3d_animation | stop_motion | mixed
+visual_style:      # concrete treatment, e.g. stylized 3D CG, soft PBR materials, graphic facial proportions
 camera_language:   # e.g. medium close-ups, occasional big close-ups for expressions, pans over cuts
 palette: []        # color names or hex, e.g. [warm-amber, faded-red, ink-black]
 
-# --- mood_anchor: single sentence appended to EVERY shot prompt ---
-# Keep it short, concrete, and constant across the whole project.
-# Example: "Ming-era alt-history, comedy lighting, warm tones, slightly exaggerated body language"
+# --- mood_anchor: medium-compatible visual atmosphere baseline ---
+# Keep it short and limited to lighting, palette, contrast, texture, and mood.
+# Never include a named character's face, hair, costume, accessories, or body traits.
+# Example: "deep indigo shadows, moonlight silver, restrained warm practical light, soft atmospheric haze"
 mood_anchor:
 
 # --- Shanyin fusion: director tone system (optional, blank for back-compat) ---
 # One-sentence core dramatic action — the engine of the story.
-# Example: "钱夫人 keeps provoking 郭芙蓉 to save face, until one punch ends it"
+# Example: "Madam Quinn keeps provoking Grace Ford to save face, until one punch ends it"
 dramatic_action:
 
 # Visual motif system — story symbols richer than mood_anchor.
@@ -283,6 +307,6 @@ The LLM reads this before writing the script.)
 ## Visual motif notes (optional)
 
 (Briefly explain what each motif means in the story. E.g. "wrung apron" carries
-钱夫人's tension and vanity — each appearance reinforces her need to keep
+Madam Quinn's tension and vanity — each appearance reinforces her need to keep
 face while already feeling guilty.)
 """
