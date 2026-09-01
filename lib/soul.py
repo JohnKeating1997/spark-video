@@ -2,22 +2,22 @@
 
 A soul card is a markdown file with optional YAML front-matter:
 
-    cast/钱夫人.md
+    cast/madam-quinn.md
     ---
-    name: 钱夫人
+    name: Madam Quinn
     archetype: domineering villain / comic relief
     voice_style: loud, drawn-out tones, rhetorical questions
-    catchphrases: ["嗯哼? 你再说一遍?"]
+    catchphrases: ["Oh? Would you care to repeat that?"]
     mannerisms: [hands on hips, poking chest with fan]
     relationships:
-      - target: 佟掌柜
+      - target: Innkeeper Taylor
         type: sworn rival
     do: [always talk over others at big events]
     dont: [never actually kill anyone]
     ---
 
     # Character bio
-    钱夫人 was originally the daughter of a Jiangnan silk merchant...
+    Madam Quinn was originally the daughter of a prosperous silk merchant...
 
 The YAML half is structured (validated below). The markdown half is free-form
 narrative — fed verbatim into the director Skill so the LLM gets full context.
