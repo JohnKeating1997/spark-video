@@ -30,14 +30,13 @@ SKILL.md                     ← root router skill (runtime entry point + instal
 README.md / README.zh.md     ← user-facing intro (EN / Chinese)
 docs/architecture.md         ← the "why" — design philosophy & consistency model
 references/
-  spark-video-producer/      ← producer (one-shot orchestrator, the 4+2 gates)
-  spark-video-screenwriter/  ← premise → scene-NN.md
-  spark-video-director/      ← scene-NN.md → scene-NN.json (storyboard fragment)
-  spark-video-cast/          ← cast / movie-set / prop reference-asset generation
-  spark-video-vfx-review/    ← opt-in pre-render static quality gate
-  spark-video-clip-review/   ← post-render scorer + retry state machine (+ rubric.md)
+  spark-video-screenwriter.md ← premise → scene-NN.md
+  spark-video-director.md     ← scene-NN.md → scene-NN.json (storyboard fragment)
+  spark-video-cast.md         ← cast / movie-set / prop reference-asset generation
+  spark-video-vfx-review.md   ← opt-in pre-render static quality gate
+  spark-video-clip-review/    ← post-render scorer + retry instructions and rubric
 scripts/                     ← deterministic tools (the "tools" the skills call)
-  bl                         ← REQUIRED wrapper around the `bl` CLI (logs every call)
+  bl                         ← required wrapper for `bl` provider/TTS/review calls; logs every call
   doctor.sh                  ← dependency check (bl + ffmpeg + uv + python3.10+)
   storyboard.py              ← compile / validate / estimate / graph
   render_shot.py             ← render one shot; auto-scores + promotes winner; owns shots_state.json
@@ -45,7 +44,7 @@ scripts/                     ← deterministic tools (the "tools" the skills cal
   gate.py                    ← deterministic gate verifier (verify-don't-constrain)
   stitch.py                  ← concat + TTS narration + BGM mix → final mp4
   scaffold.py · build_viewer.py · tts_qwen.py · install-deps.sh · install-hooks.sh · pre-commit
-  providers/                 ← pluggable backends: bl.py (default), dashscope_wan27.py
+  providers/                 ← video backends: wan_cli.py (default; Wan 3.0/2.7), bl.py (HappyHorse), seedance2.py
 lib/                         ← Pydantic data models + infra (storyboard, lore, cast,
                                movie_set, prop, soul, render_graph, state, bgm, config,
                                review, …)
@@ -83,10 +82,11 @@ There is no test suite or `pyproject.toml`. The closest things to CI are:
 
 - `uv run scripts/storyboard.py validate` — schema/lint check on a storyboard.
 - `uv run scripts/gate.py check <script|storyboard|render|final|all>` —
-  cross-artifact completeness check (every clip scored + won, viewer fresh,
+  cross-artifact completeness check (every clip won and review recorded as
+  scored or explicitly skipped, viewer fresh,
   …). stdlib-only; `--json` for a dashboard. This is the deterministic
   backstop for "an agent skipped a step".
-- `./scripts/doctor.sh --quick --json` — fast environment + sub-skill
+- `./scripts/doctor.sh --quick --json` — fast environment + stage-reference
   presence check; `--install-plan --json` suggests repair commands.
 
 Run both after changing `lib/` models or `scripts/storyboard.py`.
@@ -144,7 +144,7 @@ The pre-commit hook (`scripts/pre-commit`) blocks these, but know them:
 
 | You want to change… | Edit here |
 |---|---|
-| How a stage *thinks* (creative judgment, gates, contracts) | the relevant `references/*/SKILL.md` |
+| How a stage *thinks* (creative judgment, gates, contracts) | the relevant bundled instruction file under `references/` |
 | Deterministic behavior (compile, render, stitch, scoring math) | `scripts/*.py` |
 | Clip scoring mechanics (omni call, parse, average, promote) | `lib/review.py` |
 | Gate completeness checks (what must exist before a gate) | `scripts/gate.py` |

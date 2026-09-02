@@ -1,4 +1,4 @@
-Spark-Video breaks "making an AI short episode" into 6 independent Skills and a set of deterministic scripts, wired into a **script → storyboard → render → review → stitch** pipeline. It tackles two hard problems every long-form video AIGC project must face:
+Spark-Video uses one producer Skill, five bundled stage references, and a set of deterministic scripts, wired into a **script → storyboard → render → review → stitch** pipeline. It tackles two hard problems every long-form video AIGC project must face:
 
 1. **Cross-shot consistency** — faces, sets, props, and art style must not drift from clip to clip.
 2. **Narrative unity** — 20+ independently generated 8s clips must assemble into a logically coherent, thematically focused story.
@@ -7,18 +7,20 @@ Project entry points: [SKILL.md](https://github.com/JohnKeating1997/spark-video/
 
 ## 3.1 It Is First a "Skill", Not a Standalone CLI
 
-Spark-Video's entire product shape is a stack of `SKILL.md` files plus deterministic scripts:
+Spark-Video's product shape is one root `SKILL.md`, ordinary Markdown stage references, and deterministic scripts:
 
 ```
 videoGen/
 ├── SKILL.md                                ← router / root Skill
 ├── references/
-│   ├── spark-video-producer/SKILL.md       ← producer (one-shot production)
-│   ├── spark-video-screenwriter/SKILL.md   ← screenwriter
-│   ├── spark-video-director/SKILL.md       ← director / storyboarder
-│   ├── spark-video-cast/SKILL.md           ← art (cast/set/prop)
-│   ├── spark-video-vfx-review/SKILL.md     ← pre-render static quality gate
-│   └── spark-video-clip-review/SKILL.md    ← post-render QC + re-render state machine
+│   ├── spark-video-screenwriter.md         ← screenwriter instructions
+│   ├── spark-video-director.md             ← director / storyboarder instructions
+│   ├── spark-video-cast.md                 ← art instructions (cast/set/prop)
+│   ├── spark-video-vfx-review.md           ← pre-render static quality gate
+│   └── spark-video-clip-review/
+│       ├── instructions.md                 ← post-render QC + retry state machine
+│       ├── rubric.md
+│       └── rewrite-system.md
 ├── scripts/   ← pure functional scripts: render_shot.py · storyboard.py · stitch.py …
 └── lib/       ← data models (Pydantic) + engineering infrastructure
 ```
@@ -27,18 +29,18 @@ This shape delivers three direct benefits:
 
 ### 3.1.1 Framework-Agnostic — Loadable by Any Mainstream Agent Framework
 
-`SKILL.md` is plain Markdown plus a YAML front-matter block, with no runtime binding. Any Agent that follows a "read prompt → call tools" protocol can plug in:
+The root `SKILL.md` and its Markdown references have no runtime binding. Any Agent that follows a "read prompt → call tools" protocol can plug in:
 
 - **Claude Code** / **Claude Agent SDK** — native Skill support.
-- **AgentScope** — treat each `SKILL.md` as a system prompt segment; register scripts as tools.
+- **AgentScope** — treat each stage reference as a system prompt segment; register scripts as tools.
 - **LangGraph / AutoGen / custom Agents** — same pattern: Skills are prompts, scripts are shell tools.
-- **Cursor / Continue and other IDE assistants** — feed `references/*/SKILL.md` directly into context.
+- **Cursor / Continue and other IDE assistants** — feed the relevant file under `references/` directly into context.
 
 Because there is no runtime binding, **upgrading the Agent framework does not require changing this project; swapping the base model does not either**.
 
 ### 3.1.2 The Agent Has Autonomy — Not a Fixed Script Pipeline
 
-`SKILL.md` describes **judgment criteria and contracts**, not a rigid step sequence. For example, [spark-video-clip-review/SKILL.md](https://github.com/JohnKeating1997/spark-video/blob/main/references/spark-video-clip-review/SKILL.md) says:
+Stage references describe **judgment criteria and contracts**, not a rigid step sequence. For example, [spark-video-clip-review/instructions.md](https://github.com/JohnKeating1997/spark-video/blob/main/references/spark-video-clip-review/instructions.md) says:
 
 ```
 while ver <= max_retry:
@@ -116,9 +118,15 @@ The four "user confirmation gates" sit at the four irreversible cost checkpoints
 | GATE 0 | mode (drama short-form / narration voiceover) |
 | GATE 0.5 | BGM mode (off / global / scene) |
 | GATE 1 | `script.md` — story must pass before storyboarding |
-| GATE 2 | `storyboard.json` + budget — storyboard/cost must pass before render |
-| GATE 3 | per-shot winners — every clip must pass before stitch |
-| GATE 4 | `final.mp4` — final cut review |
+| GATE 2 | `storyboard.json` + budget + approved shot-contract fingerprints — material changes require renewed approval |
+| GATE 3 | per-shot winners — every clip must pass generic quality blockers before stitch |
+| GATE 4 | `final.mp4` — final cut, target duration, and viewer freshness |
+
+Audio source is a separate episode contract, not a side effect of story mode.
+`presenter_voiceover` strips model audio from every clip and uses one presenter
+and one post-TTS voice; `native_dialogue` keeps Wan-generated speech; `hybrid`
+is explicit-only and declares a source per shot. This prevents a narration-led
+episode from alternating unrelated TTS and model voices by accident.
 
 `shots_state.json` is the pipeline's **single source of truth** — only [`scripts/render_shot.py`](https://github.com/JohnKeating1997/spark-video/blob/main/scripts/render_shot.py) writes it, serialized with `flock`; every other script reads. That constraint prevents the race where two parallel render processes append attempts and overwrite each other.
 
@@ -148,7 +156,7 @@ flowchart LR
 
 ### 3.3.1 Three Pillars: Cast / Movie-Set / Prop — "One Folder = One Visual State"
 
-This is the project's hardest rule, written into [references/spark-video-cast/SKILL.md](https://github.com/JohnKeating1997/spark-video/blob/main/references/spark-video-cast/SKILL.md):
+This is the project's hardest rule, written into [references/spark-video-cast.md](https://github.com/JohnKeating1997/spark-video/blob/main/references/spark-video-cast.md):
 
 | Pillar | What it locks | Folder pattern | State splitting |
 |---|---|---|---|
@@ -179,7 +187,7 @@ If the prompt says "white dress shirt" but the cast reference shows a black hood
 
 ### 3.3.3 Multiple Reference Images of One Character → Auto Grid; Never Mix Across Characters
 
-[`lib/cast.py`](https://github.com/JohnKeating1997/spark-video/blob/main/lib/cast.py) `_build_grid`: when a character folder has ≥2 reference images, they are composited into one grid PNG for r2v (Wan and HappyHorse both support multi-panel references).
+[`lib/cast.py`](https://github.com/JohnKeating1997/spark-video/blob/main/lib/cast.py) `_build_grid`: when a character folder has ≥2 reference images, they are composited into one grid PNG for Wan reference-to-video generation.
 
 ```python
 # lib/cast.py:207-235
@@ -214,6 +222,22 @@ forbidden: [真实历史人物姓名, 血腥镜头]
 
 Each shot's actual prompt = `scene description + action + emotion + mood_anchor`. That short phrase keeps color temperature and art direction consistent across N shots in an episode — even if single-shot details drift, the overall "tone" stays coherent.
 
+The visual contract deliberately separates three questions:
+
+| Field | Question it answers | Valid content |
+|---|---|---|
+| `visual_medium` | What physical/rendering medium is this production? | `live_action`, `2d_animation`, `3d_animation`, `stop_motion`, `mixed` |
+| `visual_style` | What concrete production treatment is used inside that medium? | modeling proportions, linework, materials, shading, rendering finish |
+| `mood_anchor` | What atmosphere is shared by every asset and shot? | lighting, palette, contrast, texture, atmosphere only |
+
+`mood_anchor` must never contain a named character's identity, hair, costume,
+accessories, body type, or age. Those are cast-card facts. A recurring costume
+detail that the camera should emphasize belongs in
+`imagery_system.highlight_elements`, not in a global string injected into every
+character asset. Legacy `illustration` is accepted and normalized to
+`2d_animation`; bare `animation` is rejected because it cannot distinguish 2D,
+3D, and stop motion.
+
 ### 3.3.6 Last-Frame Continuation: Physical Continuity Between Shots
 
 After each shot renders, [`scripts/render_shot.py`](https://github.com/JohnKeating1997/spark-video/blob/main/scripts/render_shot.py) extracts the last frame with ffmpeg:
@@ -227,7 +251,22 @@ def _extract_last_frame(video_path: Path, frame_path: Path) -> bool:
     )
 ```
 
-If the next shot has `use_prev_last_frame_as_first=true`, the renderer feeds that last frame as `first_frame` to the video model (i2v / Wan2.7 path). That keeps "郭芙蓉's outstretched hand" in the same position in the next shot.
+If the next shot has `use_prev_last_frame_as_first=true`, Wan 2.7 uses its
+literal frame command while Wan 3.0 appends the previous frame to the unified
+Omni image references. The Wan3 prompt identifies it as the target opening
+composition and identifies an optional authored ending-frame image as the
+target final composition, asking for a continuous transition between them.
+Ordinary static/cast/set/prop references remain attached for consistency.
+
+Static storyboard prompts inherit a structured `lore.visual_medium` project
+default: `live_action`, `2d_animation`, `3d_animation`, `stop_motion`, or
+`mixed`. A shot uses `animatic_style` only to override that default. Legacy
+`illustration` data normalizes to `2d_animation`; ambiguous `animation` is
+rejected so a CG project cannot silently become a flat illustration project.
+This prevents an episode-wide mood anchor from restyling a referenced
+character. Cast references remain authoritative for identity and appearance;
+the selected canonical medium controls the whole frame, while `mixed` requires
+each crossing media boundary to be named explicitly by the shot.
 
 ### 3.3.7 Fixed Media List Order for r2v Renders
 
@@ -239,7 +278,7 @@ If the next shot has `use_prev_last_frame_as_first=true`, the renderer feeds tha
 --voice character.mp3
 ```
 
-The fixed **cast → set → prop** order is convention in [references/spark-video-director/SKILL.md](https://github.com/JohnKeating1997/spark-video/blob/main/references/spark-video-director/SKILL.md), so the model's priority for subject — environment — object stays stable.
+The fixed **cast → set → prop** order is convention in [references/spark-video-director.md](https://github.com/JohnKeating1997/spark-video/blob/main/references/spark-video-director.md), so the model's priority for subject — environment — object stays stable.
 
 ### 3.3.8 Post-Render cast_match Scored Independently
 
@@ -269,7 +308,7 @@ flowchart TB
     DIR --> SceneJSON["scenes/scene-NN.json<br/>Scene.description (50-150 chars)<br/>must weave into every shot prompt"]
     SceneJSON --> Shot["Shot model<br/>narrative_purpose required<br/>shot_group_role: 建立/递进/反应/对比/收尾"]
     Shot --> Render
-    Render --> Review["6-axis review<br/>logic / proportion / physics<br/>style / cast_match / dialog_attribution"]
+    Render --> Review["6-axis review + generic blockers<br/>logic / proportion / physics<br/>style / cast_match / dialog_attribution"]
     Review --> Stitch["stitch.py<br/>concat in storyboard order<br/>+ TTS narration<br/>+ BGM (EBU R128 normalize)"]
 ```
 
@@ -381,7 +420,9 @@ flowchart LR
 [`scripts/stitch.py`](https://github.com/JohnKeating1997/spark-video/blob/main/scripts/stitch.py) is more than ffmpeg concat. In `storyboard.json` order it:
 
 1. Locates each shot's winner version.
-2. For `role=narration` shots: calls `bl speech synthesize` for TTS → strips original audio → muxes new track.
+2. Applies the episode `AudioPlan`: `speech_source=post_tts` calls
+   `./scripts/bl speech synthesize`, replaces model audio, and muxes the fixed
+   episode voice; other shots follow `model_audio_policy`.
 3. Concats (optional crossfade).
 4. If `storyboard.bgm` is configured, mixes BGM with EBU R128-normalized levels (per-scene or global mode).
 
@@ -412,7 +453,7 @@ flowchart LR
         Sets["Movie Sets<br/>(each set reference + description)"]
         Props["Props<br/>(key prop images + states)"]
         BGM["BGM<br/>(background music config)"]
-        Shots["Shots<br/>(every version per shot<br/>+ 6-axis scores<br/>+ winner highlight)"]
+        Shots["Shots<br/>(static storyboard reference<br/>+ every generated version<br/>+ scores + winner highlight)"]
         Calls["Model calls<br/>(all bl call prompt logs)"]
     end
 ```
@@ -425,7 +466,7 @@ What each section is for:
 | **Premise / Lore / Direction** | Initial input and director brief | See *why* the film looks like this |
 | **Script / Scenes** | Screenwriter output + structured scene JSON | Compare script to shot execution |
 | **Cast / Sets / Props** | All three pillars' reference images + soul cards | See the consistency "foundation" at a glance |
-| **Shots** | **Every attempt version** per shot (not just winner) + 6-axis scores + critique | See where the model failed, why, and how it finally passed |
+| **Shots** | Four static storyboard candidates with one Gate-locked selection + **every attempt version** per shot (not just winner) + 6-axis scores + critique | Choose the intended composition before rendering, compare it with every generated result, then see where the model failed, why, and how it finally passed |
 | **Model calls** | Full `logs/model_calls.jsonl` | Every prompt is traceable — gold for prompt engineering |
 
 All media uses relative paths — **no copies, no duplicate storage** — one directory is a complete, shareable, archivable "production project".
@@ -506,7 +547,7 @@ Concrete evolution:
 - **When in-shot consistency is model-guaranteed**: cast/set/prop pillars do not vanish — **scope widens** — from "feed every shot" to "feed every scene", with less last-frame chaining and less repeated environment text inside a scene.
 - **When one prompt drives minutes of video**: structured narrative fields like `narrative_purpose` and `shot_group_role` matter more — the model needs a longer "script" to sustain a long shot; structured fields are the micro-screenplay the model reads.
 - **chain-DAG upgrades to scene-DAG**: today groups split on `use_prev_last_frame_as_first` (physical continuity); future split on "is this narrative unit independent". But [`lib/render_graph.py`](https://github.com/JohnKeating1997/spark-video/blob/main/lib/render_graph.py) data structures need not change — serial semantics inside a group shift from "last-frame link" to "story continuity".
-- **Provider abstraction pays off more**: [`scripts/providers/`](https://github.com/JohnKeating1997/spark-video/tree/main/scripts/providers) plugin layout today supports bl, wan27, and seedance2; when Sora API, Veo, Kling, 可灵 2, Runway Gen-4 open up, **provider abstraction becomes the most valuable layer** — same `storyboard.json` on different models, user picks. Spark-Video is already set up for that.
+- **Provider abstraction pays off more**: [`scripts/providers/`](https://github.com/JohnKeating1997/spark-video/tree/main/scripts/providers) defaults to Wan 3.0 through wan-cli while also shipping `bl`/HappyHorse and Ark Seedance 2 adapters. Wan 2.7 is selected as a model inside wan-cli rather than exposed as a duplicate provider. The adapters share the same generic `storyboard.json` contract; concrete model names and payloads remain provider-local. The `bl` wrapper is also reused for narration TTS and optional clip review.
 - **viewer.html evolves into a creation IDE**: today read-only dashboard; tomorrow "Premiere/DaVinci substitute for long-form generative video" — all assets, versions, prompts, review scores in one page; in-editor re-render and remix.
 
 Deeper bet: **video model capability approaches an "infinite sound stage", but creation stays a finite engineering problem**. A 10-minute short does not need "a model that generates 10 minutes" — it needs clear lore, precise scene splits, fast failure ID, calm version comparison. Those are engineering problems, not model problems. Spark-Video bets that line, so whatever the base model becomes, the job stays the same — **translate human creative intent into structured constraints the model can execute, and digest model uncertainty inside an engineering loop**.

@@ -1,24 +1,18 @@
 """Storyboard schema — provider-agnostic.
 
-Each shot will be turned into one DashScope video-synthesis request by
+Each shot will be turned into one Wan video-synthesis request by
 ``videogen render``. The shot itself only declares a generic *kind*
 (``t2v`` | ``i2v`` | ``r2v``). Mapping to a concrete model name is the
 provider's job — see ``scripts/providers/``.
 
-Per-kind duration ceilings (worst case across providers; the active
-provider may impose a tighter cap of its own):
-
-    t2v  → 2..15s
-    i2v  → 2..15s
-    r2v  → 2..15s
-
-We default each shot to 15s — the max for our active models — to minimize
-cuts and maximize cross-shot continuity. Override per shot if you genuinely
-need a quick beat. Each provider also enforces its own duration *floor*
-(Wan: 2s, HappyHorse: 3s).
+The provider/model contract owns duration: Wan3.0 supports 2..30s while
+legacy Wan2.7 supports 2..15s. The provider-agnostic Shot shape therefore
+allows up to 30s, and Storyboard validates against ``video_model``. Duration is
+required so the Director Agent must choose it from content rather than inherit
+a preset. Shots longer than 15s require an explicit timed beat plan.
 
 Backward-compat: if ``Shot`` JSON still carries the old ``model`` field
-with a ``wan2.7-*`` or ``happyhorse-1.0-*`` literal, we transparently
+with a ``wan2.7-*`` literal, we transparently
 translate it to the new ``kind`` field on validate.
 """
 from __future__ import annotations
@@ -26,6 +20,9 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from lib.cinematic import cinematic_budget
+from lib.prompt_compiler import VisualMedium, require_visual_medium
 
 
 def _is_cjk_char(ch: str) -> bool:
@@ -63,57 +60,159 @@ def estimate_narration_audio_seconds(
 
 
 ShotKind = Literal["t2v", "i2v", "r2v"]
-ProviderName = Literal["bl", "wan27", "seedance2"]
+AnimaticStyle = VisualMedium
+ProviderName = Literal["wan-cli"]
 PROVIDER_ALIASES = {
-    "happyhorse": "bl",
-    "wan": "wan27",
-    "dashscope_wan27": "wan27",
-    "seedance": "seedance2",
+    "wan": "wan-cli",
 }
 
-# Episode-level mode. ``drama`` (default): the video model generates both
-# picture AND audio (including dialog / voiceover / sound effects) from
-# the shot prompt — the director must write spoken lines into the prompt
-# so the model produces them. No post-production TTS.
-# ``narration`` is the "10-min recap" mode — short visual beats whose
-# original audio is stripped and replaced by a qwen3-tts-flash voiceover
-# synthesised from ``Shot.narration_text``.
+ShotGroupRole = Literal[
+    "establish",
+    "progression",
+    "reaction",
+    "contrast",
+    "resolution",
+]
+_SHOT_GROUP_ROLE_ALIASES = {
+    "establish": "establish",
+    "progress": "progression",
+    "progression": "progression",
+    "reaction": "reaction",
+    "contrast": "contrast",
+    "close": "resolution",
+    "closure": "resolution",
+    "resolution": "resolution",
+    # Legacy Chinese storyboard values. Unicode escapes keep the schema and
+    # generated documentation English-only while preserving read compatibility.
+    "\u5efa\u7acb": "establish",
+    "\u9012\u8fdb": "progression",
+    "\u53cd\u5e94": "reaction",
+    "\u5bf9\u6bd4": "contrast",
+    "\u6536\u5c3e": "resolution",
+}
+
+_VAGUE_NARRATIVE_PURPOSES = {
+    "",
+    "show conflict",
+    "advance the plot",
+    "advance plot",
+    "move the story forward",
+    "establish the scene",
+    "build atmosphere",
+    "show emotion",
+    "tbd",
+    "todo",
+    # Match legacy Chinese content without making Chinese the canonical output.
+    "\u5c55\u73b0\u51b2\u7a81",
+    "\u63a8\u8fdb\u5267\u60c5",
+    "\u63a8\u8fdb\u6545\u4e8b",
+    "\u5efa\u7acb\u573a\u666f",
+    "\u6e32\u67d3\u6c14\u6c1b",
+    "\u8868\u73b0\u60c5\u7eea",
+}
+
+# Episode-level story format only. Audio source is owned independently by
+# ``AudioPlan``; legacy role/narration fields are migrated for compatibility.
 EpisodeMode = Literal["drama", "narration"]
+VideoModel = Literal["wan3.0", "wan2.7"]
+AudioMode = Literal["presenter_voiceover", "native_dialogue", "hybrid"]
+ModelAudioPolicy = Literal["strip_all", "keep", "per_shot"]
+SubtitleMode = Literal["off", "post"]
+SpeechSource = Literal["post_tts", "model", "none"]
+VisualSpeechMode = Literal["voiceover", "on_camera", "none"]
 
 # Per-shot role. In drama-mode storyboards every shot must be ``drama``.
 # In narration-mode storyboards a shot can be either ``narration`` (TTS
 # post-pass replaces audio) or ``drama`` (the regular long-form path).
 ShotRole = Literal["drama", "narration"]
+TransitionType = Literal[
+    "continuous_action",
+    "match_action",
+    "shot_reverse_shot",
+    "same_scene_cut",
+    "establishing_cut",
+    "time_or_location_jump",
+    "montage",
+    "hard_cut",
+]
 
 # Per-kind worst-case duration ceiling. Provider-specific ceilings live on
 # the provider class itself; this is the schema-level fallback.
-KIND_MAX_DURATION: dict[str, int] = {"t2v": 15, "i2v": 15, "r2v": 15}
-DEFAULT_DURATION = 15
+ABSOLUTE_MAX_DURATION = 30
 DURATION_FLOOR = 2
 
 # Legacy provider-specific model strings that may still appear in old
 # ``storyboard.json`` files. Mapped to (kind, provider) on read so the
 # whole pipeline keeps working without manual migration.
 LEGACY_MODEL_TO_KIND: dict[str, tuple[ShotKind, ProviderName]] = {
-    "wan2.7-r2v":              ("r2v", "wan27"),
-    "wan2.7-i2v-2026-04-25":   ("i2v", "wan27"),
-    "wan2.7-t2v-2026-04-25":   ("t2v", "wan27"),
-    "happyhorse-1.0-r2v":      ("r2v", "bl"),
-    "happyhorse-1.0-i2v":      ("i2v", "bl"),
-    "happyhorse-1.0-t2v":      ("t2v", "bl"),
+    "wan2.7-r2v":              ("r2v", "wan-cli"),
+    "wan2.7-i2v-2026-04-25":   ("i2v", "wan-cli"),
+    "wan2.7-t2v-2026-04-25":   ("t2v", "wan-cli"),
 }
+
+
+class ShotBeat(BaseModel):
+    start_s: int = Field(ge=0)
+    end_s: int = Field(gt=0)
+    action: str = Field(min_length=1)
+
+
+class ShotTransition(BaseModel):
+    """Selective visual relationship between this shot and its predecessor."""
+
+    type: TransitionType
+    preserve: list[str] = Field(default_factory=list)
+    allow_change: list[str] = Field(default_factory=list)
+
+    @field_validator("preserve", "allow_change")
+    @classmethod
+    def _normalize_attributes(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in values:
+            item = str(value).strip()
+            if item and item not in normalized:
+                normalized.append(item)
+        return normalized
+
+    @model_validator(mode="after")
+    def _attributes_do_not_conflict(self) -> "ShotTransition":
+        overlap = set(self.preserve) & set(self.allow_change)
+        if overlap:
+            raise ValueError(
+                "transition attributes cannot be both preserved and allowed "
+                f"to change: {', '.join(sorted(overlap))}"
+            )
+        return self
 
 
 class Shot(BaseModel):
     id: str = Field(description="shot id, e.g. 'S01-001' (scene-shot)")
     scene: str = Field(description="logical scene id, e.g. 'S01'")
     duration: int = Field(
-        default=DEFAULT_DURATION,
+        ...,
         ge=DURATION_FLOOR,
-        le=15,
-        description="seconds. Default = 15. Auto-clamped to provider ceiling/floor at render time.",
+        le=ABSOLUTE_MAX_DURATION,
+        description=(
+            "Agent-selected integer seconds. Choose the shortest duration that "
+            "fits the content. Wan3.0 supports up to 30; legacy Wan2.7 is "
+            "limited to 15 and is validated at Storyboard level."
+        ),
     )
-    prompt: str = Field(description="video prompt — describe action, camera, mood")
+    prompt: str = Field(description="visual action prompt — performance, lighting, and atmosphere")
+    camera_path: str | None = Field(
+        default=None,
+        description=(
+            "Explicit camera trajectory from opening framing through movement "
+            "to the final camera position. Keep separate from subject action."
+        ),
+    )
+    end_composition: str | None = Field(
+        default=None,
+        description=(
+            "The intended final-frame composition: subject placement, scale, "
+            "gaze/action state, foreground/background, and visual handoff."
+        ),
+    )
     animatic_prompt: str | None = Field(
         default=None,
         description=(
@@ -123,33 +222,40 @@ class Shot(BaseModel):
             "instructions that should be simplified for a comic-style preview."
         ),
     )
+    animatic_style: AnimaticStyle | None = Field(
+        default=None,
+        description=(
+            "Optional static-preview medium override: live_action, "
+            "2d_animation, 3d_animation, stop_motion, or mixed. Mixed shots "
+            "must define each element's medium explicitly in animatic_prompt."
+        ),
+    )
     negative_prompt: str | None = Field(
         default=None,
         description=(
-            "Optional negative prompt. Honored by Wan only — HappyHorse "
-            "ignores it (the render driver logs a warning)."
+            "Optional negative prompt. Providers may translate recognized "
+            "quality terms into safe positive guidance; unsupported or "
+            "sensitive terms are not forwarded verbatim."
         ),
     )
 
     # ── Shanyin fusion ──────────────────────────────────────────
     # Why this shot exists in the story. Specific to visual means
-    # (e.g. "low-angle push-in to amplify 钱夫人's superiority"), not vague labels
+    # (e.g. "low-angle push-in to amplify Madam Quinn's superiority"), not vague labels
     # (e.g. "show conflict"). The CLI doesn't render this — it's metadata for
     # the director's own discipline + VFX reviewer's quality gate.
     narrative_purpose: str | None = Field(
         default=None,
         description=(
             "Shanyin fusion: required on every shot. Be specific about "
-            "audiovisual means; avoid empty labels like '展现冲突'."
+            "audiovisual means; avoid empty labels like 'show conflict'."
         ),
     )
     # Optional shot-group affiliation (Shanyin "shot group" concept). Shots
     # in the same group jointly complete one narrative unit (montage /
     # progression / cause-effect / contrast group).
     shot_group_id: str | None = Field(default=None, description="e.g. 'G01'")
-    shot_group_role: Literal[
-        "建立", "递进", "反应", "对比", "收尾"
-    ] | None = None
+    shot_group_role: ShotGroupRole | None = None
     # ──────────────────────────────────────────────────────
 
     # Character references — names must match cast.json
@@ -172,6 +278,14 @@ class Shot(BaseModel):
     )
 
     # Continuity
+    transition_from_previous: ShotTransition | None = Field(
+        default=None,
+        description=(
+            "Director-selected relationship to the preceding shot. Only "
+            "continuous_action uses the preceding final frame as this shot's "
+            "first frame; other types preserve only the declared attributes."
+        ),
+    )
     use_prev_last_frame_as_first: bool = Field(
         default=True,
         description="If true, ffmpeg extracts last frame of previous successful shot and feeds as first_frame.",
@@ -197,39 +311,59 @@ class Shot(BaseModel):
             "Per-shot movie-set override. Falls back to "
             "``Scene.set_id`` when omitted. Use this when one logical "
             "scene legitimately spans multiple location/lighting states "
-            "(common in narration mode: 工地·夜 → 婚车·日 → 酒店·黄昏 are "
+            "(common in narration mode: construction-site-night → wedding-car-day → hotel-dusk are "
             "three beats inside one scene, each needs its own set image). "
             "**One set folder = one lighting state**: never reuse a "
-            "daytime 客栈 set for a nighttime 客栈 shot — scaffold a second set "
+            "daytime inn set for a nighttime inn shot — scaffold a second set "
             "instead. Setting set_id to empty string ('') explicitly "
             "disables the fallback for this shot."
         ),
     )
 
-    # ── narration mode ────────────────────────────────────────────────────
+    # ── legacy narration compatibility ───────────────────────────────────
     role: ShotRole = Field(
         default="drama",
         description=(
-            "Shot role. ``drama`` (default) = the video model generates "
-            "both picture and audio from the prompt; dialog / voiceover "
-            "must be written into the prompt. ``narration`` = short beat "
-            "whose audio is stripped and replaced by a TTS voiceover; "
-            "only allowed when the storyboard's mode is ``narration``."
+            "Legacy shot role used only to migrate old storyboards. New "
+            "storyboards must choose speech_source from the episode AudioPlan."
         ),
     )
     narration_text: str | None = Field(
         default=None,
         description=(
-            "Voiceover line for narration-role shots. Required iff "
-            "``role == 'narration'``. Synthesised at render time via "
-            "qwen3-tts-flash and muxed onto the rendered clip."
+            "Legacy narration text. New storyboards use speech_text."
         ),
     )
     narrator_voice: str | None = Field(
         default=None,
         description=(
-            "Per-shot voice override. Falls back to "
-            "``Storyboard.narrator_voice`` then ``VIDEOGEN_NARRATOR_VOICE``."
+            "Legacy hybrid-only voice override. Presenter voiceover forbids "
+            "per-shot voice changes."
+        ),
+    )
+    speech_source: SpeechSource | None = Field(
+        default=None,
+        description="Explicit audio source. Legacy role fields are migrated automatically.",
+    )
+    speaker: str | None = None
+    speech_text: str | None = None
+    visual_speech_mode: VisualSpeechMode = "none"
+    allow_generated_text: bool = False
+    long_take_reason: str | None = Field(
+        default=None,
+        description=(
+            "Required only above 15s: explain why the shot is an indivisible "
+            "continuous event and why cutting would damage the intended result."
+        ),
+    )
+    beats: list[ShotBeat] = Field(
+        default_factory=list,
+        description=(
+            "Optional timed action plan for precise continuous choreography; "
+            "required above 15s. Short shots may use a few causally linked "
+            "micro-phases when contact, occlusion, environmental response, or "
+            "camera/subject synchronization needs explicit timing. Entry count "
+            "is always chosen from content rather than a duration-based quota."
         ),
     )
     # ──────────────────────────────────────────────────────────────────────
@@ -237,7 +371,7 @@ class Shot(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _migrate_legacy_model(cls, data: Any) -> Any:
-        """Translate legacy ``model: "wan2.7-*" | "happyhorse-1.0-*"`` to ``kind``.
+        """Translate a legacy ``model: "wan2.7-*"`` value to ``kind``.
 
         Old storyboards predate the provider abstraction — they wrote out
         the concrete model name directly. We accept those silently so users
@@ -245,6 +379,23 @@ class Shot(BaseModel):
         """
         if not isinstance(data, dict):
             return data
+        data = dict(data)
+        transition = data.get("transition_from_previous")
+        if isinstance(transition, dict) and transition.get("type"):
+            data["use_prev_last_frame_as_first"] = (
+                transition.get("type") == "continuous_action"
+            )
+        if data.get("animatic_style") is not None:
+            data["animatic_style"] = require_visual_medium(
+                data["animatic_style"], field="animatic_style"
+            )
+        role = data.get("role", "drama")
+        if not data.get("speech_source"):
+            data["speech_source"] = "post_tts" if role == "narration" else "model"
+        if not data.get("speech_text") and data.get("narration_text"):
+            data["speech_text"] = data["narration_text"]
+        if data.get("speech_source") == "post_tts" and not data.get("visual_speech_mode"):
+            data["visual_speech_mode"] = "voiceover"
         if "kind" in data and data["kind"]:
             # Already in new format. Drop a stale ``model`` key if present.
             data.pop("model", None)
@@ -270,20 +421,22 @@ class Shot(BaseModel):
             raise ValueError("prompt is empty")
         return v
 
-    @model_validator(mode="after")
-    def _clamp_duration_to_kind(self) -> "Shot":
-        ceiling = KIND_MAX_DURATION.get(self.kind, 15)
-        if self.duration > ceiling:
-            object.__setattr__(self, "duration", ceiling)
-        return self
+    @field_validator("shot_group_role", mode="before")
+    @classmethod
+    def _normalize_shot_group_role(cls, value: Any) -> Any:
+        """Normalize English aliases and legacy localized input."""
+        if value is None:
+            return None
+        normalized = str(value).strip().casefold()
+        return _SHOT_GROUP_ROLE_ALIASES.get(normalized, normalized)
 
     @model_validator(mode="after")
     def _check_narration_fields(self) -> "Shot":
         if self.role == "narration":
-            if not self.narration_text or not self.narration_text.strip():
+            if not (self.narration_text or self.speech_text or "").strip():
                 raise ValueError(
                     f"shot {self.id}: role='narration' requires "
-                    f"non-empty narration_text"
+                    f"non-empty narration_text or speech_text"
                 )
         else:
             # drama role must not carry narration metadata.
@@ -293,6 +446,35 @@ class Shot(BaseModel):
                     f"narration_text (only narration-role shots get the "
                     f"TTS post-pass)"
                 )
+        if self.speech_source == "post_tts" and not (self.speech_text or "").strip():
+            raise ValueError(
+                f"shot {self.id}: speech_source='post_tts' requires speech_text"
+            )
+        if self.speech_source == "none" and (self.speech_text or "").strip():
+            raise ValueError(
+                f"shot {self.id}: speech_source='none' must not set speech_text"
+            )
+        if self.duration > 15:
+            if not (self.long_take_reason or "").strip():
+                raise ValueError(
+                    f"shot {self.id}: {self.duration}s is an exceptional long "
+                    f"take and requires long_take_reason"
+                )
+            if not self.beats:
+                raise ValueError(
+                    f"shot {self.id}: {self.duration}s exceptional long take "
+                    f"requires a timed action plan; beat count is content-driven"
+                )
+        if self.beats:
+            if self.beats[0].start_s != 0 or self.beats[-1].end_s != self.duration:
+                raise ValueError(
+                    f"shot {self.id}: beats must span exactly 0-{self.duration}s"
+                )
+            for previous, current in zip(self.beats, self.beats[1:]):
+                if previous.end_s != current.start_s:
+                    raise ValueError(
+                        f"shot {self.id}: beats must be contiguous and non-overlapping"
+                    )
         return self
 
 
@@ -304,7 +486,7 @@ class Scene(BaseModel):
     visual consistency even though the video model has no memory.
     """
     id: str = Field(description="scene id, e.g. 'S01'. Must match shot.scene references.")
-    name: str = Field(description="short human label, e.g. '七侠镇戏台子·白天'")
+    name: str = Field(description="short human label, e.g. 'riverstone-stage-day'")
     description: str = Field(
         description=(
             "Detailed environment description (50-150 chars). Includes: "
@@ -406,13 +588,16 @@ class BGMConfig(BaseModel):
         ),
     )
     forbid_model_bgm: bool = Field(
-        default=False,
+        default=True,
         description=(
             "When True the renderer appends a 'no BGM / no soundtrack' "
             "directive to every shot prompt (and to negative_prompt on "
             "providers that support it) so the video model doesn't "
             "generate competing music that would fight the stitched "
-            "BGM. Recommended whenever ``enabled`` is True. Independent "
+            "BGM. Defaults to True for ordinary short shots because "
+            "independently generated clip music cannot form a coherent "
+            "program-level score. Exceptional shots above 15s may retain "
+            "Wan's native music when no program-level BGM is enabled. Independent "
             "of ``enabled`` — you can forbid model music even when not "
             "stitching your own BGM (clean clips for later mixing)."
         ),
@@ -439,48 +624,83 @@ class BGMConfig(BaseModel):
         default=0.5,
         ge=0.0,
         le=10.0,
-        description="Fade-in duration applied to the BGM track in seconds.",
+        description=(
+            "Fade-in duration applied to the program-level BGM track in "
+            "seconds. Defaults to a quick 0.5s entrance."
+        ),
     )
     fade_out_s: float = Field(
-        default=1.0,
+        default=2.0,
         ge=0.0,
         le=10.0,
-        description="Fade-out duration applied to the BGM track in seconds.",
+        description=(
+            "Fade-out duration applied to the program-level BGM track in "
+            "seconds. Defaults to a smooth 2s ending."
+        ),
     )
+
+
+class AudioPlan(BaseModel):
+    """Episode-wide voice identity and source policy approved at GATE 0."""
+
+    mode: AudioMode
+    presenter: str | None = None
+    voice: str | None = None
+    model_audio_policy: ModelAudioPolicy
+    subtitle_mode: SubtitleMode = "off"
+
+    @model_validator(mode="after")
+    def _check_mode_contract(self) -> "AudioPlan":
+        if self.mode == "presenter_voiceover":
+            if not self.presenter or not self.voice:
+                raise ValueError(
+                    "presenter_voiceover requires both presenter and voice"
+                )
+            if self.model_audio_policy != "strip_all":
+                raise ValueError(
+                    "presenter_voiceover requires model_audio_policy='strip_all'"
+                )
+        elif self.mode == "native_dialogue" and self.model_audio_policy != "keep":
+            raise ValueError("native_dialogue requires model_audio_policy='keep'")
+        elif self.mode == "hybrid" and self.model_audio_policy != "per_shot":
+            raise ValueError("hybrid requires model_audio_policy='per_shot'")
+        return self
 
 
 class Storyboard(BaseModel):
     project_id: str | None = None
     title: str
     synopsis: str | None = None
-    target_duration_s: int = Field(default=180, ge=2, description="user's intended target; informational only")
+    target_duration_s: int = Field(
+        default=180,
+        ge=2,
+        description="user's intended final duration; enforced at GATE 4",
+    )
     resolution: str = "720P"
     ratio: str = "16:9"
     provider: ProviderName | None = Field(
         default=None,
         description=(
-            "Video model family for this episode (bl | wan27 | seedance2). When absent, "
+            "Video provider for this episode (wan-cli). When absent, "
             "the renderer falls back to the SPARK_VIDEO_PROVIDER env var, then "
-            "the built-in default (bl)."
+            "the built-in default (wan-cli)."
         ),
     )
+    video_model: VideoModel = "wan3.0"
     mode: EpisodeMode = Field(
         default="drama",
         description=(
-            "Episode mode. ``drama`` (default, back-compat): every shot is "
-            "a long self-contained clip. ``narration``: storyboard mixes "
-            "short narration shots (TTS voiceover) with optional drama "
-            "shots — the '10-min recap' format."
+            "Story structure only: drama stages action/conflict; narration "
+            "organizes explanatory beats. Audio still follows AudioPlan."
         ),
     )
     narrator_voice: str | None = Field(
         default=None,
         description=(
-            "Default TTS voice for narration-mode voiceovers. Falls back "
-            "to VIDEOGEN_NARRATOR_VOICE env var. Per-shot override via "
-            "``Shot.narrator_voice``."
+            "Legacy episode voice. New presenter voiceover uses AudioPlan.voice."
         ),
     )
+    audio: AudioPlan
     scenes: list[Scene] = Field(
         default_factory=list,
         description=(
@@ -495,8 +715,7 @@ class Storyboard(BaseModel):
             "Background music configuration. Set by the producer at "
             "``/episode`` GATE 0.5 when a ``bgm/`` folder is detected. "
             "When ``None``, the stitcher does not mix any BGM and the "
-            "renderer doesn't inject the no-music directive — same as "
-            "passing ``mode='off'`` with ``forbid_model_bgm=False``."
+            "renderer still forbids clip-local model music by default."
         ),
     )
     shots: list[Shot]
@@ -509,6 +728,27 @@ class Storyboard(BaseModel):
         deterministically picks the original family."""
         if not isinstance(data, dict):
             return data
+        data = dict(data)
+        if not data.get("audio"):
+            mode = data.get("mode", "drama")
+            narrator_voice = data.get("narrator_voice")
+            data["audio"] = (
+                {
+                    "mode": "hybrid",
+                    "presenter": None,
+                    "voice": narrator_voice,
+                    "model_audio_policy": "per_shot",
+                    "subtitle_mode": "off",
+                }
+                if mode == "narration"
+                else {
+                    "mode": "native_dialogue",
+                    "presenter": None,
+                    "voice": None,
+                    "model_audio_policy": "keep",
+                    "subtitle_mode": "off",
+                }
+            )
         if data.get("provider"):
             provider = str(data["provider"]).strip().lower()
             data["provider"] = PROVIDER_ALIASES.get(provider, provider)
@@ -556,6 +796,49 @@ class Storyboard(BaseModel):
                     f"Either change those shots to role='drama' (and clear "
                     f"narration_text) or set storyboard.mode='narration'."
                 )
+        limit = 30 if self.video_model == "wan3.0" else 15
+        too_long = [s.id for s in self.shots if s.duration > limit]
+        if too_long:
+            raise ValueError(
+                f"storyboard.video_model={self.video_model!r} supports at most "
+                f"{limit}s; over-limit shots: {', '.join(too_long[:8])}"
+            )
+
+        audio = self.audio
+        if audio.mode == "presenter_voiceover":
+            non_tts = [s.id for s in self.shots if s.speech_source != "post_tts"]
+            if non_tts:
+                raise ValueError(
+                    "presenter_voiceover requires post_tts on every shot; "
+                    f"offenders: {', '.join(non_tts[:8])}"
+                )
+            wrong_speaker = [
+                s.id for s in self.shots
+                if s.speech_source == "post_tts" and s.speaker != audio.presenter
+            ]
+            if wrong_speaker:
+                raise ValueError(
+                    f"presenter_voiceover requires speaker={audio.presenter!r}: "
+                    f"{', '.join(wrong_speaker[:8])}"
+                )
+            wrong_voice = [
+                s.id for s in self.shots
+                if s.speech_source == "post_tts"
+                and s.narrator_voice
+                and s.narrator_voice != audio.voice
+            ]
+            if wrong_voice:
+                raise ValueError(
+                    "presenter_voiceover forbids per-shot voice changes: "
+                    + ", ".join(wrong_voice[:8])
+                )
+        elif audio.mode == "native_dialogue":
+            post_tts = [s.id for s in self.shots if s.speech_source == "post_tts"]
+            if post_tts:
+                raise ValueError(
+                    "native_dialogue forbids post_tts shots: "
+                    + ", ".join(post_tts[:8])
+                )
         return self
 
     def total_duration(self) -> int:
@@ -575,17 +858,15 @@ class Storyboard(BaseModel):
 
         # Shanyin fusion: every shot should have a non-trivial narrative_purpose.
         # Soft warning only — never blocks render. VFX reviewer enforces.
-        _vague = {
-            "", "展现冲突", "推进剧情", "推进故事", "建立场景",
-            "渲染气氛", "表现情绪", "tbd", "TBD", "todo", "TODO",
-        }
         missing_purpose: list[str] = []
         vague_purpose: list[str] = []
         for s in self.shots:
             if not s.narrative_purpose or not s.narrative_purpose.strip():
                 missing_purpose.append(s.id)
-            elif s.narrative_purpose.strip() in _vague or len(s.narrative_purpose.strip()) < 8:
-                vague_purpose.append(s.id)
+            else:
+                purpose = s.narrative_purpose.strip()
+                if purpose.casefold() in _VAGUE_NARRATIVE_PURPOSES or len(purpose) < 8:
+                    vague_purpose.append(s.id)
         if missing_purpose:
             warnings.append(
                 f"narrative_purpose missing on {len(missing_purpose)} shot(s): "
@@ -599,13 +880,41 @@ class Storyboard(BaseModel):
                 f"{', '.join(vague_purpose[:5])}"
                 f"{'...' if len(vague_purpose) > 5 else ''}. "
                 f"Be specific about audiovisual means, e.g. "
-                f"'low-angle push-in to amplify 钱夫人's superiority'."
+                f"'low-angle push-in to amplify Madam Quinn's superiority'."
             )
 
-        # Narration-shot recommendations (soft — never block render).
-        if self.mode == "narration":
+        missing_camera_path = [s.id for s in self.shots if not (s.camera_path or "").strip()]
+        missing_end_composition = [
+            s.id for s in self.shots if not (s.end_composition or "").strip()
+        ]
+        if missing_camera_path:
+            warnings.append(
+                "camera_path missing on shot(s): "
+                + ", ".join(missing_camera_path[:5])
+                + ("..." if len(missing_camera_path) > 5 else "")
+                + ". New storyboards should declare an explicit camera trajectory."
+            )
+        if missing_end_composition:
+            warnings.append(
+                "end_composition missing on shot(s): "
+                + ", ".join(missing_end_composition[:5])
+                + ("..." if len(missing_end_composition) > 5 else "")
+                + ". New storyboards should lock the final-frame handoff."
+            )
+
+        exceptional = [s.id for s in self.shots if s.duration > 15]
+        if exceptional:
+            warnings.append(
+                "exceptional long takes require explicit creative review: "
+                + ", ".join(exceptional[:5])
+                + ("..." if len(exceptional) > 5 else "")
+                + ". Confirm each cannot be expressed as shorter shots."
+            )
+
+        # Post-TTS recommendations (soft — never block render).
+        if self.mode == "narration" or self.audio.mode == "presenter_voiceover":
             for s in self.shots:
-                if s.role != "narration":
+                if s.speech_source != "post_tts":
                     continue
                 if s.use_prev_last_frame_as_first:
                     warnings.append(
@@ -614,23 +923,24 @@ class Storyboard(BaseModel):
                         f"shots should break the chain (false) so they "
                         f"render in parallel."
                     )
-                if not (3 <= s.duration <= 6):
+                if not (6 <= s.duration <= 15):
                     warnings.append(
-                        f"{s.id}: narration shot duration {s.duration}s "
-                        f"out of recommended 3-6s; keep narration beats "
-                        f"short — TTS length drives the final clip length."
+                        f"{s.id}: post-TTS shot duration {s.duration}s "
+                        f"out of recommended 6-15s; size it to estimated "
+                        f"speech duration plus 0.5-1.0s."
                     )
-                if s.narration_text:
-                    est = estimate_narration_audio_seconds(s.narration_text)
+                speech_text = s.speech_text or s.narration_text
+                if speech_text:
+                    est = estimate_narration_audio_seconds(speech_text)
                     if est > float(s.duration) + 0.55:
                         warnings.append(
-                            f"{s.id}: narration_text may run ~{est:.1f}s (heuristic) "
+                            f"{s.id}: speech_text may run ~{est:.1f}s (heuristic) "
                             f"after default speech-rate post-process, but shot "
                             f"duration is {s.duration}s — rendered picture may "
                             f"freeze on the last frame while audio finishes. "
                             f"Shorten the line, raise duration, or split the beat."
                         )
-        elif self.narrator_voice:
+        elif self.narrator_voice and self.audio.mode == "native_dialogue":
             warnings.append(
                 "narrator_voice set but mode='drama' — value will be "
                 "ignored. Switch to mode='narration' to enable TTS."
@@ -704,7 +1014,7 @@ class Storyboard(BaseModel):
 
         # Lighting consistency rule — within ONE chain group, every r2v shot must
         # resolve to the SAME effective set_id (or no set at all).
-        # Mixing 客栈-day + 客栈-night inside one chain produces a
+        # Mixing inn-day + inn-night inside one chain produces a
         # discontinuous lighting flicker (the chained first_frame is
         # already locked to the previous shot's lighting, but the new
         # set image fights it). Splits between chain groups are fine —

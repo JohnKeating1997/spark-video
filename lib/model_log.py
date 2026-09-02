@@ -31,7 +31,7 @@ when chain groups render in parallel.
       "episode_id":    str | null,
       "shot_id":       str | null,
       "version":       int | null,
-      "provider":      str | null,    # e.g. "happyhorse", "wan"
+      "provider":      str | null,    # e.g. "wan-cli", "bl"
       "model":         str | null,
       "endpoint":      str | null,    # full URL
       "task_id":       str | null,
@@ -144,9 +144,10 @@ def _log_path_for(project_id: str, episode_id: str | None) -> Path:
     if episode_id:
         # Mirror state.normalize_episode_id without importing state (avoid cycles).
         ep = episode_id.strip()
-        if ep and not (ep.startswith("episode-") or ep.startswith("episode_")):
-            if ep.replace("_", "").isalnum():
-                ep = f"episode-{ep}"
+        if not ep:
+            raise ValueError("episode_id is empty")
+        if not (ep.startswith("episode-") or ep.startswith("episode_")):
+            ep = f"episode-{ep}"
         base = base / ep
     return base / "logs" / "model_calls.jsonl"
 

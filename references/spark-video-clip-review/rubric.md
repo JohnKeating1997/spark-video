@@ -18,13 +18,22 @@ prose before or after. No markdown fences. Just the JSON.
   "style":              <integer 0-10>,
   "cast_match":         <integer 0-10>,
   "dialog_attribution": <integer 0-10>,
+  "blocking_issues":    [{"type":"<short_type>","timestamp":"<optional>","detail":"<specific defect>"}],
   "critique":           "<English, 1-3 sentences. Reference timestamps (0:00–0:03) and specific visual problems. Empty string if no issues.>",
   "verdict":            "ACCEPT" | "REJECT"
 }
 ```
 
 - `verdict = "ACCEPT"` iff the **average** of the six sub-scores ≥ 7.0
+  **and** `blocking_issues` is empty.
 - All six sub-scores are required. Never omit any.
+- `blocking_issues` is required. Use `[]` for a usable clip. Add an item only
+  for a general delivery blocker visible in the clip: malformed or nonsensical
+  readable text, an unrequested caption/text overlay, contradiction of the
+  user-approved shot contract, unrequested model speech, a wrong speaker, severe corruption, or a
+  clearly wrong identity. This is not a topic-specific fact-checking pass.
+- Provider/account watermarks and regulatory AI labels are outside this review;
+  ignore them rather than adding them to `blocking_issues` or lowering a score.
 - `critique` must be in English. Keep it
   surgical: time codes + specific visible problems, not generic prose.
 
@@ -57,11 +66,11 @@ prose before or after. No markdown fences. Just the JSON.
 | 4-6   | Repeated physics failures (sliding feet, ground-clipping objects, cloth glued to body) |
 | 0-3   | Egregious physics violations (objects passing through bodies, floating characters, gravity-defying motion) |
 
-### style (lore.mood_anchor / visual_style / palette consistency)
+### style (visual_medium / compatible mood / palette consistency)
 
 | Score | Criterion |
 |-------|-----------|
-| 10    | Matches the project's visual style anchor exactly. No `forbidden` items visible. Color palette consistent with prior shots in the same scene. |
+| 10    | Matches the canonical project `visual_medium` (`live_action`, `2d_animation`, `3d_animation`, or `stop_motion`) and compatible lighting/palette/atmosphere guidance. Mixed shots preserve every explicitly declared media boundary. No `forbidden` items visible. |
 | 7-9   | Mostly matches; one minor color or lighting drift |
 | 4-6   | Visual style drifts (different lighting era, wrong color grade, mismatched art style) |
 | 0-3   | Looks like a different production entirely; OR a `forbidden` element visible |
@@ -108,12 +117,12 @@ line must be the one the prompt assigned that line to.
 
 **Example 3 — dialog mismatch reject**
 - 6 sub-scores: 7, 7, 7, 8, 6, 3 (avg 6.3)
-- critique: "0:04 钱夫人's line 「关你什么事」 is lip-synced by 佟掌柜 — dialog misattribution."
+- critique: "At 0:04, Madam Quinn's line 'That is none of your concern' is lip-synced by Innkeeper Taylor — dialog misattribution."
 - verdict: REJECT
 
 **Example 4 — total failure**
 - 6 sub-scores: 4, 3, 2, 5, 5, 10 (avg 4.8)
-- critique: "0:00–0:08 Action never matches prompt's 「追逐」 (character stands still); 0:02 extra limbs on child; 0:05 cup floats."
+- critique: "0:00–0:08 Action never matches the prompt's chase (character stands still); 0:02 extra limbs on child; 0:05 cup floats."
 - verdict: REJECT
 
 ## Score-critique consistency (HARD RULE)
@@ -134,6 +143,22 @@ defect, the corresponding axis score MUST reflect it. Specifically:
 - If critique mentions **completely wrong color palette, different
   visual era, or forbidden element** → `style` ≤ 5
 
+## General blocking issues (HARD RULE)
+
+Use blocking issues sparingly and literally. Every item needs a visible
+timestamp and a concrete defect. A clip with any blocking issue must be
+`REJECT`, regardless of its six-axis average. Do not add a blocker for a minor
+style preference, optional enhancement, or provider/regulatory watermark.
+
+- Unrequested or malformed readable captions/text → `unrequested_text` or
+  `malformed_text`.
+- The rendered clip removes or contradicts a required element from the
+  user-approved shot contract → `contract_mismatch`.
+- The wrong character delivers a line → `wrong_speaker`.
+- A `post_tts` or `none` shot contains model-generated speech, or a model-speech
+  shot invents an extra line → `unexpected_speech`.
+- Severe visual corruption that makes the clip unusable → `corrupt_visual`.
+
 Rationale: a score of 7+ means "minor or no issue". If you wrote about
 the issue in the critique, it is NOT minor — score accordingly. Do NOT
 describe a serious defect and then give a passing score.
@@ -151,3 +176,4 @@ describe a serious defect and then give a passing score.
 - ❌ Don't describe a defect in critique but score the axis 7+. This is
   the single most common calibration failure — see "Score-critique
   consistency" above.
+- ❌ Don't omit `blocking_issues`; output `[]` when there are none.

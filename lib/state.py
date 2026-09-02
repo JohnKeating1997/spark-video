@@ -28,7 +28,6 @@ Filesystem layout:
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -37,26 +36,25 @@ from lib.config import SETTINGS
 # Episode-level subdirectories created on demand.
 _EPISODE_SUBDIRS = ("clips", "frames", "final", "logs", "cast_built")
 
-_EP_PURE_RE = re.compile(r"^[A-Za-z0-9_]+$")
-
 
 def normalize_episode_id(episode_id: str) -> str:
-    """Accept ``001`` or ``episode-001`` and return the canonical folder name.
+    """Return the canonical ``episode-<id>`` folder name.
 
     Rules:
-      * If it already starts with ``episode-`` (or any non-alnum prefix), keep
-        it as the literal folder name.
-      * If it's a bare alnum/underscore token (e.g. ``001``, ``pilot``,
-        ``s01e03``) we prefix ``episode-`` so directories are predictable.
+      * If it already starts with ``episode-`` or ``episode_``, keep it.
+      * Otherwise always prefix ``episode-``, including IDs containing
+        punctuation such as ``anime-wan3.0``.
+
+    This intentionally matches the deterministic scripts' episode-path
+    handling so viewer/state helpers cannot resolve a different directory
+    from render/storyboard/stitch commands.
     """
     ep = episode_id.strip()
     if not ep:
         raise ValueError("episode_id is empty")
     if ep.startswith("episode-") or ep.startswith("episode_"):
         return ep
-    if _EP_PURE_RE.match(ep):
-        return f"episode-{ep}"
-    return ep
+    return f"episode-{ep}"
 
 
 def project_dir(project_id: str) -> Path:

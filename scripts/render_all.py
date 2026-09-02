@@ -45,6 +45,7 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
 from lib.env import load_pwd_dotenv  # noqa: E402
+from lib.shot_contract import contract_mismatches  # noqa: E402
 from lib.storyboard import Storyboard  # noqa: E402
 from lib.render_graph import compute_chain_groups  # noqa: E402
 
@@ -55,17 +56,6 @@ _REMOTE_MEDIA_PREFIXES = ("http://", "https://", "asset://", "data:")
 
 def _is_remote_media_ref(value: str) -> bool:
     return value.startswith(_REMOTE_MEDIA_PREFIXES)
-
-
-def _normalise_provider_name(name: str | None) -> str:
-    value = (name or "bl").strip().lower()
-    return {
-        "happyhorse": "bl",
-        "wan": "dashscope_wan27",
-        "wan27": "dashscope_wan27",
-        "dashscope_wan27": "dashscope_wan27",
-        "seedance": "seedance2",
-    }.get(value, value)
 
 
 def _projects_root() -> Path:
@@ -103,7 +93,23 @@ def _build_animatic_index(ep_dir: Path) -> dict[str, str]:
         shot_id = shots[0]
         if not isinstance(shot_id, str) or not shot_id:
             continue
-        for image in item.get("images", []) or []:
+        selected_id = item.get("selected_candidate")
+        selected = next(
+            (
+                candidate for candidate in item.get("candidates", []) or []
+                if isinstance(candidate, dict) and candidate.get("id") == selected_id
+            ),
+            None,
+        )
+        candidates = []
+        if selected:
+            candidates.extend([selected.get("image_url"), selected.get("image")])
+        elif not item.get("candidates"):
+            candidates.extend(item.get("image_urls", []) or [])
+            candidates.extend(item.get("images", []) or [])
+        for image in candidates:
+            if not image:
+                continue
             ref = str(image)
             if _is_remote_media_ref(ref):
                 idx[shot_id] = ref
@@ -115,23 +121,11 @@ def _build_animatic_index(ep_dir: Path) -> dict[str, str]:
     return idx
 
 
-def _with_storyboard_reference_note(prompt: str,
-                                    has_animatic_reference: bool) -> str:
-    """Tell the video model how to use the per-shot storyboard image."""
-    if not has_animatic_reference:
-        return prompt
-    marker = "Storyboard reference -"
-    if marker in prompt:
-        return prompt
-    note = (
-        "Storyboard reference - The first reference image is the approved "
-        "static storyboard reference for this clip. Follow its composition, "
-        "camera angle, character placement, framing, lighting, key action, "
-        "and mood. Use it as a storyboard/composition reference only; do not "
-        "treat it as a literal first frame. Do not copy labels, borders, "
-        "captions, or UI from the reference image."
-    )
-    return f"{note}\n\n{prompt.rstrip()}".rstrip()
+def _animatic_contracts_current(ep_dir: Path) -> tuple[bool, list[str]]:
+    storyboard = _load_json(ep_dir / "storyboard.json") or {}
+    manifest = _load_json(ep_dir / "storyboard-panels" / "panels.json") or {}
+    mismatches = contract_mismatches(storyboard, manifest)
+    return not mismatches, mismatches
 
 
 def _resolve_media(shot, scenes_by_id: dict, cast_index: dict,
@@ -140,7 +134,7 @@ def _resolve_media(shot, scenes_by_id: dict, cast_index: dict,
     """Build --media: storyboard reference image -> cast -> set -> props.
 
     Keep this order stable: render_shot.py turns the actual uploaded image
-    order into Image 1 / Image 2 / ... reference-map text in the final
+    order into localized @图片N / @ImageN reference-map text in the final
     provider prompt.
     """
     media = []
@@ -178,7 +172,7 @@ def _resolve_media(shot, scenes_by_id: dict, cast_index: dict,
 
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
-_AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+_AUDIO_EXTS = {".mp3", ".wav", ".mp4"}
 
 
 def _parse_render_stdout(stdout: str) -> dict | None:
@@ -221,7 +215,7 @@ def _scan_first_audio(folder: Path) -> str | None:
     """Return the preferred voice sample in a folder, or None."""
     if not folder.is_dir():
         return None
-    for name in ("voice.mp3", "voice.wav", "voice.m4a"):
+    for name in ("voice.mp3", "voice.wav", "voice.mp4"):
         preferred = folder / name
         if preferred.is_file():
             return str(preferred)
@@ -243,6 +237,12 @@ def _asset_records(data, plural_key: str) -> list[dict]:
 
 
 def _first_record_image(record: dict) -> str | None:
+    value = record.get("image_url")
+    if isinstance(value, str) and value:
+        return value
+    for value in record.get("image_urls", []) or []:
+        if isinstance(value, str) and value:
+            return value
     for key in ("image_local", "image", "path"):
         value = record.get(key)
         if isinstance(value, str) and value:
@@ -378,6 +378,8 @@ def _shot_speakers(shot) -> list[str]:
     for name in char_names:
         if re.search(rf"(?:只有|只由){re.escape(name)}(?:一个人)?(?:开口|说话)", prompt):
             add(name)
+    if speakers:
+        return speakers
 
     for match in re.finditer(r"[：:]\s*[“\"]", prompt):
         prefix = prompt[:match.start()]
@@ -407,86 +409,35 @@ def _shot_speakers(shot) -> list[str]:
 def _resolve_voice_media_entries(
     shot,
     cast_voice_index: dict[str, list[str]],
+    ep_dir: Path | None = None,
 ) -> list[tuple[str, str]]:
-    """Return de-duplicated (character, voice-ref) pairs in speaking order."""
+    """Return de-duplicated (character, voice-ref) pairs in speaking order.
+
+    A shot-local voice sample under ``voice-refs/<shot>/<character>.*``
+    overrides the cast-wide sample. This keeps special emotional deliveries
+    or trimmed samples local to one shot and avoids changing every other
+    appearance of that character.
+    """
     entries: list[tuple[str, str]] = []
     seen: set[str] = set()
     for char in _shot_speakers(shot):
-        for ref in cast_voice_index.get(char, []) or []:
+        refs = list(cast_voice_index.get(char, []) or [])
+        if ep_dir is not None:
+            local_dir = ep_dir / "voice-refs" / shot.id
+            local_refs = [
+                local_dir / f"{char}{suffix}"
+                for suffix in (".mp3", ".wav", ".mp4")
+                if (local_dir / f"{char}{suffix}").is_file()
+            ]
+            if local_refs:
+                refs = [str(path.resolve()) for path in local_refs]
+        for ref in refs:
             if ref in seen:
                 continue
             if _is_remote_media_ref(ref) or Path(ref).exists():
                 entries.append((char, ref))
                 seen.add(ref)
     return entries
-
-
-def _resolve_voice_media(shot, cast_voice_index: dict[str, list[str]]) -> list[str]:
-    """Return de-duplicated voice refs in speaking-character order."""
-    return [ref for _, ref in _resolve_voice_media_entries(shot, cast_voice_index)]
-
-
-def _audio_duration_s(ref: str) -> float | None:
-    if _is_remote_media_ref(ref):
-        return None
-    try:
-        proc = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                ref,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        return float(proc.stdout.strip())
-    except Exception:
-        return None
-
-
-def _fit_seedance_voice_refs(
-    ep_dir: Path,
-    shot_id: str,
-    entries: list[tuple[str, str]],
-    *,
-    max_total_s: float = 14.0,
-) -> list[str]:
-    """Trim local multi-voice references under Seedance's total duration cap."""
-    if len(entries) <= 1:
-        return [ref for _, ref in entries]
-
-    durations = [_audio_duration_s(ref) for _, ref in entries]
-    known_total = sum(d for d in durations if d is not None)
-    if known_total <= max_total_s:
-        return [ref for _, ref in entries]
-
-    per_ref_s = max_total_s / len(entries)
-    out_dir = ep_dir / "voice-refs" / shot_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    fitted: list[str] = []
-    for (char, ref), duration in zip(entries, durations):
-        if _is_remote_media_ref(ref) or duration is None or duration <= per_ref_s:
-            fitted.append(ref)
-            continue
-        out = out_dir / f"{char}.mp3"
-        subprocess.run(
-            [
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-i", ref,
-                "-t", f"{per_ref_s:.3f}",
-                "-ac", "1", "-ar", "24000",
-                "-c:a", "libmp3lame", "-b:a", "128k",
-                str(out),
-            ],
-            check=True,
-            capture_output=True,
-            timeout=60,
-        )
-        fitted.append(str(out))
-    return fitted
 
 
 def _build_set_index(ep_dir: Path) -> dict[str, str]:
@@ -581,25 +532,26 @@ def _render_chain_group(
 
         animatic_ref = animatic_index.get(shot_id)
         has_animatic_reference = bool(animatic_ref)
+        continuity_first_frame = (
+            prev_last_frame
+            if prev_last_frame
+            and shot.use_prev_last_frame_as_first
+            and Path(prev_last_frame).exists()
+            else None
+        )
         media = _resolve_media(
             shot, scenes_by_id, cast_index, set_index, prop_index, animatic_index
         )
-        voice_entries = _resolve_voice_media_entries(shot, cast_voice_index)
-        provider_name = _normalise_provider_name(
-            provider or os.environ.get("SPARK_VIDEO_PROVIDER", "bl")
+        voice_entries = (
+            _resolve_voice_media_entries(shot, cast_voice_index, ep_dir=ep_dir)
+            if shot.speech_source == "model"
+            else []
         )
-        voice_arg: str | None = None
         voice_refs = [ref for _, ref in voice_entries]
         if voice_refs:
-            if provider_name == "seedance2":
-                voice_refs = _fit_seedance_voice_refs(ep_dir, shot_id, voice_entries)
-                media.extend(voice_refs)
-            else:
-                voice_arg = voice_refs[0]
+            media.extend(voice_refs)
         render_kind = "r2v" if has_animatic_reference else shot.kind
-        render_prompt = _with_storyboard_reference_note(
-            shot.prompt, has_animatic_reference
-        )
+        render_prompt = shot.prompt
 
         cmd = [
             "uv", "run", str(_HERE / "render_shot.py"),
@@ -616,8 +568,6 @@ def _render_chain_group(
         if media:
             cmd.append("--media")
             cmd.extend(media)
-        if voice_arg:
-            cmd.extend(["--voice", voice_arg])
         if ratio:
             cmd.extend(["--ratio", ratio])
         if provider:
@@ -634,20 +584,23 @@ def _render_chain_group(
             cmd.append("--characters")
             cmd.extend(shot.characters)
 
-        if (not has_animatic_reference
-                and prev_last_frame
-                and shot.use_prev_last_frame_as_first):
-            if Path(prev_last_frame).exists():
-                cmd.extend(["--first-frame", prev_last_frame])
+        if continuity_first_frame:
+            cmd.extend(["--first-frame", continuity_first_frame])
 
-        ref_tag = ", storyboard-ref" if has_animatic_reference else ""
+        ref_tag = (
+            ", omni-opening-ref" if continuity_first_frame
+            else (", storyboard-ref" if has_animatic_reference else "")
+        )
         voice_tag = f", {len(voice_refs)} voice-ref" if voice_refs else ""
         print(f"[render] {shot_id} ({render_kind}, {shot.duration}s, "
               f"{len(shot.characters)} chars{ref_tag}{voice_tag})", flush=True)
 
         try:
+            shot_timeout_s = int(
+                os.environ.get("SPARK_VIDEO_SHOT_TIMEOUT_S", "1200")
+            )
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=600,
+                cmd, capture_output=True, text=True, timeout=shot_timeout_s,
             )
             parsed = _parse_render_stdout(proc.stdout)
             if proc.returncode == 0 and parsed:
@@ -665,8 +618,18 @@ def _render_chain_group(
                 })
                 prev_last_frame = None
         except subprocess.TimeoutExpired:
-            print(f"[render_all] {shot_id} timed out (600s)", file=sys.stderr, flush=True)
-            results.append({"shot_id": shot_id, "error": "timeout (600s)"})
+            shot_timeout_s = int(
+                os.environ.get("SPARK_VIDEO_SHOT_TIMEOUT_S", "1200")
+            )
+            print(
+                f"[render_all] {shot_id} timed out ({shot_timeout_s}s)",
+                file=sys.stderr,
+                flush=True,
+            )
+            results.append({
+                "shot_id": shot_id,
+                "error": f"timeout ({shot_timeout_s}s)",
+            })
             prev_last_frame = None
         except Exception as e:
             print(f"[render_all] {shot_id} exception: {e}", file=sys.stderr, flush=True)
@@ -737,6 +700,18 @@ def main() -> int:
         )
         return 2
 
+    if not animatic_gate_skipped:
+        contracts_current, stale_contracts = _animatic_contracts_current(ep_dir)
+        if not contracts_current:
+            print(
+                "ERROR: storyboard changed after static reference approval for: "
+                f"{', '.join(stale_contracts)}. Re-run `uv run "
+                "scripts/storyboard.py animatic --generate`, review the changed "
+                "shots, then confirm again.",
+                file=sys.stderr,
+            )
+            return 2
+
     sb = Storyboard.model_validate(json.loads(sb_path.read_text()))
     provider = args.provider or sb.provider
 
@@ -791,7 +766,7 @@ def main() -> int:
     total_shots = sum(len(g) for g in groups)
     print(f"[render_all] {total_shots} shots in {len(groups)} chain groups, "
           f"concurrency={max_workers}, mode={mode}, "
-          f"provider={provider or os.environ.get('SPARK_VIDEO_PROVIDER', 'bl')}")
+          f"provider={provider or os.environ.get('SPARK_VIDEO_PROVIDER', 'wan-cli')}")
 
     all_results = []
 
@@ -868,7 +843,7 @@ def main() -> int:
         summary["rejected_shots"] = rejected_details
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

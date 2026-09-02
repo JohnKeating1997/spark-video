@@ -105,6 +105,43 @@ def probe_duration(media: Path) -> float:
         return 0.0
 
 
+def normalize_program_audio(
+    video: Path,
+    out: Path,
+    *,
+    target_lufs: float = -16.0,
+    true_peak_db: float = -1.5,
+    loudness_range: float = 11.0,
+) -> Path:
+    """Normalize the final program mix while preserving the video stream."""
+    _ensure_ffmpeg()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not _has_audio_stream(video):
+        shutil.copy2(video, out)
+        return out
+    audio_filter = (
+        f"loudnorm=I={target_lufs:.1f}:TP={true_peak_db:.1f}:"
+        f"LRA={loudness_range:.1f}"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-i", str(video),
+        "-map", "0:v:0", "-map", "0:a:0",
+        "-c:v", "copy",
+        "-af", audio_filter,
+        "-c:a", "aac", "-b:a", "192k",
+        "-ar", "24000", "-ac", "2",
+        "-movflags", "+faststart",
+        str(out),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "ffmpeg final loudness normalization failed "
+            f"(rc={result.returncode}):\n  stderr tail: {result.stderr[-800:]}"
+        )
+    return out
+
+
 def audio_atempo(src: Path, dest: Path, tempo: float) -> Path:
     """Resample playback speed with FFmpeg ``atempo`` (0.5–2.0 per filter).
 
@@ -381,7 +418,7 @@ def mix_bgm(
     voice_lufs: float = -16.0,
     bgm_delta_lu: float = -14.0,
     fade_in_s: float = 0.5,
-    fade_out_s: float = 1.0,
+    fade_out_s: float = 2.0,
 ) -> Path:
     """Mix a BGM audio file underneath the existing audio of ``video``.
 
@@ -418,6 +455,14 @@ def mix_bgm(
     bgm_target = voice_lufs + bgm_delta_lu
     fade_in = max(0.0, float(fade_in_s))
     fade_out = max(0.0, float(fade_out_s))
+    # On unusually short programs, keep the fades from overlapping and
+    # turning the entire score into a volume dip. Preserve their ratio while
+    # reserving at least 20% of the duration at full level.
+    fade_budget = v_dur * 0.8
+    if fade_in + fade_out > fade_budget and fade_in + fade_out > 0:
+        scale = fade_budget / (fade_in + fade_out)
+        fade_in *= scale
+        fade_out *= scale
     fade_out_start = max(0.0, v_dur - fade_out)
 
     # Voice chain: normalize to voice_lufs using EBU R128 loudnorm.
@@ -525,7 +570,7 @@ def xfade_continuation(
 ) -> Path:
     """Join a shot's part-a and part-b into a single continuation clip via xfade.
 
-    Models with hard duration caps (e.g. happyhorse-1.0-r2v at 10s) force long
+    Models with hard duration caps (e.g. Wan 3.0 at 15s) force long
     narration shots to be rendered as two takes (``<id>.mp4`` + ``<id>b.mp4``)
     that share the same reference images. This helper splices them with a
     crossfade so downstream narration muxing sees a single source.

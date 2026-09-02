@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/install-deps.sh — clone optional shanyin craft references.
-# Failure is non-fatal: the pipeline runs without them (sub-skills fall
+# Failure is non-fatal: the pipeline runs without them (stage references fall
 # back to their baked-in reference.md).
 
 set -u
@@ -20,7 +20,7 @@ clone_or_pull() {
     if git clone --depth 1 "$url" "$target" 2>&1 | head -10; then
       echo "  ✓ cloned"
     else
-      echo "  ⚠ clone failed — sub-skill will fall back to baked-in reference.md" >&2
+      echo "  ⚠ clone failed — stage instructions will fall back to bundled guidance" >&2
       rm -rf "$target"
     fi
   fi

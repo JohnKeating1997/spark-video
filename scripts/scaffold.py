@@ -9,15 +9,18 @@ Subcommands:
     episode --init          mkdir scaffold for projects/<p>/<ep>/
     lore --title "<title>"  scaffold projects/<p>/lore.md
     scene --num N           scaffold scenes/scene-NN.md (mode-specific)
-    cast --name "陆辰"      scaffold cast folder + cast.md template
-    cast --fork --name "陆辰" --drop-portraits   copy project cast to episode tier
+    cast --name "Ethan Cole"      scaffold cast folder + cast.md template
+    cast --fork --name "Ethan Cole" --drop-portraits   copy project cast to episode tier
                                                 and optionally delete copied reference images
-    set --name "客栈-白天"   scaffold movie-set folder + set.md
-    prop --name "红包-完整"  scaffold prop folder + prop.md
+    set --name "inn-lobby-day"   scaffold movie-set folder + set.md
+    prop --name "red-envelope-intact"  scaffold prop folder + prop.md
     cast-init               rebuild cast.json from project + episode tiers
     set-init                rebuild movie_set.json
     prop-init               rebuild props.json
     manifests               cast-init + set-init + prop-init
+    asset-import            copy a local image into an asset's candidate set
+    asset-recommend         record the Agent's active default candidate
+    asset-select            choose the one image used by manifests + rendering
     mood-anchor             print lore.mood_anchor for piping into bl prompts
 
 Respects SPARK_VIDEO_PROJECT / SPARK_VIDEO_EPISODE env vars.
@@ -26,6 +29,7 @@ Pass --episode to flag cast/set/prop as episode-tier.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -38,6 +42,12 @@ sys.path.insert(0, str(_HERE.parent))
 from lib.env import load_pwd_dotenv  # noqa: E402
 
 load_pwd_dotenv()
+
+
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+_ASSET_DIRS = {"cast": "cast", "set": "movie-set", "prop": "props"}
+_SELECTION_FILE = ".asset-selection.json"
+_RECOMMENDATION_FILE = ".asset-recommendation.json"
 
 
 def _projects_root() -> Path:
@@ -80,8 +90,9 @@ def cmd_episode(args: argparse.Namespace) -> int:
 LORE_TEMPLATE = """\
 ---
 title: "{title}"
-mood_anchor: "TBD — one-line visual style anchor, appended to every shot prompt"
-visual_style: "TBD — overall art direction (photoreal / cartoon / painterly / cyberpunk / ...)"
+mood_anchor: "TBD — global lighting, palette, contrast, texture, atmosphere; no character-specific traits"
+visual_style: "TBD — concrete treatment (e.g. stylized 3D CG, soft PBR materials, graphic facial proportions)"
+visual_medium: "TBD — live_action | 2d_animation | 3d_animation | stop_motion | mixed"
 genre: "TBD"
 duration_target_s: 180
 forbidden:
@@ -177,11 +188,14 @@ NARRATION_TEMPLATE = """\
 **Backstory**: <one sentence>
 
 **Beats**:
-1. **Narration**: "<≤60 words, third-person narration>"
-   **Visual**: <filmable action + suggested duration 4s>
-2. **Dialogue**:
-   - <Character>: "<line>"
-   **Visual**: <filmable action + suggested duration 12s>
+1. **Presenter**: "<short line in the approved presenter's voice>"
+   **Audio source**: post_tts
+   **Visual speech**: voiceover
+   **Visual**: <filmable action + suggested duration 6-12s>
+2. **Presenter**: "<next continuous line from the same presenter>"
+   **Audio source**: post_tts
+   **Visual speech**: voiceover
+   **Visual**: <filmable action + suggested duration 6-12s>
 """
 
 
@@ -240,7 +254,8 @@ def cmd_cast(args: argparse.Namespace) -> int:
     md.write_text(CAST_MD_TEMPLATE.format(name=args.name))
     print(f"scaffolded {cast_dir}/")
     print(f"  → edit {md}")
-    print(f"  → drop one or more cast reference images into {cast_dir}/")
+    print("  → generate with: uv run scripts/generate_asset.py cast")
+    print(f"    --name {args.name!r} --prompt \"...\"")
     print(f"  → then run: uv run scripts/scaffold.py cast-init")
     return 0
 
@@ -267,7 +282,7 @@ def _cast_fork(args: argparse.Namespace) -> int:
             jpg.unlink()
         print(f"  dropped cast reference images from {dst}/")
     print(f"forked {src} → {dst}")
-    print(f"  next: ./scripts/bl image edit ... --out-dir {dst}/")
+    print(f"  next: wan image2image --generation-mode reference ... --save-dir {dst}/ --output json")
     print(f"        uv run scripts/scaffold.py cast-init")
     return 0
 
@@ -303,7 +318,8 @@ def cmd_set(args: argparse.Namespace) -> int:
     md.write_text(SET_MD_TEMPLATE.format(name=args.name))
     print(f"scaffolded {set_dir}/")
     print(f"  → edit {md} (pin time_of_day / lighting / color_grade)")
-    print(f"  → drop a reference image into {set_dir}/ (or use bl image generate)")
+    print("  → generate with: uv run scripts/generate_asset.py set")
+    print(f"    --name {args.name!r} --prompt \"...\"")
     print(f"  → then run: uv run scripts/scaffold.py set-init")
     return 0
 
@@ -324,7 +340,7 @@ state: "TBD — intact / crumpled / torn / closed / open / ..."
 
 ⚠ One folder = one narrative state. If the same item has multiple states
    (intact → crumpled → torn), each state is a **separate folder**:
-   红包-完整 / 红包-起皱 / 红包-撕碎.
+   red-envelope-intact / red-envelope-creased / red-envelope-torn.
 """
 
 
@@ -339,12 +355,158 @@ def cmd_prop(args: argparse.Namespace) -> int:
     md.write_text(PROP_MD_TEMPLATE.format(name=args.name))
     print(f"scaffolded {prop_dir}/")
     print(f"  → edit {md}")
-    print(f"  → drop a reference image into {prop_dir}/ (or use bl image generate)")
+    print("  → generate with: uv run scripts/generate_asset.py prop")
+    print(f"    --name {args.name!r} --prompt \"...\"")
     print(f"  → then run: uv run scripts/scaffold.py prop-init")
     return 0
 
 
 # ------------------------------------------------- manifest rebuild commands
+
+def _read_selected_image(asset_dir: Path, images: list[str]) -> str | None:
+    """Return the explicitly selected image when the sidecar is valid."""
+    selection_path = asset_dir / _SELECTION_FILE
+    try:
+        selection = json.loads(selection_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    filename = selection.get("selected_image") if isinstance(selection, dict) else None
+    if not isinstance(filename, str) or Path(filename).name != filename:
+        return None
+    candidate = str(asset_dir / filename)
+    return candidate if candidate in images else None
+
+
+def _write_selected_image(asset_dir: Path, image: Path) -> Path:
+    selection_path = asset_dir / _SELECTION_FILE
+    selection_path.write_text(
+        json.dumps(
+            {"version": 1, "selected_image": image.name},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return selection_path
+
+
+def _write_recommended_image(asset_dir: Path, image: Path) -> Path:
+    recommendation_path = asset_dir / _RECOMMENDATION_FILE
+    recommendation_path.write_text(
+        json.dumps(
+            {"version": 1, "recommended_image": image.name, "recommended_by": "agent"},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return recommendation_path
+
+
+def _read_recommended_image(asset_dir: Path, images: list[str]) -> str | None:
+    recommendation_path = asset_dir / _RECOMMENDATION_FILE
+    try:
+        recommendation = json.loads(recommendation_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    filename = (
+        recommendation.get("recommended_image")
+        if isinstance(recommendation, dict)
+        else None
+    )
+    if not isinstance(filename, str) or Path(filename).name != filename:
+        return None
+    candidate = str(asset_dir / filename)
+    return candidate if candidate in images else None
+
+
+def _asset_dir_for(kind: str, name: str, *, episode: bool) -> Path:
+    base = _episode_dir() if episode else _project_dir()
+    return base / _ASSET_DIRS[kind] / name
+
+
+def _unique_import_path(asset_dir: Path, source: Path) -> Path:
+    destination = asset_dir / source.name
+    if not destination.exists():
+        return destination
+    try:
+        if source.samefile(destination):
+            return destination
+    except OSError:
+        pass
+    index = 2
+    while True:
+        destination = asset_dir / f"{source.stem}-{index}{source.suffix.lower()}"
+        if not destination.exists():
+            return destination
+        index += 1
+
+
+def _rebuild_asset_manifest(kind: str, args: argparse.Namespace) -> int:
+    return {
+        "cast": cmd_cast_init,
+        "set": cmd_set_init,
+        "prop": cmd_prop_init,
+    }[kind](args)
+
+
+def cmd_asset_import(args: argparse.Namespace) -> int:
+    source = Path(args.image).expanduser().resolve()
+    if not source.is_file() or source.suffix.lower() not in _IMAGE_SUFFIXES:
+        print(f"ERROR: image not found or unsupported: {source}", file=sys.stderr)
+        return 2
+    asset_dir = _asset_dir_for(args.kind, args.name, episode=args.episode)
+    if not asset_dir.is_dir():
+        print(f"ERROR: asset folder does not exist: {asset_dir}", file=sys.stderr)
+        return 2
+    destination = _unique_import_path(asset_dir, source)
+    try:
+        already_present = source.samefile(destination)
+    except OSError:
+        already_present = False
+    if not already_present:
+        shutil.copy2(source, destination)
+    print(f"added candidate {destination}")
+    if args.select:
+        _write_selected_image(asset_dir, destination)
+        print(f"selected {destination.name} as the primary image")
+        return _rebuild_asset_manifest(args.kind, args)
+    print("primary image unchanged; run asset-select when this candidate is approved")
+    return 0
+
+
+def cmd_asset_select(args: argparse.Namespace) -> int:
+    asset_dir = _asset_dir_for(args.kind, args.name, episode=args.episode)
+    raw = Path(args.image).expanduser()
+    image = raw.resolve() if raw.is_absolute() else (asset_dir / raw).resolve()
+    try:
+        image.relative_to(asset_dir.resolve())
+    except ValueError:
+        print("ERROR: selection must already be inside the asset folder", file=sys.stderr)
+        return 2
+    if not image.is_file() or image.suffix.lower() not in _IMAGE_SUFFIXES:
+        print(f"ERROR: candidate image not found or unsupported: {image}", file=sys.stderr)
+        return 2
+    _write_selected_image(asset_dir, image)
+    print(f"selected {image.name} as the primary image")
+    return _rebuild_asset_manifest(args.kind, args)
+
+
+def cmd_asset_recommend(args: argparse.Namespace) -> int:
+    asset_dir = _asset_dir_for(args.kind, args.name, episode=args.episode)
+    raw = Path(args.image).expanduser()
+    image = raw.resolve() if raw.is_absolute() else (asset_dir / raw).resolve()
+    try:
+        image.relative_to(asset_dir.resolve())
+    except ValueError:
+        print("ERROR: recommendation must already be inside the asset folder", file=sys.stderr)
+        return 2
+    if not image.is_file() or image.suffix.lower() not in _IMAGE_SUFFIXES:
+        print(f"ERROR: candidate image not found or unsupported: {image}", file=sys.stderr)
+        return 2
+    _write_recommended_image(asset_dir, image)
+    print(f"recommended {image.name} as the active default")
+    return 0
 
 def _scan_tier_folders(tier_dir: Path, key_files: list[str]) -> dict[str, dict]:
     """Scan tier/<name>/ folders, return {name: {md_path, images, voice?}}."""
@@ -360,18 +522,89 @@ def _scan_tier_folders(tier_dir: Path, key_files: list[str]) -> dict[str, dict]:
             if cand.exists():
                 md = cand
                 break
-        images = sorted([str(p) for p in sub.glob("*.png")] +
-                        [str(p) for p in sub.glob("*.jpg")])
+        all_images = sorted(
+            str(path)
+            for path in sub.iterdir()
+            if path.is_file()
+            and path.suffix.lower() in _IMAGE_SUFFIXES
+        )
+        images = list(all_images)
+        explicit_selection = _read_selected_image(sub, all_images)
+        recommendation = _read_recommended_image(sub, all_images)
+        if explicit_selection:
+            images = [explicit_selection]
+        elif recommendation:
+            # The Agent recommendation is the active default. A later explicit
+            # user selection supersedes it without deleting the alternates.
+            images = [recommendation]
+        if tier_dir.name == "cast":
+            selected = [
+                image for image in images
+                if Path(image).stem.lower().startswith("portrait")
+            ]
+            # A source/ directory marks a user-derived cast. Until the user
+            # selects a generated portrait, this is provenance, not a usable
+            # downstream character asset. For legacy/manual casts without
+            # source/, retain the existing filename-compatible behavior.
+            if not explicit_selection and (selected or (sub / "source").is_dir()):
+                images = selected
         voices = sorted([str(p) for p in sub.glob("*.mp3")] +
                         [str(p) for p in sub.glob("*.wav")] +
                         [str(p) for p in sub.glob("*.m4a")])
-        out[sub.name] = {
+        metadata_by_hash: dict[str, dict] = {}
+        generation_log = sub / ".wan-generations.jsonl"
+        if generation_log.exists():
+            for line in generation_log.read_text(encoding="utf-8").splitlines():
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                task_id = record.get("taskId") or record.get("task_id")
+                for candidate in record.get("candidates", []) or []:
+                    digest = candidate.get("sha256")
+                    image_url = candidate.get("image_url")
+                    if isinstance(digest, str) and isinstance(image_url, str):
+                        metadata_by_hash[digest] = {
+                            "image_url": image_url,
+                            "task_id": task_id,
+                        }
+        matched_urls: list[str | None] = []
+        task_ids: list[str] = []
+        for image in images:
+            digest = hashlib.sha256()
+            with Path(image).open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            metadata = metadata_by_hash.get(digest.hexdigest()) or {}
+            image_url = metadata.get("image_url")
+            task_id = metadata.get("task_id")
+            matched_urls.append(image_url if isinstance(image_url, str) else None)
+            if isinstance(task_id, str) and task_id not in task_ids:
+                task_ids.append(task_id)
+        entry = {
             "name": sub.name,
             "md_path": str(md) if md else None,
             "images": images,
             "voices": voices,
             "tier": tier_dir.parent.name if tier_dir.parent.name.startswith("episode") else "project",
         }
+        if explicit_selection:
+            entry["selected_image"] = explicit_selection
+            entry["candidate_images"] = all_images
+        elif recommendation:
+            entry["selected_image"] = recommendation
+            entry["recommended_image"] = recommendation
+            entry["candidate_images"] = all_images
+        # Keep images and image_urls positionally aligned. If a folder mixes a
+        # generated image with an untracked manual file, fall back to local
+        # paths instead of attaching the wrong remote URL to an image.
+        if images and all(matched_urls):
+            entry["image_urls"] = matched_urls
+        if len(task_ids) == 1:
+            entry["task_id"] = task_ids[0]
+        elif task_ids:
+            entry["task_ids"] = task_ids
+        out[sub.name] = entry
     return out
 
 
@@ -465,6 +698,31 @@ def main() -> int:
     p_prop.add_argument("--episode", action="store_true")
     p_prop.add_argument("--force", action="store_true")
     p_prop.set_defaults(fn=cmd_prop)
+
+    p_import = sub.add_parser("asset-import")
+    p_import.add_argument("--kind", choices=sorted(_ASSET_DIRS), required=True)
+    p_import.add_argument("--name", required=True)
+    p_import.add_argument("--image", required=True)
+    p_import.add_argument("--episode", action="store_true")
+    p_import.add_argument("--select", action="store_true",
+                          help="also choose the imported image as the primary")
+    p_import.set_defaults(fn=cmd_asset_import)
+
+    p_select = sub.add_parser("asset-select")
+    p_select.add_argument("--kind", choices=sorted(_ASSET_DIRS), required=True)
+    p_select.add_argument("--name", required=True)
+    p_select.add_argument("--image", required=True,
+                          help="candidate filename already inside the asset folder")
+    p_select.add_argument("--episode", action="store_true")
+    p_select.set_defaults(fn=cmd_asset_select)
+
+    p_recommend = sub.add_parser("asset-recommend")
+    p_recommend.add_argument("--kind", choices=sorted(_ASSET_DIRS), required=True)
+    p_recommend.add_argument("--name", required=True)
+    p_recommend.add_argument("--image", required=True,
+                             help="candidate filename already inside the asset folder")
+    p_recommend.add_argument("--episode", action="store_true")
+    p_recommend.set_defaults(fn=cmd_asset_recommend)
 
     for name, fn in [("cast-init", cmd_cast_init), ("set-init", cmd_set_init),
                      ("prop-init", cmd_prop_init), ("manifests", cmd_manifests)]:

@@ -16,8 +16,8 @@ belongs to that character — no name-prefix matching needed.
 
 If a character has more than one reference image inside its own folder, the CLI builds
 a grid composite (``<id>.grid.png``) and feeds that as ``reference_image`` to
-the active video provider. Both Wan and HappyHorse r2v accept multi-pane
-reference images. Full-body standing sheets / 三视图 are preferred for new
+the active video provider. Wan accepts multi-pane
+reference images. Full-body standing three-view sheets are preferred for new
 cast assets. Grids are NEVER built across different characters.
 
 Two-tier discovery (per episode build):

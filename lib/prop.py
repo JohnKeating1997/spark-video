@@ -1,7 +1,7 @@
 """Key prop management — folder-per-prop.
 
 Why this exists: AI video models have no cross-shot memory, so the
-*same* 红包 / 戒指 / 钥匙 / 玩具熊 in two consecutive shots renders as
+*same* red envelope / ring / key / teddy bear in two consecutive shots renders as
 two visually different objects. The fix mirrors what we do for cast
 and movie_set — pin a *reference image* of the prop and feed it into
 every r2v shot in which the prop appears.
@@ -25,19 +25,18 @@ If the same prop name appears in both tiers, the episode prop's images
 are *prepended* (so they are picked first as reference_image), and the
 episode prop.md overrides the project one.
 
-State changes (完整的红包 → 起皱的红包 → 撕碎的红包) are SEPARATE
+State changes (intact red envelope → creased red envelope → torn red envelope) are SEPARATE
 folders, not multiple images in one folder. Multiple images in one
 folder are only for showing the *same state* from different angles
 (grid composite, just like cast reference images). Naming convention for
-state-bearing props: ``<name>-<state>``  e.g. ``红包-完整``,
-``红包-起皱``, ``红包-撕碎``.
+state-bearing props: ``<name>-<state>``  e.g. ``red-envelope-intact``,
+``red-envelope-creased``, ``red-envelope-torn``.
 
-Renderer integration: see ``providers/wan.py`` and
-``providers/happyhorse.py`` — when a shot's ``props`` list names one
+Renderer integration: see ``providers/wan_cli.py`` — when a shot's ``props`` list names one
 or more props, the resolved image_url for each is appended to
 ``media[]`` after cast reference images and after the scene's set image.
-HappyHorse r2v caps total media at 9; the provider truncates with a
-warning when the cast + set + props slot count exceeds it.
+Wan 2.7 caps r2v assets at 5 (Wan 3.0 caps images at 10); validation should catch excess media and
+the provider rejects it with a clear error rather than silently dropping assets.
 """
 from __future__ import annotations
 
@@ -99,7 +98,7 @@ class PropFront(BaseModel):
         default=None,
         description=(
             "If this prop folder represents one specific narrative STATE "
-            "of the prop (完整 / 起皱 / 撕碎 / 损坏 / 染血 etc.), name it "
+            "of the prop (intact / creased / torn / damaged / bloodstained, etc.), name it "
             "here. State change = different folder, not different prop."
         ),
     )
@@ -119,7 +118,7 @@ class PropFront(BaseModel):
         default_factory=list,
         description=(
             "Things this prop must NEVER be drawn as — especially OTHER "
-            "states of the same prop (e.g. for 红包-完整: 'crumpled', 'torn')."
+            "states of the same prop (e.g. for red-envelope-intact: 'crumpled', 'torn')."
         ),
     )
     notes: str | None = None
@@ -254,7 +253,7 @@ def _build_grid(images: list[Path], out: Path, *, max_side: int = 1280) -> Path:
     """Compose N (>=2) reference images of the SAME prop state into a grid PNG.
 
     Use this for multi-angle shots of one prop in one state. Different
-    states (完整 / 起皱) belong in DIFFERENT folders; never grid them.
+    states (intact / creased) belong in DIFFERENT folders; never grid them.
     """
     if len(images) < 2:
         raise ValueError("_build_grid expects 2+ images of the same prop.")
@@ -423,15 +422,15 @@ PROP_TEMPLATE = """\
 # Prop card for {name}.
 #
 # ⚠ HARD RULE: ONE FOLDER = ONE NARRATIVE STATE.
-# Different story states of the same prop (完整 → 起皱 → 撕碎 / clean →
+# Different story states of the same prop (intact → creased → torn / clean →
 # bloodstained / closed → open) MUST use *separate* folders — do not
 # stuff multiple state images into one folder.
 # The model averages all images in a folder, producing a muddled in-between.
 #
 # Naming convention: <prop_name>-<state>
-#   props/红包-完整/
-#   props/红包-起皱/
-#   props/红包-撕碎/
+#   props/red-envelope-intact/
+#   props/red-envelope-creased/
+#   props/red-envelope-torn/
 #
 # Multiple images in one folder may only be *different angles of the same
 # state* (front/side/close-up). The CLI auto-composes a grid in that case.
@@ -448,7 +447,7 @@ name: {name}
 category:
 
 # Narrative state, if this folder represents one specific story state.
-# Examples: 完整 | 起皱 | 撕碎 | 染血 | 关闭 | 打开 | 全新 | 旧了
+# Examples: intact | creased | torn | bloodstained | closed | open | new | worn
 # Leave blank if the prop has only one state across the whole episode.
 state:
 
@@ -458,12 +457,12 @@ size_class:
 
 # Single-line concrete description (material / color / shape / key details).
 # Used as the textual fallback for t2v shots that can't take a
-# reference image. Example for 红包-完整:
-#   "Standard Chinese red envelope, red with gold foil, '囍' character, flat uncreased, medium thickness"
+# reference image. Example for red-envelope-intact:
+#   "Red gift envelope with gold foil wedding emblem, flat, uncreased, medium thickness"
 description:
 
 # Optional: things this prop must NEVER be drawn as. Especially other
-# states of the same prop. Example for 红包-完整:
+# states of the same prop. Example for red-envelope-intact:
 #   forbidden: ["crumpled", "torn", "worn edges"]
 forbidden: []
 

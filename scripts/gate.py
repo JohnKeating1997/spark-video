@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +50,7 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
 from lib.env import load_pwd_dotenv  # noqa: E402
+from lib.shot_contract import contract_mismatches  # noqa: E402
 
 load_pwd_dotenv()
 
@@ -82,6 +84,23 @@ def _load_json(p: Path):
         return None
 
 
+def _probe_duration(path: Path) -> float:
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "csv=p=0", str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        return float(proc.stdout.strip()) if proc.returncode == 0 else 0.0
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return 0.0
+
+
 def _shots(sb: dict) -> list[dict]:
     """Pull the flat shot list from a compiled storyboard (top-level or nested)."""
     if isinstance(sb.get("shots"), list):
@@ -91,6 +110,71 @@ def _shots(sb: dict) -> list[dict]:
         if isinstance(sc, dict) and isinstance(sc.get("shots"), list):
             out.extend(s for s in sc["shots"] if isinstance(s, dict))
     return out
+
+
+def _manifest_entries(data: object, plural_key: str) -> dict[str, dict]:
+    """Normalize current flat manifests and older nested manifest shapes."""
+    if not isinstance(data, dict):
+        return {}
+    bucket = data.get(plural_key, data)
+    if isinstance(bucket, dict):
+        return {
+            str(name): entry
+            for name, entry in bucket.items()
+            if isinstance(entry, dict)
+        }
+    if isinstance(bucket, list):
+        return {
+            str(entry.get("name")): entry
+            for entry in bucket
+            if isinstance(entry, dict) and entry.get("name")
+        }
+    return {}
+
+
+def _entry_has_image(entry: dict) -> bool:
+    """A generated local image is required; stale manifest paths do not count."""
+    paths = entry.get("images") or entry.get("images_local") or []
+    if isinstance(paths, str):
+        paths = [paths]
+    if entry.get("image_local"):
+        paths = [entry["image_local"], *paths]
+    return any(
+        isinstance(raw, str) and Path(raw).expanduser().is_file()
+        for raw in paths
+    )
+
+
+def _check_referenced_assets(r: "GateResult", ep_dir: Path, sb: dict) -> None:
+    """Block GATE 1 when storyboard-referenced consistency assets lack images."""
+    referenced: dict[str, set[str]] = {
+        "cast": set(),
+        "sets": set(),
+        "props": set(),
+    }
+    for shot in _shots(sb):
+        referenced["cast"].update(str(x) for x in shot.get("characters", []) if x)
+        referenced["props"].update(str(x) for x in shot.get("props", []) if x)
+        if shot.get("set_id"):
+            referenced["sets"].add(str(shot["set_id"]))
+    for scene in sb.get("scenes", []) or []:
+        if isinstance(scene, dict) and scene.get("set_id"):
+            referenced["sets"].add(str(scene["set_id"]))
+
+    specs = (
+        ("cast", "cast.json", "cast", "characters"),
+        ("sets", "movie_set.json", "sets", "movie-sets"),
+        ("props", "props.json", "props", "props"),
+    )
+    for ref_key, filename, plural_key, label in specs:
+        names = referenced[ref_key]
+        entries = _manifest_entries(_load_json(ep_dir / filename), plural_key)
+        missing = sorted(name for name in names if not _entry_has_image(entries.get(name, {})))
+        r.add(
+            f"referenced {label} have local reference images",
+            not missing,
+            f"missing: {missing}" if missing else f"{len(names)} referenced",
+        )
 
 
 # --------------------------------------------------------------------------- model
@@ -132,6 +216,12 @@ def gate_script(ep_dir: Path) -> GateResult:
     r.add("director done (scene-*.json count == scene-*.md count)",
           bool(md) and len(js) == len(md), f"{len(md)} md / {len(js)} json",
           severity="warn")
+    storyboard = _load_json(ep_dir / "storyboard.json")
+    if isinstance(storyboard, dict):
+        _check_referenced_assets(r, ep_dir, storyboard)
+    else:
+        r.add("reference asset completeness", False,
+              "storyboard.json missing or invalid — compile before GATE 1")
     return r
 
 
@@ -160,6 +250,100 @@ def gate_storyboard(ep_dir: Path) -> GateResult:
     ids = [s.get("id") for s in shots if s.get("id")]
     dupes = sorted({i for i in ids if ids.count(i) > 1})
     r.add("no duplicate shot ids", not dupes, f"dupes: {dupes}" if dupes else "")
+    incomplete_cinematic_contracts = [
+        s.get("id", "<no-id>")
+        for s in shots
+        if not str(s.get("camera_path") or "").strip()
+        or not str(s.get("end_composition") or "").strip()
+    ]
+    r.add(
+        "every shot has camera path + ending composition",
+        not incomplete_cinematic_contracts,
+        (
+            f"offenders: {incomplete_cinematic_contracts[:8]}"
+            if incomplete_cinematic_contracts
+            else ""
+        ),
+    )
+    video_model = sb.get("video_model") or "wan3.0"
+    duration_ceiling = 30 if video_model == "wan3.0" else 15
+    over_limit = [
+        shot.get("id", "<unknown>")
+        for shot in shots
+        if isinstance(shot.get("duration"), (int, float))
+        and shot["duration"] > duration_ceiling
+    ]
+    r.add(
+        f"shot durations fit {video_model} capability",
+        not over_limit,
+        f"over {duration_ceiling}s: {over_limit[:8]}" if over_limit else "",
+    )
+    unjustified_long_takes = [
+        shot.get("id", "<unknown>")
+        for shot in shots
+        if isinstance(shot.get("duration"), (int, float))
+        and shot["duration"] > 15
+        and not str(shot.get("long_take_reason") or "").strip()
+    ]
+    missing_long_timelines = [
+        shot.get("id", "<unknown>")
+        for shot in shots
+        if isinstance(shot.get("duration"), (int, float))
+        and shot["duration"] > 15
+        and not (shot.get("beats") or [])
+    ]
+    r.add(
+        "exceptional long takes are justified",
+        not unjustified_long_takes,
+        (
+            f"missing long_take_reason: {unjustified_long_takes[:8]}"
+            if unjustified_long_takes else ""
+        ),
+    )
+    r.add(
+        "exceptional long takes have a timed action plan",
+        not missing_long_timelines,
+        (
+            f"missing timeline: {missing_long_timelines[:8]}"
+            if missing_long_timelines else ""
+        ),
+    )
+
+    audio = sb.get("audio") if isinstance(sb.get("audio"), dict) else None
+    r.add("episode audio contract exists", audio is not None,
+          "recompile with an explicit --audio-mode" if audio is None else "")
+    if audio:
+        audio_mode = audio.get("mode")
+        bad_audio: list[str] = []
+        if audio_mode == "presenter_voiceover":
+            if not audio.get("presenter") or not audio.get("voice"):
+                bad_audio.append("presenter/voice missing")
+            if audio.get("model_audio_policy") != "strip_all":
+                bad_audio.append("model_audio_policy must be strip_all")
+            for shot in shots:
+                source = shot.get("speech_source")
+                if source != "post_tts":
+                    bad_audio.append(f"{shot.get('id')}: source must be post_tts")
+                if source == "post_tts" and shot.get("speaker") != audio.get("presenter"):
+                    bad_audio.append(f"{shot.get('id')}: wrong speaker")
+                if (
+                    source == "post_tts"
+                    and shot.get("narrator_voice")
+                    and shot.get("narrator_voice") != audio.get("voice")
+                ):
+                    bad_audio.append(f"{shot.get('id')}: voice override")
+        elif audio_mode == "native_dialogue":
+            bad_audio.extend(
+                f"{shot.get('id')}: post_tts"
+                for shot in shots if shot.get("speech_source") == "post_tts"
+            )
+        elif audio_mode != "hybrid":
+            bad_audio.append(f"unknown mode {audio_mode!r}")
+        r.add(
+            "shot audio sources follow the episode contract",
+            not bad_audio,
+            f"violations: {bad_audio[:8]}" if bad_audio else audio_mode,
+        )
     r.add("run `storyboard.py validate` for full schema lint", True,
           "reminder", severity="warn")
 
@@ -176,10 +360,54 @@ def gate_storyboard(ep_dir: Path) -> GateResult:
         r.add("static storyboard reference manifest exists", manifest.exists(),
               str(manifest) if manifest.exists()
               else f"{manifest} missing — run `uv run scripts/storyboard.py animatic`")
+        panel_data = _load_json(manifest) or {}
+        panels = panel_data.get("panels", []) or []
+        panel_shot_ids = {
+            panel.get("shots", [None])[0]
+            for panel in panels
+            if isinstance(panel, dict) and len(panel.get("shots") or []) == 1
+        }
+        missing_panels = [shot_id for shot_id in ids if shot_id not in panel_shot_ids]
+        unselected = []
+        invalid = []
+        for panel in panels:
+            if not isinstance(panel, dict):
+                continue
+            shot_id = str((panel.get("shots") or [panel.get("id", "<unknown>")])[0])
+            selected = panel.get("selected_candidate")
+            candidates = {
+                candidate.get("id"): candidate
+                for candidate in panel.get("candidates", []) or []
+                if isinstance(candidate, dict) and candidate.get("id")
+            }
+            if not selected:
+                unselected.append(shot_id)
+            elif selected not in candidates or not (
+                candidates[selected].get("image_url")
+                or candidates[selected].get("image")
+            ):
+                invalid.append(shot_id)
+        selections_ok = (
+            bool(panels) and not missing_panels and not unselected and not invalid
+        )
+        detail = "all shots selected"
+        if missing_panels:
+            detail = f"missing panels: {missing_panels[:8]}"
+        elif unselected:
+            detail = f"not selected: {unselected[:8]}"
+        elif invalid:
+            detail = f"invalid selection: {invalid[:8]}"
+        r.add("one storyboard candidate selected per shot", selections_ok, detail)
         r.add("static storyboard reference images confirmed", confirmed.exists(),
               str(confirmed) if confirmed.exists()
               else f"{confirmed} missing — review reference images, then run "
               "`uv run scripts/storyboard.py animatic --confirm`")
+        stale_contracts = contract_mismatches(sb, panel_data)
+        r.add(
+            "confirmed storyboard contracts still match storyboard.json",
+            not stale_contracts,
+            f"changed after approval: {stale_contracts[:8]}" if stale_contracts else "",
+        )
     return r
 
 
@@ -206,6 +434,9 @@ def gate_render(ep_dir: Path) -> GateResult:
     missing_clip: list[str] = []
     unscored: list[str] = []          # winner has no numeric review score
     review_errors: list[str] = []     # review ran but verdict ERROR/unknown
+    failed_reviews: list[str] = []    # automatic winner still carries REJECT
+    manual_rejects: list[str] = []    # explicit best-of-N selection
+    blocking_reviews: list[str] = []
     below_thr: list[str] = []         # accepted under threshold (best-of-N)
 
     for shot in shots:
@@ -224,6 +455,12 @@ def gate_render(ep_dir: Path) -> GateResult:
         review = (wa or {}).get("review") or {}
         score = review.get("score")
         verdict = review.get("verdict")
+        blocking_issues = review.get("blocking_issues") or []
+        if blocking_issues:
+            blocking_reviews.append(sid)
+        if verdict == "REJECT":
+            (manual_rejects if entry.get("manual_acceptance")
+             else failed_reviews).append(sid)
         if isinstance(score, (int, float)):
             if score < thr:
                 below_thr.append(f"{sid}({score})")
@@ -237,14 +474,28 @@ def gate_render(ep_dir: Path) -> GateResult:
           else f"{n}/{n}")
     r.add("every winner clip exists on disk", not missing_clip,
           f"missing clips/<id>.mp4: {missing_clip[:8]}" if missing_clip else "")
-    r.add("every winner is scored (review.score present)", not unscored,
+    r.add("every winner is scored or explicitly skipped", not unscored,
           f"UNSCORED (scoring skipped?): {unscored[:8]}" if unscored else "")
     r.add("no winner left with a failed review", not review_errors,
           f"review ERROR: {review_errors[:8]}" if review_errors else "",
           severity="warn")
+    r.add(
+        "no winner carries a REJECT verdict",
+        not failed_reviews,
+        f"REJECT winners: {failed_reviews[:8]}" if failed_reviews else "",
+    )
+    r.add(
+        "no winner carries blocking review issues",
+        not blocking_reviews,
+        f"blocking issues: {blocking_reviews[:8]}" if blocking_reviews else "",
+    )
     r.add("accepted-below-threshold shots (best-of-N)", True,
-          f"{below_thr[:8]} (threshold {thr:g})" if below_thr
-          else f"none under {thr:g}", severity="warn")
+          (
+              f"{below_thr[:8]} (threshold {thr:g}); "
+              f"manually selected REJECT: {manual_rejects[:8]}"
+              if below_thr or manual_rejects
+              else f"none under {thr:g}"
+          ), severity="warn")
 
     esc = _load_json(ep_dir / "needs_director_rewrite.json")
     open_esc = (esc or {}).get("shots") if isinstance(esc, dict) else None
@@ -270,6 +521,48 @@ def gate_final(ep_dir: Path) -> GateResult:
         r.add("viewer.html is newer than final mp4", fresh,
               "viewer is stale — re-run build_viewer.py / stitch.py" if not fresh
               else "", severity="warn")
+    storyboard = _load_json(ep_dir / "storyboard.json") or {}
+    audio = storyboard.get("audio") if isinstance(storyboard.get("audio"), dict) else {}
+    if audio.get("mode") == "presenter_voiceover":
+        audio_manifest_path = final_dir / "audio_manifest.json"
+        audio_manifest = _load_json(audio_manifest_path)
+        r.add(
+            "presenter audio manifest exists",
+            isinstance(audio_manifest, dict),
+            str(audio_manifest_path) if audio_manifest is None else "",
+        )
+        if isinstance(audio_manifest, dict):
+            entries = audio_manifest.get("shots") or []
+            voices = {
+                entry.get("voice")
+                for entry in entries
+                if isinstance(entry, dict)
+                and entry.get("speech_source") == "post_tts"
+                and entry.get("voice")
+            }
+            kept = [
+                entry.get("shot_id") for entry in entries
+                if isinstance(entry, dict) and entry.get("model_audio") == "kept"
+            ]
+            r.add(
+                "presenter voice is uniform and model audio is removed",
+                len(voices) <= 1 and not kept,
+                f"voices={sorted(voices)} kept_model_audio={kept[:8]}",
+            )
+    target = storyboard.get("target_duration_s")
+    if mp4s and isinstance(target, (int, float)) and target > 0:
+        final_mp4 = max(mp4s, key=lambda path: path.stat().st_mtime)
+        duration = _probe_duration(final_mp4)
+        tolerance = max(3.0, float(target) * 0.05)
+        within_target = duration > 0 and abs(duration - float(target)) <= tolerance
+        r.add(
+            "final duration matches target budget",
+            within_target,
+            (
+                f"actual={duration:.2f}s target={float(target):.2f}s "
+                f"tolerance=±{tolerance:.2f}s"
+            ),
+        )
     return r
 
 
